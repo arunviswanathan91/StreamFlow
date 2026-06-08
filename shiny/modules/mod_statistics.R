@@ -737,22 +737,34 @@ statisticsServer <- function(input, output, session, shared) {
       df <- local$stats_df
       req(df)
       if (!requireNamespace("openxlsx", quietly = TRUE)) {
-        write.csv(df, file, row.names = FALSE)
+        showNotification(
+          paste("Excel export failed (openxlsx):", "package not available",
+                "— try the CSV export instead."),
+          type = "error", duration = 6
+        )
         return(invisible(NULL))
       }
-      wb <- openxlsx::createWorkbook()
-      openxlsx::addWorksheet(wb, "Statistics")
-      openxlsx::writeData(wb, "Statistics", df)
-      openxlsx::addStyle(wb, "Statistics",
-        openxlsx::createStyle(
-          fontColour     = "#00B4D8",
-          fgFill         = "#1B2A3B",
-          halign         = "center",
-          textDecoration = "bold"
-        ),
-        rows = 1, cols = seq_len(ncol(df)), gridExpand = TRUE
-      )
-      openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+      tryCatch({
+        wb <- openxlsx::createWorkbook()
+        openxlsx::addWorksheet(wb, "Statistics")
+        openxlsx::writeData(wb, "Statistics", df)
+        openxlsx::addStyle(wb, "Statistics",
+          openxlsx::createStyle(
+            fontColour     = "#00B4D8",
+            fgFill         = "#1B2A3B",
+            halign         = "center",
+            textDecoration = "bold"
+          ),
+          rows = 1, cols = seq_len(ncol(df)), gridExpand = TRUE
+        )
+        openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+      }, error = function(e) {
+        showNotification(
+          paste("Excel export failed (openxlsx):", conditionMessage(e),
+                "— try the CSV export instead."),
+          type = "error", duration = 6
+        )
+      })
     }
   )
 
