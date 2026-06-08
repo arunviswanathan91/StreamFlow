@@ -142,8 +142,11 @@ jobs:
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
           # Physical copy — reliable across drives, no junction fragility
+          # robocopy exit 0=no files, 1=files copied OK, >=8=error
           Write-Host "Copying R installation to R-Portable (this may take a minute)..."
           robocopy "$rHome" "$dest" /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) { Write-Error "robocopy failed: $LASTEXITCODE"; exit 1 }
+          $LASTEXITCODE = 0
 
           # Copy user-installed packages into R-Portable\library
           $userLibRaw = & Rscript.exe --vanilla -e "cat(.libPaths()[1])"
@@ -155,6 +158,8 @@ jobs:
           if ((Test-Path $userLib) -and ($userLib -ne $sysLib)) {
             Write-Host "Merging user packages into R-Portable\library..."
             robocopy "$userLib" "$sysLib" /E /XO /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+            if ($LASTEXITCODE -ge 8) { Write-Error "robocopy merge failed: $LASTEXITCODE"; exit 1 }
+            $LASTEXITCODE = 0
             Write-Host "Package merge complete."
           } else {
             Write-Host "Skipping merge (same path or missing)."
