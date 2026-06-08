@@ -1,0 +1,24 @@
+'use strict';
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Window controls
+  minimize: () => ipcRenderer.send('window-minimize'),
+  maximize: () => ipcRenderer.send('window-maximize'),
+  close: () => ipcRenderer.send('window-close'),
+  isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+
+  // Menu event listeners (Shiny listens for these via JS)
+  onOpenFcsFolder: (callback) => ipcRenderer.on('menu-open-fcs-folder', callback),
+  onSaveSession: (callback) => ipcRenderer.on('menu-save-session', callback),
+  onExportResults: (callback) => ipcRenderer.on('menu-export-results', callback),
+  onToggleSidebar: (callback) => ipcRenderer.on('menu-toggle-sidebar', callback),
+
+  // Remove listeners
+  removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
+
+  // Platform info
+  platform: process.platform,
+  appVersion: process.env.npm_package_version || '1.0.0'
+});
