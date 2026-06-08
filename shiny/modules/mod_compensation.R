@@ -116,8 +116,8 @@ compensationUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 compensationServer <- function(input, output, session, shared) {
-  ns <- session$ns
-  volumes <- c(Home = path.expand("~"), getVolumes()())
+  ns      <- session$ns
+  volumes <- resolve_volumes()
   shinyDirChoose(input, "controls_folder", roots = volumes, session = session)
 
   local <- reactiveValues(
