@@ -119,44 +119,60 @@ jobs:
 
       # ── 6. Wire up R-Portable ────────────────────────────────────────────────
       #    electron-builder expects R-Portable/ at the repo root.
-      #    We create a directory junction: R-Portable → R installation dir,
-      #    then copy user library packages into it so everything is bundled.
+      #    Physical robocopy is used — mklink /J can fail silently when the
+      #    source and destination are on different drives (C:\ vs workspace).
       - name: Create R-Portable structure
         shell: pwsh
         run: |
-          # Find where R was installed by r-lib/actions
+          # Find R home installed by r-lib/actions
           $rScript = (Get-Command Rscript.exe).Source
-          $rHome   = Split-Path (Split-Path $rScript)
-          Write-Host "R home detected: $rHome"
+          Write-Host "Rscript path: $rScript"
 
-          # Create directory junction so electron-builder can bundle all of R
-          $junctionPath = "$env:GITHUB_WORKSPACE\R-Portable"
-          cmd /c "mklink /J `"$junctionPath`" `"$rHome`""
-
-          # Verify core binaries
-          if (-not (Test-Path "$junctionPath\bin\Rscript.exe")) {
-            Write-Error "R-Portable junction failed — Rscript.exe not found"
-            exit 1
+          # r-lib/actions on windows-latest puts R at C:\R\bin\Rscript.exe
+          # or C:\R\bin\x64\Rscript.exe — handle both layouts
+          $rBin  = Split-Path $rScript
+          if ($rBin -match '\\x64$') {
+            $rHome = Split-Path (Split-Path $rBin)
+          } else {
+            $rHome = Split-Path $rBin
           }
+          Write-Host "R home: $rHome"
+
+          $dest = "$env:GITHUB_WORKSPACE\R-Portable"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+          # Physical copy — reliable across drives, no junction fragility
+          Write-Host "Copying R installation to R-Portable (this may take a minute)..."
+          robocopy "$rHome" "$dest" /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
 
           # Copy user-installed packages into R-Portable\library
-          # r-lib/actions puts packages in R_LIBS_USER, separate from R home
           $userLibRaw = & Rscript.exe --vanilla -e "cat(.libPaths()[1])"
           $userLib    = $userLibRaw.Trim()
-          $sysLib     = "$junctionPath\library"
-
+          $sysLib     = "$dest\library"
           Write-Host "User lib:   $userLib"
           Write-Host "System lib: $sysLib"
 
-          if ($userLib -ne $sysLib -and (Test-Path $userLib)) {
+          if ((Test-Path $userLib) -and ($userLib -ne $sysLib)) {
+            Write-Host "Merging user packages into R-Portable\library..."
             robocopy "$userLib" "$sysLib" /E /XO /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-            Write-Host "Package copy complete."
+            Write-Host "Package merge complete."
           } else {
-            Write-Host "Skipping copy (same path or missing)."
+            Write-Host "Skipping merge (same path or missing)."
           }
 
+          # Verify — accept either flat or x64 layout
+          $rscriptOk = (Test-Path "$dest\bin\Rscript.exe") -or
+                       (Test-Path "$dest\bin\x64\Rscript.exe")
+          if (-not $rscriptOk) {
+            Write-Error "R-Portable copy failed — Rscript.exe not found under $dest\bin"
+            Get-ChildItem "$dest\bin" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 20 FullName
+            exit 1
+          }
+          Write-Host "R-Portable verification passed."
+
           $sizeMB = [math]::Round(
-            (Get-ChildItem $junctionPath -Recurse -File |
+            (Get-ChildItem $dest -Recurse -File |
              Measure-Object -Property Length -Sum).Sum / 1MB, 0)
           Write-Host "R-Portable total size: ${sizeMB} MB"
 
