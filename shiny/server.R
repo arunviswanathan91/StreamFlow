@@ -10,7 +10,8 @@ server <- function(input, output, session) {
     trans_flowset    = NULL,   # after cyto_transform()
     gating_set       = NULL,   # GatingSet — central CytoExploreR object
     annotation       = NULL,   # data.frame: experiment details (cyto_details)
-    channels         = NULL,   # character: all channel names (cyto_channels)
+    channels         = NULL,   # character: user-selected analysis channels
+    all_channels     = NULL,   # character: all raw channel names (immutable after load)
     fluor_channels   = NULL,   # character: fluorescent channels only (cyto_fluor_channels)
     markers          = NULL,   # character: marker names (cyto_markers)
     spillover_matrix = NULL,   # matrix: current spillover (cyto_spillover_extract)
@@ -100,5 +101,6 @@ server <- function(input, output, session) {
   session$onSessionEnded(function() {
     message("[StreamFLOW] Session ended, cleaning up.")
     gc()
+    stopApp()
   })
 }

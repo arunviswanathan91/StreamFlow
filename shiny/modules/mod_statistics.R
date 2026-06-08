@@ -180,7 +180,8 @@ statisticsServer <- function(input, output, session, shared) {
   all_nodes <- reactive({
     gs <- shared$gating_set
     if (is.null(gs)) return("root")
-    tryCatch(cyto_nodes(gs), error = function(e) "root")
+    nodes <- tryCatch(CytoExploreR::cyto_nodes(gs), error = function(e) character())
+    unique(c("root", nodes))
   })
 
   all_channels <- reactive({

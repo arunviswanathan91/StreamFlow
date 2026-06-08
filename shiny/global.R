@@ -25,6 +25,33 @@ suppressPackageStartupMessages({
   if (!is.null(a) && length(a) > 0 && !all(is.na(a))) a else b
 }
 
+# Robust file-browser volume detection.
+# getVolumes()() silently returns nothing in Electron's packaged R-Portable
+# environment. On Windows we fall back to scanning drive letters A-Z.
+resolve_volumes <- function() {
+  tryCatch({
+    vols <- c(Home = path.expand("~"), getVolumes()())
+    if (.Platform$OS.type == "windows" && length(vols) <= 1) {
+      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
+      drives <- drives[file.exists(drives)]
+      c(Home    = path.expand("~"),
+        Desktop = if (file.exists(file.path(path.expand("~"), "Desktop")))
+                    file.path(path.expand("~"), "Desktop") else NULL,
+        drives)
+    } else {
+      vols
+    }
+  }, error = function(e) {
+    if (.Platform$OS.type == "windows") {
+      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
+      drives <- drives[file.exists(drives)]
+      c(Home = path.expand("~"), drives)
+    } else {
+      c(Home = path.expand("~"))
+    }
+  })
+}
+
 # Parse command-line arguments to get the port number
 args <- commandArgs(trailingOnly = TRUE)
 shiny_port <- 3838L
@@ -94,15 +121,17 @@ plotly_dark_layout <- function(p, title = NULL, xlab = NULL, ylab = NULL) {
 
 # Helper: safe CytoExploreR call wrapper
 safe_cyto <- function(expr, error_msg = "Operation failed") {
-  tryCatch(
-    expr,
-    error = function(e) {
-      message(sprintf("[StreamFLOW ERROR] %s: %s", error_msg, conditionMessage(e)))
-      NULL
-    },
+  withCallingHandlers(
+    tryCatch(
+      expr,
+      error = function(e) {
+        message(sprintf("[StreamFLOW ERROR] %s: %s", error_msg, conditionMessage(e)))
+        NULL
+      }
+    ),
     warning = function(w) {
       message(sprintf("[StreamFLOW WARN] %s: %s", error_msg, conditionMessage(w)))
-      withCallingHandlers(expr, warning = function(w) invokeRestart("muffleWarning"))
+      invokeRestart("muffleWarning")
     }
   )
 }

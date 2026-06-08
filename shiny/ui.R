@@ -382,25 +382,26 @@ ui <- tagList(
       }
       .info-box-icon { background: #243447 !important; }
 
-      /* ── shinyFiles dark-theme modal ── */
-      .modal-content {
+      /* ── Dark-theme modals (shinyFiles dialogs + all app modals) ── */
+      /* Scoped to #shiny-modal to avoid affecting third-party widget modals */
+      #shiny-modal .modal-content {
         background-color: #1B2A3B !important;
         border: 1px solid #2E4460 !important;
         color: #E0E0E0 !important;
       }
-      .modal-header {
+      #shiny-modal .modal-header {
         background-color: #243447 !important;
         border-bottom: 1px solid #2E4460 !important;
         color: #00B4D8 !important;
       }
-      .modal-header .modal-title { color: #00B4D8 !important; font-weight: 600; }
-      .modal-header .close { color: #E0E0E0 !important; opacity: 0.8; }
-      .modal-header .close:hover { color: #00B4D8 !important; opacity: 1; }
-      .modal-body {
+      #shiny-modal .modal-header .modal-title { color: #00B4D8 !important; font-weight: 600; }
+      #shiny-modal .modal-header .close { color: #E0E0E0 !important; opacity: 0.8; }
+      #shiny-modal .modal-header .close:hover { color: #00B4D8 !important; opacity: 1; }
+      #shiny-modal .modal-body {
         background-color: #1B2A3B !important;
         color: #E0E0E0 !important;
       }
-      .modal-footer {
+      #shiny-modal .modal-footer {
         background-color: #243447 !important;
         border-top: 1px solid #2E4460 !important;
       }

@@ -54,10 +54,7 @@ gatingUI <- function(id) {
           textInput(ns("gate_name"),   "Gate Name",  value = "Population1"),
           selectInput(ns("gate_type"), "Gate Type",
                       choices  = c("Polygon"   = "polygon",
-                                   "Rectangle" = "rectangle",
-                                   "Ellipse"   = "ellipse",
-                                   "Threshold" = "threshold",
-                                   "Quadrant"  = "quadrant"),
+                                   "Rectangle" = "rectangle"),
                       selected = "polygon"),
           uiOutput(ns("axis_selectors_ui")),
           selectInput(ns("gate_sample"), "Gate On Sample", choices = character()),
@@ -143,8 +140,8 @@ gatingUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 gatingServer <- function(input, output, session, shared) {
-  ns <- session$ns
-  volumes <- c(Home = path.expand("~"), getVolumes()())
+  ns      <- session$ns
+  volumes <- resolve_volumes()
   shinyFileChoose(input, "template_file", roots = volumes, session = session,
                   filetypes = c("csv"))
 
@@ -174,11 +171,16 @@ gatingServer <- function(input, output, session, shared) {
   })
 
   # ── Sample selector ────────────────────────────────────────────────────────
+  # Use sampleNames() as the internal value and cyto_names() as display labels
+  # to avoid mismatch when indexing fs[[samp]].
   observe({
     fs <- best_fs()
     req(fs)
-    sn <- tryCatch(CytoExploreR::cyto_names(fs), error = function(e) sampleNames(fs))
-    updateSelectInput(session, "gate_sample", choices = sn, selected = sn[1])
+    ids    <- sampleNames(fs)
+    labels <- tryCatch(CytoExploreR::cyto_names(fs), error = function(e) ids)
+    if (length(labels) != length(ids)) labels <- ids
+    choices <- setNames(ids, labels)
+    updateSelectInput(session, "gate_sample", choices = choices, selected = ids[1])
   })
 
   # ── Parent population choices ──────────────────────────────────────────────
@@ -247,7 +249,7 @@ gatingServer <- function(input, output, session, shared) {
 
       ff   <- fs[[samp]]
       expr <- as.data.frame(exprs(ff))
-      n    <- min(nrow(expr), 5000)
+      n    <- min(nrow(expr), 15000)
       idx  <- sample(nrow(expr), n)
       df   <- expr[idx, , drop = FALSE]
 
@@ -260,7 +262,7 @@ gatingServer <- function(input, output, session, shared) {
 
       p <- plot_ly(
         data = df, x = ~get(x_ch), y = ~get(y_ch),
-        type = "scatter", mode = "markers",
+        type = "scattergl", mode = "markers",
         marker = list(
           size    = 3, opacity = 0.6,
           color   = dens,
@@ -276,7 +278,9 @@ gatingServer <- function(input, output, session, shared) {
         plotly_dark_layout(
           title = sprintf("%s — %s vs %s", samp, x_ch, y_ch),
           xlab  = x_ch, ylab = y_ch
-        )
+        ) %>%
+        config(doubleClick = FALSE, displayModeBar = TRUE,
+               modeBarButtonsToRemove = list("lasso2d"))
 
       # ── Draw saved gates ─────────────────────────────────────────────────
       if (isTRUE(input$show_gates) && length(local$gates) > 0) {

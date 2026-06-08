@@ -100,32 +100,10 @@ setupUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 setupServer <- function(input, output, session, shared) {
-  ns <- session$ns
+  ns      <- session$ns
+  volumes <- resolve_volumes()
 
-  # Robust volume detection — getVolumes()() can silently return nothing
-  # inside Electron's packaged R-Portable environment on Windows.
-  volumes <- tryCatch({
-    vols <- c(Home = path.expand("~"), getVolumes()())
-    # If only Home came back, scan drive letters manually
-    if (length(vols) <= 1) {
-      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
-      drives <- drives[file.exists(drives)]
-      c(Home = path.expand("~"),
-        Desktop = file.path(path.expand("~"), "Desktop"),
-        drives)
-    } else {
-      vols
-    }
-  }, error = function(e) {
-    drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
-    drives <- drives[file.exists(drives)]
-    c(Home = path.expand("~"),
-      Desktop = file.path(path.expand("~"), "Desktop"),
-      drives)
-  })
-
-  shinyDirChoose(input,  "fcs_folder", roots = volumes, session = session,
-                 allowDirCreate = FALSE)
+  shinyDirChoose(input,  "fcs_folder", roots = volumes, session = session)
   shinyFileChoose(input, "load_annot", roots = volumes, session = session,
                   filetypes = c("csv"))
 
@@ -292,7 +270,8 @@ setupServer <- function(input, output, session, shared) {
                     markers else all_ch,
         stringsAsFactors = FALSE
       )
-      shared$markers <- if (!is.null(markers)) markers else all_ch
+      shared$markers      <- if (!is.null(markers)) markers else all_ch
+      shared$all_channels <- all_ch
 
       incProgress(0.1, detail = "Done!")
       showNotification(
@@ -531,11 +510,10 @@ setupServer <- function(input, output, session, shared) {
 
 # Helpers
 info_tile <- function(label, val, color, full = FALSE) {
-  style <- if (full) {
+  style <- if (full)
+    "padding:8px;border-radius:4px;background:#243447;grid-column:1/-1;"
+  else
     "padding:8px;border-radius:4px;background:#243447;"
-  } else {
-    "padding:8px;border-radius:4px;background:#243447;"
-  }
   tags$div(style = style,
     tags$div(style = "font-size:10px;color:#5A7A8A;", label),
     tags$div(style = sprintf("font-size:18px;color:%s;font-weight:700;", color), val)
