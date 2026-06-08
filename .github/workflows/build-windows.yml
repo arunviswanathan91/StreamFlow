@@ -33,13 +33,22 @@ jobs:
         uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
-          cache: 'npm'
+          # No 'cache: npm' here — repo has no package-lock.json yet.
+          # node_modules is cached manually in the next step.
+
+      # Cache node_modules keyed to package.json (no lock file needed)
+      - name: Cache node_modules
+        id: cache-node
+        uses: actions/cache@v4.2.3
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package.json') }}
 
       # ── 3. R 4.4 ────────────────────────────────────────────────────────────
-      - name: Setup R 4.4.3
+      - name: Setup R 4.4
         uses: r-lib/actions/setup-r@v2
         with:
-          r-version: '4.4.3'
+          r-version: 'release'    # always uses latest stable R (4.4.x)
           use-public-rspm: true   # Posit Package Manager — pre-built binaries (fast)
 
       # ── 4. Cache R packages ─────────────────────────────────────────────────
@@ -50,9 +59,9 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: ${{ env.R_LIBS_USER }}
-          key: r-libs-${{ runner.os }}-4.4.3-${{ hashFiles('scripts/install_packages.R') }}
+          key: r-libs-${{ runner.os }}-release-${{ hashFiles('scripts/install_packages.R') }}
           restore-keys: |
-            r-libs-${{ runner.os }}-4.4.3-
+            r-libs-${{ runner.os }}-release-
 
       # ── 5. Install R packages ───────────────────────────────────────────────
       #    Skipped when cache hit.  Uses Posit binary repo for Bioc packages.
@@ -151,6 +160,7 @@ jobs:
 
       # ── 7. npm install ───────────────────────────────────────────────────────
       - name: Install npm dependencies
+        if: steps.cache-node.outputs.cache-hit != 'true'
         run: npm install
 
       # ── 8. Build electron app ────────────────────────────────────────────────
