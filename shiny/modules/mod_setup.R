@@ -101,9 +101,31 @@ setupUI <- function(id) {
 # ── Server ────────────────────────────────────────────────────────────────────
 setupServer <- function(input, output, session, shared) {
   ns <- session$ns
-  volumes <- c(Home = path.expand("~"), getVolumes()())
 
-  shinyDirChoose(input,  "fcs_folder", roots = volumes, session = session)
+  # Robust volume detection — getVolumes()() can silently return nothing
+  # inside Electron's packaged R-Portable environment on Windows.
+  volumes <- tryCatch({
+    vols <- c(Home = path.expand("~"), getVolumes()())
+    # If only Home came back, scan drive letters manually
+    if (length(vols) <= 1) {
+      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
+      drives <- drives[file.exists(drives)]
+      c(Home = path.expand("~"),
+        Desktop = file.path(path.expand("~"), "Desktop"),
+        drives)
+    } else {
+      vols
+    }
+  }, error = function(e) {
+    drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
+    drives <- drives[file.exists(drives)]
+    c(Home = path.expand("~"),
+      Desktop = file.path(path.expand("~"), "Desktop"),
+      drives)
+  })
+
+  shinyDirChoose(input,  "fcs_folder", roots = volumes, session = session,
+                 allowDirCreate = FALSE)
   shinyFileChoose(input, "load_annot", roots = volumes, session = session,
                   filetypes = c("csv"))
 
