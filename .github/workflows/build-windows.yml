@@ -101,6 +101,10 @@ jobs:
           ), ask = FALSE)
 
           # ── CytoExploreR suite from GitHub (via pak) ──────────────────────────
+          # superheat was removed from CRAN — install from GitHub first,
+          # otherwise pak can't resolve CytoExploreR's dependency tree.
+          pak::pak("rlbarter/superheat", ask = FALSE)
+
           pak::pak(c(
             "DillonHammill/openCyto",
             "DillonHammill/DataEditR",
