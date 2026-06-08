@@ -2,12 +2,10 @@
 # Installs all R dependencies into R Portable.
 # Run via: Rscript scripts/install_packages.R
 
-log_file <- file.path(dirname(sys.frame(1)$ofile %||% "."), "install_log.txt")
-
-# Fallback if run as a script
-if (!exists("log_file") || is.null(log_file)) {
-  log_file <- "install_log.txt"
-}
+log_file <- tryCatch(
+  file.path(dirname(normalizePath(sys.frame(1)$ofile)), "install_log.txt"),
+  error = function(e) "install_log.txt"
+)
 log_file <- normalizePath(log_file, mustWork = FALSE)
 
 CRAN_REPO <- "https://cran.r-project.org"
