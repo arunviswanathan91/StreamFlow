@@ -5,17 +5,20 @@ server <- function(input, output, session) {
   # ── Shared reactive state passed to all modules ──────────────────────────
   shared <- reactiveValues(
     fcs_folder       = NULL,
-    raw_flowset      = NULL,   # original loaded flowSet
-    comp_flowset     = NULL,   # after compensation
-    trans_flowset    = NULL,   # after transformation
-    gating_set       = NULL,   # GatingSet object
-    annotation       = NULL,   # data.frame: sample annotation
-    channels         = NULL,   # character: selected channel names
-    spillover_matrix = NULL,   # matrix: current spillover
-    transforms       = list(), # list of transform objects per channel
+    raw_flowset      = NULL,   # original loaded flowSet (ncdfFlowSet from cyto_load)
+    comp_flowset     = NULL,   # after cyto_compensate()
+    trans_flowset    = NULL,   # after cyto_transform()
+    gating_set       = NULL,   # GatingSet — central CytoExploreR object
+    annotation       = NULL,   # data.frame: experiment details (cyto_details)
+    channels         = NULL,   # character: all channel names (cyto_channels)
+    fluor_channels   = NULL,   # character: fluorescent channels only (cyto_fluor_channels)
+    markers          = NULL,   # character: marker names (cyto_markers)
+    spillover_matrix = NULL,   # matrix: current spillover (cyto_spillover_extract)
+    transforms       = list(), # cyto_transformer_* objects per channel
     gate_list        = list(), # named list of gate objects
+    gating_template  = NULL,   # path to gatingTemplate CSV
     dim_result       = NULL,   # dimensionality reduction output
-    stats_result     = NULL,   # statistics table
+    stats_result     = NULL,   # statistics table (cyto_stats_compute result)
     experiment_name  = "Untitled Experiment",
     n_samples        = 0L,
     status           = "idle"  # "idle" | "busy" | "error"

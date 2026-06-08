@@ -13,11 +13,17 @@ suppressPackageStartupMessages({
   library(dplyr)
   library(tidyr)
   library(colourpicker)
+  library(rhandsontable)
   library(flowCore)
   library(flowWorkspace)
   library(openCyto)
   library(CytoExploreR)
 })
+
+# Null-coalescing operator — available to all modules
+`%||%` <- function(a, b) {
+  if (!is.null(a) && length(a) > 0 && !all(is.na(a))) a else b
+}
 
 # Parse command-line arguments to get the port number
 args <- commandArgs(trailingOnly = TRUE)
