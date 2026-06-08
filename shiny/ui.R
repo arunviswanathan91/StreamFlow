@@ -381,6 +381,52 @@ ui <- tagList(
         box-shadow: none !important;
       }
       .info-box-icon { background: #243447 !important; }
+
+      /* ── shinyFiles dark-theme modal ── */
+      .modal-content {
+        background-color: #1B2A3B !important;
+        border: 1px solid #2E4460 !important;
+        color: #E0E0E0 !important;
+      }
+      .modal-header {
+        background-color: #243447 !important;
+        border-bottom: 1px solid #2E4460 !important;
+        color: #00B4D8 !important;
+      }
+      .modal-header .modal-title { color: #00B4D8 !important; font-weight: 600; }
+      .modal-header .close { color: #E0E0E0 !important; opacity: 0.8; }
+      .modal-header .close:hover { color: #00B4D8 !important; opacity: 1; }
+      .modal-body {
+        background-color: #1B2A3B !important;
+        color: #E0E0E0 !important;
+      }
+      .modal-footer {
+        background-color: #243447 !important;
+        border-top: 1px solid #2E4460 !important;
+      }
+      /* shinyFiles directory/file lists */
+      .shinyFiles-list, .sF-filebrowser {
+        background-color: #0D1B2A !important;
+        color: #E0E0E0 !important;
+        border: 1px solid #2E4460 !important;
+      }
+      .shinyFiles-list li, .sF-breadcrumbs { color: #E0E0E0 !important; }
+      .shinyFiles-list li:hover, .sF-breadcrumbs a:hover {
+        background-color: #243447 !important;
+        color: #00B4D8 !important;
+      }
+      .shinyFiles-list li.active, .shinyFiles-list li.selected {
+        background-color: #00B4D8 !important;
+        color: #0D1B2A !important;
+      }
+      /* toolbar inside shinyFiles */
+      .sF-toolbar { background-color: #243447 !important; border-bottom: 1px solid #2E4460 !important; }
+      .sF-toolbar .btn { background-color: #1B2A3B !important; color: #E0E0E0 !important; border-color: #2E4460 !important; }
+      .sF-toolbar .btn:hover { background-color: #00B4D8 !important; color: #0D1B2A !important; }
+      /* path input */
+      .sF-pathInput { background-color: #0D1B2A !important; color: #E0E0E0 !important; border-color: #2E4460 !important; }
+      /* modal backdrop dimming */
+      .modal-backdrop { background-color: #000 !important; opacity: 0.7 !important; }
     "))
   ),
 
