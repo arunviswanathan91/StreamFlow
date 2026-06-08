@@ -69,6 +69,8 @@ jobs:
 
       # ── 5. Install R packages ───────────────────────────────────────────────
       #    Skipped when cache hit.  Uses Posit binary repo for Bioc packages.
+      #    Uses pak (already bundled with r-lib/actions) for GitHub installs —
+      #    devtools::install_github() is deprecated since devtools 2.5.0.
       - name: Install R packages
         if: steps.cache-r.outputs.cache-hit != 'true'
         shell: Rscript {0}
@@ -81,41 +83,39 @@ jobs:
             Ncpus = parallel::detectCores()
           )
 
-          # ── BiocManager ──────────────────────────────────────────────────
+          # ── pak (modern installer, replaces devtools::install_github) ────────
+          if (!requireNamespace("pak", quietly = TRUE))
+            install.packages("pak", ask = FALSE)
+
+          # ── BiocManager ──────────────────────────────────────────────────────
           if (!requireNamespace("BiocManager", quietly = TRUE))
             install.packages("BiocManager", ask = FALSE)
 
-          # ── Bioconductor core ─────────────────────────────────────────────
-          BiocManager::install(
-            c("cytolib", "flowCore", "flowWorkspace",
-              "flowWorkspaceData", "openCyto"),
-            ask = FALSE, update = FALSE
-          )
+          # ── Bioconductor core (via pak for speed) ─────────────────────────────
+          pak::pak(c(
+            "bioc::cytolib",
+            "bioc::flowCore",
+            "bioc::flowWorkspace",
+            "bioc::flowWorkspaceData",
+            "bioc::openCyto"
+          ), ask = FALSE)
 
-          # ── devtools ──────────────────────────────────────────────────────
-          if (!requireNamespace("devtools", quietly = TRUE))
-            install.packages("devtools", ask = FALSE)
-
-          # ── CytoExploreR suite from GitHub ────────────────────────────────
-          for (repo in c(
+          # ── CytoExploreR suite from GitHub (via pak) ──────────────────────────
+          pak::pak(c(
             "DillonHammill/openCyto",
             "DillonHammill/DataEditR",
             "DillonHammill/HeatmapR",
             "DillonHammill/CytoExploreRData",
             "DillonHammill/CytoExploreR"
-          )) {
-            message("Installing: ", repo)
-            devtools::install_github(repo, force = FALSE, upgrade = "never")
-          }
+          ), ask = FALSE)
 
-          # ── CRAN packages ─────────────────────────────────────────────────
-          install.packages(
-            c("shiny", "shinydashboard", "shinyFiles", "shinyjs",
-              "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
-              "tidyr", "colourpicker", "rhandsontable", "openxlsx",
-              "umap", "Rtsne", "MASS", "fields"),
-            ask = FALSE, update = FALSE
-          )
+          # ── CRAN packages (via pak for parallel install) ───────────────────────
+          pak::pak(c(
+            "shiny", "shinydashboard", "shinyFiles", "shinyjs",
+            "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
+            "tidyr", "colourpicker", "rhandsontable", "openxlsx",
+            "umap", "Rtsne", "MASS", "fields"
+          ), ask = FALSE)
 
           message("All packages installed. Library: ", .libPaths()[1])
 
