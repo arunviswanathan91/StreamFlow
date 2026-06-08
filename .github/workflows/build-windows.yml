@@ -1,10 +1,14 @@
 name: Build Windows Installer
 
 # Triggers:
-#   - Push a tag like v1.0.0  → builds + creates a GitHub Release with the .exe
-#   - Manual trigger         → builds + uploads as a workflow artifact
+#   - Push to the dev branch     → builds + uploads artifact
+#   - Push a tag like v1.0.0     → builds + creates a GitHub Release
+#   - Manual trigger             → builds + uploads artifact
 on:
   push:
+    branches:
+      - 'claude/magical-fermat-6iUmi'
+      - 'main'
     tags:
       - 'v*.*.*'
   workflow_dispatch:
