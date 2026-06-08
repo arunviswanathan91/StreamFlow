@@ -1,0 +1,206 @@
+name: Build Windows Installer
+
+# Triggers:
+#   - Push a tag like v1.0.0  → builds + creates a GitHub Release with the .exe
+#   - Manual trigger         → builds + uploads as a workflow artifact
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub Release after build'
+        type: boolean
+        default: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 150    # R package install can take 60-90 min
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Node.js ──────────────────────────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 3. R 4.3 ────────────────────────────────────────────────────────────
+      - name: Setup R 4.3.3
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3.3'
+          use-public-rspm: true   # Posit Public Package Manager — pre-built binaries (fast!)
+
+      # ── 4. Cache R packages ─────────────────────────────────────────────────
+      #    Key includes OS + R version + hash of install script.
+      #    On cache hit the install step is skipped entirely (~60 min saved).
+      - name: Cache R packages
+        id: cache-r
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: r-libs-${{ runner.os }}-4.3.3-${{ hashFiles('scripts/install_packages.R') }}
+          restore-keys: |
+            r-libs-${{ runner.os }}-4.3.3-
+
+      # ── 5. Install R packages ───────────────────────────────────────────────
+      #    Skipped when cache hit.  Uses Posit binary repo for Bioc packages.
+      - name: Install R packages
+        if: steps.cache-r.outputs.cache-hit != 'true'
+        shell: Rscript {0}
+        run: |
+          options(
+            repos = c(
+              CRAN   = "https://packagemanager.posit.co/cran/latest",
+              BioCsoft = "https://packagemanager.posit.co/bioconductor/latest/bioc"
+            ),
+            Ncpus = parallel::detectCores()
+          )
+
+          # ── BiocManager ──────────────────────────────────────────────────
+          if (!requireNamespace("BiocManager", quietly = TRUE))
+            install.packages("BiocManager", ask = FALSE)
+
+          # ── Bioconductor core ─────────────────────────────────────────────
+          BiocManager::install(
+            c("cytolib", "flowCore", "flowWorkspace",
+              "flowWorkspaceData", "openCyto"),
+            ask = FALSE, update = FALSE
+          )
+
+          # ── devtools ──────────────────────────────────────────────────────
+          if (!requireNamespace("devtools", quietly = TRUE))
+            install.packages("devtools", ask = FALSE)
+
+          # ── CytoExploreR suite from GitHub ────────────────────────────────
+          for (repo in c(
+            "DillonHammill/openCyto",
+            "DillonHammill/DataEditR",
+            "DillonHammill/HeatmapR",
+            "DillonHammill/CytoExploreRData",
+            "DillonHammill/CytoExploreR"
+          )) {
+            message("Installing: ", repo)
+            devtools::install_github(repo, force = FALSE, upgrade = "never")
+          }
+
+          # ── CRAN packages ─────────────────────────────────────────────────
+          install.packages(
+            c("shiny", "shinydashboard", "shinyFiles", "shinyjs",
+              "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
+              "tidyr", "colourpicker", "rhandsontable", "openxlsx",
+              "umap", "Rtsne", "MASS", "fields"),
+            ask = FALSE, update = FALSE
+          )
+
+          message("All packages installed. Library: ", .libPaths()[1])
+
+      # ── 6. Wire up R-Portable ────────────────────────────────────────────────
+      #    electron-builder expects R-Portable/ at the repo root.
+      #    We create a directory junction: R-Portable → R installation dir,
+      #    then copy user library packages into it so everything is bundled.
+      - name: Create R-Portable structure
+        shell: pwsh
+        run: |
+          # Find where R was installed
+          $rScript = (Get-Command Rscript.exe).Source
+          $rHome   = Split-Path (Split-Path $rScript)
+          Write-Host "R home detected: $rHome"
+
+          # Junction R-Portable → R home (so electron-builder bundles it)
+          $junctionPath = "$env:GITHUB_WORKSPACE\R-Portable"
+          cmd /c "mklink /J `"$junctionPath`" `"$rHome`""
+
+          # Verify core binaries exist
+          if (-not (Test-Path "$junctionPath\bin\Rscript.exe")) {
+            Write-Error "R-Portable junction failed — Rscript.exe not found"
+            exit 1
+          }
+
+          # Copy user-installed packages into R-Portable\library
+          # (r-lib/actions installs to R_LIBS_USER which is separate from R home)
+          $userLibRaw = & Rscript.exe --vanilla -e "cat(.libPaths()[1])"
+          $userLib = $userLibRaw.Trim()
+          $sysLib  = "$junctionPath\library"
+
+          Write-Host "Copying user packages from: $userLib"
+          Write-Host "Into system library:        $sysLib"
+
+          if ($userLib -ne $sysLib -and (Test-Path $userLib)) {
+            robocopy "$userLib" "$sysLib" /E /XO /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+            Write-Host "Package copy complete."
+          } else {
+            Write-Host "User lib is same as system lib or missing — skipping copy."
+          }
+
+          # Report size
+          $sizeMB = [math]::Round((Get-ChildItem $junctionPath -Recurse -File |
+                    Measure-Object -Property Length -Sum).Sum / 1MB, 0)
+          Write-Host "R-Portable total size: ${sizeMB} MB"
+
+      # ── 7. npm install ───────────────────────────────────────────────────────
+      - name: Install npm dependencies
+        run: npm install
+
+      # ── 8. Build electron app ────────────────────────────────────────────────
+      - name: Build StreamFLOW installer
+        run: npm run build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 9. Show output ───────────────────────────────────────────────────────
+      - name: List build output
+        shell: pwsh
+        run: |
+          if (Test-Path "dist") {
+            Get-ChildItem dist -File | Select-Object Name,
+              @{N='Size (MB)';E={[math]::Round($_.Length/1MB,1)}}
+          } else {
+            Write-Error "dist/ folder not found — build may have failed"
+            exit 1
+          }
+
+      # ── 10. Upload as workflow artifact ─────────────────────────────────────
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamFLOW-Windows-Installer
+          path: dist/*.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 11. Create GitHub Release (on tag push or manual opt-in) ────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: StreamFLOW ${{ github.ref_name }}
+          body: |
+            ## StreamFLOW ${{ github.ref_name }}
+
+            ### Installation
+            1. Download `StreamFLOW-Setup-*.exe` below
+            2. Run the installer (no R or Node.js required — everything is bundled)
+            3. Launch StreamFLOW from the desktop shortcut
+
+            ### What's included
+            - Electron desktop shell
+            - R 4.3.3 (portable, bundled)
+            - CytoExploreR + all flow cytometry packages
+
+            ### System requirements
+            - Windows 10/11 (64-bit)
+            - ~1 GB disk space
+          files: dist/*.exe
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
