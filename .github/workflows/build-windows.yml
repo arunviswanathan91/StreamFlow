@@ -52,8 +52,8 @@ jobs:
       - name: Setup R 4.4
         uses: r-lib/actions/setup-r@v2
         with:
-          r-version: 'release'    # always uses latest stable R (4.4.x)
-          use-public-rspm: true   # Posit Package Manager — pre-built binaries (fast)
+          r-version: '4.4'        # pin to 4.4 — R 4.5+ removed C APIs used by old Bioc packages
+          use-public-rspm: true
 
       # ── 4. Cache R packages ─────────────────────────────────────────────────
       #    Key includes OS + R version + hash of install script.
@@ -63,9 +63,9 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: ${{ env.R_LIBS_USER }}
-          key: r-libs-${{ runner.os }}-release-${{ hashFiles('scripts/install_packages.R') }}
+          key: r-libs-${{ runner.os }}-4.4-${{ hashFiles('scripts/install_packages.R') }}
           restore-keys: |
-            r-libs-${{ runner.os }}-release-
+            r-libs-${{ runner.os }}-4.4-
 
       # ── 5. Install R packages ───────────────────────────────────────────────
       #    Skipped when cache hit.  Uses Posit binary repo for Bioc packages.
@@ -75,23 +75,18 @@ jobs:
         if: steps.cache-r.outputs.cache-hit != 'true'
         shell: Rscript {0}
         run: |
-          options(
-            repos = c(
-              CRAN     = "https://packagemanager.posit.co/cran/latest",
-              BioCsoft = "https://packagemanager.posit.co/bioconductor/latest/bioc"
-            ),
-            Ncpus = parallel::detectCores()
-          )
+          # Use Bioconductor 3.19 which matches R 4.4
+          options(Ncpus = parallel::detectCores())
 
-          # ── pak (modern installer, replaces devtools::install_github) ────────
+          # ── pak ───────────────────────────────────────────────────────────────
           if (!requireNamespace("pak", quietly = TRUE))
-            install.packages("pak", ask = FALSE)
+            install.packages("pak",
+              repos = "https://packagemanager.posit.co/cran/latest")
 
-          # ── BiocManager ──────────────────────────────────────────────────────
-          if (!requireNamespace("BiocManager", quietly = TRUE))
-            install.packages("BiocManager", ask = FALSE)
-
-          # ── Bioconductor core (via pak for speed) ─────────────────────────────
+          # ── Bioconductor 3.19 core (binary builds for R 4.4) ─────────────────
+          # DillonHammill/openCyto is an OLD fork (v2.13) that fails to compile
+          # on R 4.4+ due to removed C API (ENVFLAGS/SET_ENVFLAGS). Use the
+          # official Bioconductor 3.19 openCyto v2.24 instead.
           pak::pak(c(
             "bioc::cytolib",
             "bioc::flowCore",
@@ -100,20 +95,19 @@ jobs:
             "bioc::openCyto"
           ), ask = FALSE)
 
-          # ── CytoExploreR suite from GitHub (via pak) ──────────────────────────
-          # superheat was removed from CRAN — install from GitHub first,
-          # otherwise pak can't resolve CytoExploreR's dependency tree.
+          # ── superheat (removed from CRAN, required by CytoExploreR) ──────────
           pak::pak("rlbarter/superheat", ask = FALSE)
 
+          # ── CytoExploreR suite from GitHub ────────────────────────────────────
+          # openCyto omitted here — Bioc v2.24 already installed above is used.
           pak::pak(c(
-            "DillonHammill/openCyto",
             "DillonHammill/DataEditR",
             "DillonHammill/HeatmapR",
             "DillonHammill/CytoExploreRData",
             "DillonHammill/CytoExploreR"
           ), ask = FALSE)
 
-          # ── CRAN packages (via pak for parallel install) ───────────────────────
+          # ── CRAN packages ─────────────────────────────────────────────────────
           pak::pak(c(
             "shiny", "shinydashboard", "shinyFiles", "shinyjs",
             "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
