@@ -2,6 +2,15 @@
 
 server <- function(input, output, session) {
 
+  # ── Pop-out window branch ────────────────────────────────────────────────
+  # Electron opens focused single-sample windows via ?view=popout. These run as
+  # separate Shiny sessions in the same R process and read shared app_state.
+  qs <- shiny::parseQueryString(session$request$QUERY_STRING %||% "")
+  if (identical(qs$view, "popout")) {
+    popout_server(input, output, session, qs)
+    return(invisible(NULL))
+  }
+
   # ── Shared reactive state passed to all modules ──────────────────────────
   shared <- reactiveValues(
     fcs_folder       = NULL,
@@ -24,6 +33,13 @@ server <- function(input, output, session) {
     n_samples        = 0L,
     status           = "idle"  # "idle" | "busy" | "error"
   )
+
+  # ── Keep cross-session app_state synced for pop-out windows ──────────────
+  observe({
+    app_state$flowset    <- shared$trans_flowset %||% shared$comp_flowset %||% shared$raw_flowset
+    app_state$gating_set <- shared$gating_set
+    app_state$channels   <- shared$channels
+  })
 
   # ── Module servers ────────────────────────────────────────────────────────
   callModule(setupServer,          "setup",          shared = shared)
