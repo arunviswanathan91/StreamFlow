@@ -48,6 +48,7 @@ server <- function(input, output, session) {
   callModule(gatingServer,         "gating",         shared = shared)
   callModule(visualizationServer,  "visualization",  shared = shared)
   callModule(dimreduxServer,       "dimredux",       shared = shared)
+  callModule(clusteringServer,     "clustering",     shared = shared)
   callModule(statisticsServer,     "statistics",     shared = shared)
   callModule(workspaceServer,      "workspace",      shared = shared)
 
