@@ -27,8 +27,12 @@
                     "Rectangle" = "rectangle",
                     "Ellipse"   = "ellipse",
                     "Quadrant"  = "quadrant",
+                    "Boundary"  = "boundary",
+                    "Threshold" = "threshold",
                     "Boolean"   = "boolean")
 .GATE_TYPES_1D <- c("Interval"  = "interval",
+                    "Boundary"  = "boundary",
+                    "Threshold" = "threshold",
                     "Boolean"   = "boolean")
 
 # ── UI ──────────────────────────────────────────────────────────────────────────
@@ -407,7 +411,8 @@ gatingServer <- function(input, output, session, shared) {
         ymax <- max(d$y)
         for (gname in names(local$gates)) {
           g <- local$gates[[gname]]
-          if (identical(g$type, "interval") && identical(g$x_ch, x_ch)) {
+          if (!identical(g$x_ch, x_ch)) next
+          if (identical(g$type, "interval")) {
             shapes <- c(shapes, list(list(
               type = "rect", x0 = g$geom$lo, x1 = g$geom$hi,
               y0 = 0, y1 = ymax, yref = "y",
@@ -419,6 +424,20 @@ gatingServer <- function(input, output, session, shared) {
               text = gname, showarrow = FALSE,
               font = list(color = "#2EC4B6", size = 11)
             )))
+          } else if (g$type %in% c("boundary", "threshold")) {
+            xmin <- min(d$x); xmax <- max(d$x)
+            rx0 <- if (g$type == "boundary") xmin else g$geom$x0
+            rx1 <- if (g$type == "boundary") g$geom$x0 else xmax
+            shapes <- c(shapes, list(
+              list(type = "rect", x0 = rx0, x1 = rx1, y0 = 0, y1 = ymax, yref = "y",
+                   line = list(width = 0),
+                   fillcolor = "rgba(46,196,182,0.10)", layer = "below"),
+              list(type = "line", x0 = g$geom$x0, x1 = g$geom$x0,
+                   y0 = 0, y1 = ymax, yref = "y",
+                   line = list(color = "#2EC4B6", width = 1.5, dash = "dash"))))
+            anns <- c(anns, list(list(
+              x = g$geom$x0, y = ymax * 0.95, text = gname, showarrow = FALSE,
+              font = list(color = "#2EC4B6", size = 11))))
           }
         }
         if (length(shapes) > 0)
@@ -469,6 +488,20 @@ gatingServer <- function(input, output, session, shared) {
         anns <- c(anns, list(list(
           x = g$geom$x0, y = g$geom$y0, text = gname, showarrow = FALSE,
           font = list(color = "#F39C12", size = 11))))
+      } else if (g$type %in% c("boundary", "threshold")) {
+        # vertical limit on X; horizontal limit on Y when this is the Y channel
+        shapes <- c(shapes, list(list(
+          type = "line", x0 = g$geom$x0, x1 = g$geom$x0,
+          yref = "paper", y0 = 0, y1 = 1,
+          line = list(color = "#2EC4B6", width = 1.5, dash = "dash"))))
+        if (!is.null(g$y_ch) && g$y_ch == y_ch && !is.null(g$geom$y0))
+          shapes <- c(shapes, list(list(
+            type = "line", y0 = g$geom$y0, y1 = g$geom$y0,
+            xref = "paper", x0 = 0, x1 = 1,
+            line = list(color = "#2EC4B6", width = 1.5, dash = "dash"))))
+        anns <- c(anns, list(list(
+          x = g$geom$x0, y = g$geom$y0 %||% 0, text = gname, showarrow = FALSE,
+          font = list(color = "#2EC4B6", size = 11))))
       } else if (!is.null(g$geom$x) && (is.null(g$y_ch) || g$y_ch == y_ch)) {
         # polygon / rectangle (stored as vertices)
         vx <- c(g$geom$x, g$geom$x[1]); vy <- c(g$geom$y, g$geom$y[1])
@@ -492,10 +525,14 @@ gatingServer <- function(input, output, session, shared) {
     if (!local$drawing) return()
     ev <- event_data("plotly_click", source = ns("gating_plot"))
     req(ev)
-    if (input$gate_type == "quadrant") {
+    gt <- input$gate_type
+    if (gt == "quadrant") {
       local$drawing <- FALSE
       commit_quadrant(ev$x, ev$y)
-    } else if (input$gate_type == "polygon") {
+    } else if (gt %in% c("boundary", "threshold")) {
+      local$drawing <- FALSE
+      commit_corner(gt, ev$x, ev$y)
+    } else if (gt == "polygon") {
       local$vertices <- c(local$vertices, list(list(x = ev$x, y = ev$y)))
     }
   })
@@ -536,6 +573,8 @@ gatingServer <- function(input, output, session, shared) {
       ellipse   = "Brush a box — the ellipse is inscribed inside it.",
       quadrant  = "Click once to place the quadrant crosshair.",
       interval  = "Brush an X-range on the histogram.",
+      boundary  = "Click once — events below the point (lower-left) are gated.",
+      threshold = "Click once — events above the point (upper-right) are gated.",
       boolean   = "Boolean gates are built from existing populations — use Save Gate.",
       "Draw on the plot.")
     showNotification(msg, type = "message", duration = 6)
@@ -604,6 +643,29 @@ gatingServer <- function(input, output, session, shared) {
     req(gate)
     store_gate(gname, "ellipse", gate, x_ch, y_ch,
                list(cx = cx, cy = cy, rx = rx, ry = ry))
+  }
+
+  # ── Commit: boundary / threshold (one click, Inf-bounded rectangle) ────────
+  # boundary  = events BELOW the point (-Inf .. x0, -Inf .. y0)
+  # threshold = events ABOVE the point (x0 .. Inf, y0 .. Inf)
+  commit_corner <- function(kind, x0, y0) {
+    one_d <- isTRUE(input$plot_dim == "1d")
+    x_ch  <- input$x_ch
+    y_ch  <- if (one_d) NULL else input$y_ch
+    gname <- unique_name(input$gate_name)
+    xr <- if (kind == "boundary") c(-Inf, x0) else c(x0, Inf)
+    gate <- tryCatch({
+      if (one_d) {
+        args <- setNames(list(xr), x_ch)
+      } else {
+        yr <- if (kind == "boundary") c(-Inf, y0) else c(y0, Inf)
+        args <- setNames(list(xr, yr), c(x_ch, y_ch))
+      }
+      do.call(flowCore::rectangleGate, c(args, list(filterId = gname)))
+    }, error = function(e) { gate_err(e); NULL })
+    req(gate)
+    store_gate(gname, kind, gate, x_ch, y_ch,
+               list(x0 = x0, y0 = if (one_d) NULL else y0))
   }
 
   # ── Commit: quadrant (4 populations from one crosshair) ────────────────────
