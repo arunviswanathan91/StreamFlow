@@ -92,7 +92,8 @@ jobs:
             "bioc::flowCore",
             "bioc::flowWorkspace",
             "bioc::flowWorkspaceData",
-            "bioc::openCyto"
+            "bioc::openCyto",
+            "bioc::FlowSOM"
           ), ask = FALSE)
 
           # ── superheat (removed from CRAN, required by CytoExploreR) ──────────

@@ -53,7 +53,7 @@ if (!ok) failures <- c(failures, "BiocManager")
 
 # ── Step 2: Bioconductor core packages ────────────────────────────────────
 bioc_pkgs <- c("cytolib", "flowCore", "flowWorkspace",
-               "flowWorkspaceData", "openCyto")
+               "flowWorkspaceData", "openCyto", "FlowSOM")
 ok <- safe_install(
   BiocManager::install(
     bioc_pkgs,

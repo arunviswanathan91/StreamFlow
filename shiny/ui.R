@@ -7,6 +7,7 @@ source("modules/mod_gating.R")
 source("modules/mod_visualization.R")
 source("modules/mod_dimredux.R")
 source("modules/mod_statistics.R")
+source("modules/mod_clustering.R")
 source("modules/mod_popout.R")
 source("modules/mod_workspace.R")
 
@@ -488,6 +489,7 @@ full_ui <- tagList(
         menuItem("Gating",         tabName = "gating",         icon = icon("draw-polygon")),
         menuItem("Visualization",  tabName = "visualization",  icon = icon("chart-area")),
         menuItem("Dim. Reduction", tabName = "dimredux",       icon = icon("project-diagram")),
+        menuItem("Clustering",     tabName = "clustering",     icon = icon("braille")),
         menuItem("Statistics",     tabName = "statistics",     icon = icon("table"))
       ),
       tags$hr(style = "border-color: #0A1F30; margin: 8px 0;"),
@@ -505,6 +507,7 @@ full_ui <- tagList(
         tabItem(tabName = "gating",         gatingUI("gating")),
         tabItem(tabName = "visualization",  visualizationUI("visualization")),
         tabItem(tabName = "dimredux",       dimreduxUI("dimredux")),
+        tabItem(tabName = "clustering",     clusteringUI("clustering")),
         tabItem(tabName = "statistics",     statisticsUI("statistics"))
       )
     )
