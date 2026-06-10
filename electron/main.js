@@ -15,16 +15,22 @@ if (!fs.existsSync(logDir)) {
 }
 log.transports.file.resolvePathFn = () => path.join(logDir, 'streamflow.log');
 log.transports.file.level = 'debug';
-log.transports.console.level = 'debug';
+
+// Determine if running from packaged build or development
+const isPackaged = app.isPackaged;
+
+// In a packaged app there is no terminal attached to process.stdout/stderr, so
+// electron-log's console transport throws EPIPE on every write. The crash handler
+// then logs that error to the console, which throws EPIPE again — a self-feeding
+// loop that floods the log. Disable the console transport when packaged; keep it
+// in development where a real console exists.
+log.transports.console.level = isPackaged ? false : 'debug';
 
 let mainWindow = null;
 let splashWindow = null;
 let rProcess = null;
 let shinyPort = null;
 let pollInterval = null;
-
-// Determine if running from packaged build or development
-const isPackaged = app.isPackaged;
 const resourcesPath = isPackaged
   ? process.resourcesPath
   : path.join(__dirname, '..');
@@ -387,6 +393,22 @@ app.on('activate', () => {
   }
 });
 
+// The console transport is disabled when packaged (see logger config above), so
+// log.error here can only reach the file transport and cannot re-enter the EPIPE
+// loop. The try/catch is a final guard so the crash handler itself never throws.
+function logFatal(label, err) {
+  const detail = err && err.stack ? err.stack : String(err);
+  try {
+    log.error(`${label}: ${detail}`);
+  } catch (_) {
+    // Never let the crash handler itself throw.
+  }
+}
+
 process.on('uncaughtException', (err) => {
-  log.error(`Uncaught exception: ${err.message}\n${err.stack}`);
+  logFatal('Uncaught exception', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logFatal('Unhandled promise rejection', reason);
 });
