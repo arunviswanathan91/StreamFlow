@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close: () => ipcRenderer.send('window-close'),
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
 
+  // Open a focused single-sample pop-out window (FlowJo-style)
+  openSampleWindow: (opts) => ipcRenderer.send('open-sample-window', opts),
+
   // Menu event listeners (Shiny listens for these via JS)
   onOpenFcsFolder: (callback) => ipcRenderer.on('menu-open-fcs-folder', callback),
   onSaveSession: (callback) => ipcRenderer.on('menu-save-session', callback),

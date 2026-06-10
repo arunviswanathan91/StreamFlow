@@ -31,6 +31,7 @@ let splashWindow = null;
 let rProcess = null;
 let shinyPort = null;
 let pollInterval = null;
+const popoutWindows = new Set();
 const resourcesPath = isPackaged
   ? process.resourcesPath
   : path.join(__dirname, '..');
@@ -92,11 +93,57 @@ function createMainWindow() {
   });
 
   mainWindow.on('closed', () => {
+    closeAllPopouts();
     killRProcess();
     mainWindow = null;
   });
 
   buildAppMenu();
+}
+
+// FlowJo-style pop-out: a focused single-sample window backed by the same Shiny
+// server (?view=popout). Closing one does not stop R — only the main window does.
+function openSampleWindow(opts) {
+  if (!shinyPort) {
+    log.warn('Pop-out requested before Shiny port was ready');
+    return;
+  }
+  const o = opts || {};
+  const params = new URLSearchParams({
+    view: 'popout',
+    sample: o.sample || '',
+    x: o.x || '',
+    y: o.y || '',
+    dim: o.dim || '2d'
+  });
+
+  const win = new BrowserWindow({
+    width: 940,
+    height: 760,
+    backgroundColor: '#0D1B2A',
+    icon: path.join(__dirname, '..', 'build', 'icon.ico'),
+    title: `StreamFLOW — ${o.sample || 'Sample'}`,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js'),
+      webSecurity: true
+    }
+  });
+
+  win.setMenuBarVisibility(false);
+  win.loadURL(`http://127.0.0.1:${shinyPort}/?${params.toString()}`);
+  popoutWindows.add(win);
+  win.on('closed', () => popoutWindows.delete(win));
+  log.info(`Opened pop-out window for sample: ${o.sample}`);
+}
+
+function closeAllPopouts() {
+  for (const win of popoutWindows) {
+    if (!win.isDestroyed()) win.close();
+  }
+  popoutWindows.clear();
 }
 
 function buildAppMenu() {
@@ -355,6 +402,10 @@ ipcMain.on('window-close', () => {
 
 ipcMain.handle('window-is-maximized', () => {
   return mainWindow ? mainWindow.isMaximized() : false;
+});
+
+ipcMain.on('open-sample-window', (_evt, opts) => {
+  openSampleWindow(opts);
 });
 
 // App lifecycle

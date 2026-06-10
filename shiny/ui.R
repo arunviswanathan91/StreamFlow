@@ -7,8 +7,9 @@ source("modules/mod_gating.R")
 source("modules/mod_visualization.R")
 source("modules/mod_dimredux.R")
 source("modules/mod_statistics.R")
+source("modules/mod_popout.R")
 
-ui <- tagList(
+full_ui <- tagList(
   useShinyjs(),
   tags$head(
     tags$link(
@@ -550,5 +551,23 @@ ui <- tagList(
         $('body').toggleClass('sidebar-collapse');
       });
     }
+
+    // FlowJo-style pop-out: the R server asks the renderer to open a focused
+    // single-sample window through Electron.
+    if (window.Shiny) {
+      Shiny.addCustomMessageHandler('streamflow_open_popout', function(msg) {
+        if (window.electronAPI && window.electronAPI.openSampleWindow) {
+          window.electronAPI.openSampleWindow(msg);
+        }
+      });
+    }
   "))
 )
+
+# Serve the focused pop-out layout when Electron requests ?view=popout, otherwise
+# the full dashboard. ui is a request-aware function so it can branch per session.
+ui <- function(req) {
+  qs <- shiny::parseQueryString(req$QUERY_STRING %||% "")
+  if (identical(qs$view, "popout")) return(popout_ui(qs))
+  full_ui
+}

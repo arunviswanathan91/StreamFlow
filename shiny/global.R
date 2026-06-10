@@ -25,6 +25,15 @@ suppressPackageStartupMessages({
   if (!is.null(a) && length(a) > 0 && !all(is.na(a))) a else b
 }
 
+# Cross-session app state. Every browser connection is a separate Shiny session,
+# but they all run inside this one R process, so a shared environment lets a
+# "pop-out" window (opened by Electron with ?view=popout) read the flowSet and
+# GatingSet that the main session loaded. The main session keeps this synced.
+app_state <- new.env(parent = emptyenv())
+app_state$flowset    <- NULL
+app_state$gating_set <- NULL
+app_state$channels   <- NULL
+
 # Robust file-browser volume detection.
 # getVolumes()() silently returns nothing in Electron's packaged R-Portable
 # environment. On Windows we fall back to scanning drive letters A-Z.

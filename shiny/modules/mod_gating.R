@@ -131,9 +131,17 @@ gatingUI <- function(id) {
       column(8,
         box(
           title = "Gating Plot", width = NULL, solidHeader = TRUE,
+          tags$div(style = "display:flex;justify-content:flex-end;margin-bottom:4px;",
+            actionButton(ns("popout_btn"),
+                         tagList(icon("external-link-alt"), " Pop-out Sample"),
+                         class = "btn btn-default btn-sm")),
           uiOutput(ns("drawing_instructions_ui")),
           withSpinner(plotlyOutput(ns("gating_plot"), height = "430px"), color = "#00B4D8"),
-          uiOutput(ns("vertex_status_ui"))
+          uiOutput(ns("vertex_status_ui")),
+          tags$script(HTML(sprintf(
+            "$(document).on('contextmenu', '#%s', function(e){ e.preventDefault();
+               if(window.Shiny) Shiny.setInputValue('%s', Date.now(), {priority:'event'}); });",
+            ns("gating_plot"), ns("popout_request"))))
         ),
 
         fluidRow(
@@ -904,6 +912,23 @@ gatingServer <- function(input, output, session, shared) {
     compute_gate_stats()
     showNotification("Gate tree refreshed.", type = "message", duration = 2)
   })
+
+  # ── Pop-out current sample into its own window (button or right-click) ──────
+  trigger_popout <- function() {
+    fs <- best_fs()
+    if (is.null(fs)) {
+      showNotification("Load samples before opening a pop-out window.",
+                       type = "warning", duration = 3)
+      return()
+    }
+    session$sendCustomMessage("streamflow_open_popout", list(
+      sample = input$gate_sample %||% "",
+      x      = input$x_ch %||% "",
+      y      = input$y_ch %||% "",
+      dim    = input$plot_dim %||% "2d"))
+  }
+  observeEvent(input$popout_btn,     trigger_popout())
+  observeEvent(input$popout_request, trigger_popout())
 
   observeEvent(input$stat_channels, { compute_gate_stats() }, ignoreInit = TRUE)
 
