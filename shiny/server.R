@@ -49,6 +49,7 @@ server <- function(input, output, session) {
   callModule(visualizationServer,  "visualization",  shared = shared)
   callModule(dimreduxServer,       "dimredux",       shared = shared)
   callModule(statisticsServer,     "statistics",     shared = shared)
+  callModule(workspaceServer,      "workspace",      shared = shared)
 
   # ── Status bar outputs ────────────────────────────────────────────────────
   output$status_experiment <- renderUI({
@@ -106,7 +107,9 @@ server <- function(input, output, session) {
       updateTabItems(session, "sidebar_menu", "setup")
       shinyjs::click("setup-load_fcs_btn")
     } else if (evt == "save_session") {
-      showNotification("Session save not yet implemented in this version.", type = "message", duration = 3)
+      shinyjs::click("workspace-save_ws")
+    } else if (evt == "open_workspace") {
+      shinyjs::click("workspace-open_ws")
     } else if (evt == "export_results") {
       updateTabItems(session, "sidebar_menu", "statistics")
       showNotification("Navigate to Statistics to export results.", type = "message", duration = 3)

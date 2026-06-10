@@ -18,6 +18,8 @@ suppressPackageStartupMessages({
   library(flowWorkspace)
   library(openCyto)
   library(CytoExploreR)
+  library(zip)
+  library(jsonlite)
 })
 
 # Null-coalescing operator — available to all modules
