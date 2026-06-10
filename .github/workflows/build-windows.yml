@@ -112,7 +112,7 @@ jobs:
             "shiny", "shinydashboard", "shinyFiles", "shinyjs",
             "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
             "tidyr", "colourpicker", "rhandsontable", "openxlsx",
-            "umap", "Rtsne", "MASS", "fields"
+            "umap", "Rtsne", "MASS", "fields", "zip", "jsonlite"
           ), ask = FALSE)
 
           message("All packages installed. Library: ", .libPaths()[1])

@@ -161,11 +161,20 @@ function buildAppMenu() {
           }
         },
         {
-          label: 'Save Session',
+          label: 'Save Workspace…',
           accelerator: 'CmdOrCtrl+S',
           click: () => {
             if (mainWindow) {
               mainWindow.webContents.send('menu-save-session');
+            }
+          }
+        },
+        {
+          label: 'Open Workspace…',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: () => {
+            if (mainWindow) {
+              mainWindow.webContents.send('menu-open-workspace');
             }
           }
         },

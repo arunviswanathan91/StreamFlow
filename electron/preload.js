@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Menu event listeners (Shiny listens for these via JS)
   onOpenFcsFolder: (callback) => ipcRenderer.on('menu-open-fcs-folder', callback),
   onSaveSession: (callback) => ipcRenderer.on('menu-save-session', callback),
+  onOpenWorkspace: (callback) => ipcRenderer.on('menu-open-workspace', callback),
   onExportResults: (callback) => ipcRenderer.on('menu-export-results', callback),
   onToggleSidebar: (callback) => ipcRenderer.on('menu-toggle-sidebar', callback),
 

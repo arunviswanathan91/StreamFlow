@@ -8,6 +8,7 @@ source("modules/mod_visualization.R")
 source("modules/mod_dimredux.R")
 source("modules/mod_statistics.R")
 source("modules/mod_popout.R")
+source("modules/mod_workspace.R")
 
 full_ui <- tagList(
   useShinyjs(),
@@ -509,6 +510,9 @@ full_ui <- tagList(
     )
   ),
 
+  # Hidden workspace save/load triggers (driven by the File menu)
+  workspaceUI("workspace"),
+
   # Status bar
   tags$div(
     id = "status-bar",
@@ -547,6 +551,11 @@ full_ui <- tagList(
       window.electronAPI.onExportResults(function() {
         Shiny.setInputValue('electron_menu_event', 'export_results', {priority: 'event'});
       });
+      if (window.electronAPI.onOpenWorkspace) {
+        window.electronAPI.onOpenWorkspace(function() {
+          Shiny.setInputValue('electron_menu_event', 'open_workspace', {priority: 'event'});
+        });
+      }
       window.electronAPI.onToggleSidebar(function() {
         $('body').toggleClass('sidebar-collapse');
       });

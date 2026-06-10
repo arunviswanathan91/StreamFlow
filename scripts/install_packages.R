@@ -114,7 +114,8 @@ if (!ok) failures <- c(failures, "CytoExploreR")
 cran_pkgs <- c(
   "shiny", "shinydashboard", "shinyFiles", "shinyjs", "shinycssloaders",
   "DT", "plotly", "ggplot2", "dplyr", "tidyr", "colourpicker",
-  "rhandsontable", "openxlsx", "umap", "Rtsne", "MASS", "fields"
+  "rhandsontable", "openxlsx", "umap", "Rtsne", "MASS", "fields",
+  "zip", "jsonlite"
 )
 
 ok <- safe_install(
