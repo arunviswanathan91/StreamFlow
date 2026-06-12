@@ -8,16 +8,14 @@
 #   meta.rds            – channels, markers, spillover, transformers, gate geometry,
 #                         annotation, experiment name (everything in `shared`)
 
-# ── Hidden trigger buttons (driven by the File menu via shinyjs) ───────────────
+# ── Workspace module placeholder ───────────────────────────────────────────────
+# Save/open are driven entirely by the File menu, which calls the native-dialog
+# JS helpers (streamflowSaveFile / streamflowPickFile) and posts the chosen path
+# to input$save_ws_picked / input$open_ws_picked. No visible controls are needed,
+# but the namespaced container keeps the module mounted in the layout.
 workspaceUI <- function(id) {
   ns <- NS(id)
-  tags$div(
-    style = "display:none;",
-    shinySaveButton(ns("save_ws"), "Save Workspace", "Save StreamFLOW Workspace",
-                    filename = "experiment", filetype = list(sfw = "sfw")),
-    shinyFilesButton(ns("open_ws"), "Open Workspace", "Open StreamFLOW Workspace",
-                     multiple = FALSE)
-  )
+  tags$div(id = ns("workspace_anchor"), style = "display:none;")
 }
 
 # ── Serialization helpers ──────────────────────────────────────────────────────
@@ -66,6 +64,24 @@ save_workspace <- function(shared, file) {
 load_workspace <- function(shared, file) {
   tmp <- file.path(tempdir(), paste0("sfw_load_", as.integer(Sys.time())))
   dir.create(tmp, recursive = TRUE, showWarnings = FALSE)
+  # On a *failed* load, remove the half-extracted temp dir so repeated bad opens
+  # don't accumulate in tempdir(). On success we deliberately keep it: load_gs()
+  # returns a disk-backed GatingSet whose HDF5 files live under gs_dir, so the
+  # directory must outlive this function for the loaded session to stay valid.
+  loaded_ok <- FALSE
+  on.exit(if (!loaded_ok) unlink(tmp, recursive = TRUE), add = TRUE)
+
+  # Zip-slip guard: a malicious .sfw must not be able to write outside tmp via
+  # "../" or absolute paths in its archive entries.
+  entries <- utils::unzip(file, list = TRUE)$Name
+  unsafe  <- entries[
+    grepl("(^|[\\\\/])\\.\\.([\\\\/]|$)", entries) |  # any ".." path component
+    grepl("^([A-Za-z]:|[\\\\/])", entries)            # absolute (C:\ or /...)
+  ]
+  if (length(unsafe) > 0)
+    stop("Refusing to open workspace — archive contains unsafe paths: ",
+         paste(unsafe, collapse = ", "))
+
   utils::unzip(file, exdir = tmp)
 
   meta_path <- file.path(tmp, "meta.rds")
@@ -106,17 +122,21 @@ load_workspace <- function(shared, file) {
 
 # ── Server ─────────────────────────────────────────────────────────────────────
 workspaceServer <- function(input, output, session, shared) {
-  volumes <- resolve_volumes()
-  shinyFileSave(input, "save_ws", roots = volumes, session = session,
-                filetypes = c("sfw"))
-  shinyFileChoose(input, "open_ws", roots = volumes, session = session,
-                  filetypes = c("sfw"))
 
-  observeEvent(input$save_ws, {
-    req(is.list(input$save_ws))
-    fi <- parseSavePath(volumes, input$save_ws)
-    req(nrow(fi) > 0)
-    path <- as.character(fi$datapath)
+  observeEvent(input$save_ws_picked, {
+    sel <- input$save_ws_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("Saving a workspace requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    path <- sel$path
+    if (is.null(path) || !nzchar(path)) return()
+    if (!dir.exists(dirname(path))) {
+      showNotification("The selected save location is not a valid folder.",
+                       type = "error", duration = 5)
+      return()
+    }
     shared$status <- "busy"
     withProgress(message = "Saving workspace…", value = 0.4, {
       ok <- tryCatch(save_workspace(shared, path), error = function(e) {
@@ -129,11 +149,20 @@ workspaceServer <- function(input, output, session, shared) {
     shared$status <- "idle"
   })
 
-  observeEvent(input$open_ws, {
-    req(is.list(input$open_ws))
-    fi <- parseFilePaths(volumes, input$open_ws)
-    req(nrow(fi) > 0)
-    path <- as.character(fi$datapath)
+  observeEvent(input$open_ws_picked, {
+    sel <- input$open_ws_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("Opening a workspace requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    path <- sel$path
+    if (is.null(path) || !nzchar(path)) return()
+    if (!file.exists(path)) {
+      showNotification(paste("Workspace file not found:", path),
+                       type = "error", duration = 5)
+      return()
+    }
     shared$status <- "busy"
     withProgress(message = "Loading workspace…", value = 0.4, {
       ok <- tryCatch({ load_workspace(shared, path); TRUE }, error = function(e) {

@@ -121,11 +121,13 @@ gatingUI <- function(id) {
                            class = "btn btn-default btn-block btn-sm")
             ),
             column(6,
-              shinyFilesButton(ns("template_file"),
-                               label    = tagList(icon("folder-open"), " Browse"),
-                               title    = "Select gatingTemplate CSV",
-                               multiple = FALSE,
-                               class    = "btn btn-default btn-block btn-sm")
+              actionButton(ns("template_file_btn"),
+                           label   = tagList(icon("folder-open"), " Browse"),
+                           class   = "btn btn-default btn-block btn-sm",
+                           onclick = sprintf(
+                             "streamflowPickFile('%s', 'Select gatingTemplate CSV', [{name: 'CSV files', extensions: ['csv']}])",
+                             ns("template_file_picked")
+                           ))
             )
           )
         )
@@ -176,10 +178,7 @@ gatingUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 gatingServer <- function(input, output, session, shared) {
-  ns      <- session$ns
-  volumes <- resolve_volumes()
-  shinyFileChoose(input, "template_file", roots = volumes, session = session,
-                  filetypes = c("csv"))
+  ns <- session$ns
 
   local <- reactiveValues(
     vertices      = list(),
@@ -849,11 +848,20 @@ gatingServer <- function(input, output, session, shared) {
                      type = "message", duration = 5)
   })
 
-  observeEvent(input$template_file, {
-    req(is.list(input$template_file))
-    fi <- parseFilePaths(volumes, input$template_file)
-    req(nrow(fi) > 0)
-    template_path <- as.character(fi$datapath)
+  observeEvent(input$template_file_picked, {
+    sel <- input$template_file_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("File selection requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    template_path <- sel$path
+    if (is.null(template_path) || !nzchar(template_path)) return()
+    if (!file.exists(template_path) || tolower(tools::file_ext(template_path)) != "csv") {
+      showNotification("Please select an existing .csv gatingTemplate file.",
+                       type = "error", duration = 5)
+      return()
+    }
     fs <- best_fs(); req(fs)
     shared$status <- "busy"
 

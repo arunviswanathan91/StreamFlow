@@ -385,7 +385,7 @@ full_ui <- tagList(
       }
       .info-box-icon { background: #243447 !important; }
 
-      /* ── Dark-theme modals (shinyFiles dialogs + all app modals) ── */
+      /* ── Dark-theme modals (all app modals) ── */
       /* Scoped to #shiny-modal to avoid affecting third-party widget modals */
       #shiny-modal .modal-content {
         background-color: #1B2A3B !important;
@@ -408,27 +408,6 @@ full_ui <- tagList(
         background-color: #243447 !important;
         border-top: 1px solid #2E4460 !important;
       }
-      /* shinyFiles directory/file lists */
-      .shinyFiles-list, .sF-filebrowser {
-        background-color: #0D1B2A !important;
-        color: #E0E0E0 !important;
-        border: 1px solid #2E4460 !important;
-      }
-      .shinyFiles-list li, .sF-breadcrumbs { color: #E0E0E0 !important; }
-      .shinyFiles-list li:hover, .sF-breadcrumbs a:hover {
-        background-color: #243447 !important;
-        color: #00B4D8 !important;
-      }
-      .shinyFiles-list li.active, .shinyFiles-list li.selected {
-        background-color: #00B4D8 !important;
-        color: #0D1B2A !important;
-      }
-      /* toolbar inside shinyFiles */
-      .sF-toolbar { background-color: #243447 !important; border-bottom: 1px solid #2E4460 !important; }
-      .sF-toolbar .btn { background-color: #1B2A3B !important; color: #E0E0E0 !important; border-color: #2E4460 !important; }
-      .sF-toolbar .btn:hover { background-color: #00B4D8 !important; color: #0D1B2A !important; }
-      /* path input */
-      .sF-pathInput { background-color: #0D1B2A !important; color: #E0E0E0 !important; border-color: #2E4460 !important; }
       /* modal backdrop dimming */
       .modal-backdrop { background-color: #000 !important; opacity: 0.7 !important; }
     "))
@@ -573,6 +552,47 @@ full_ui <- tagList(
         }
       });
     }
+
+    // ── Native file/folder pickers ──────────────────────────────────────────
+    // Replace the broken shinyFiles modal with Electron's native dialogs. Each
+    // helper posts the chosen path back to a Shiny input as {path, ts}. When the
+    // app runs standalone in a browser/RStudio (no Electron), it sets
+    // {path: null, error: 'no_electron'} so the server can warn instead of crash.
+    window.streamflowPickFolder = function(inputId, title) {
+      if (!window.electronAPI || !window.electronAPI.selectFolder) {
+        Shiny.setInputValue(inputId, {path: null, error: 'no_electron'}, {priority: 'event'});
+        return;
+      }
+      window.electronAPI.selectFolder({ title: title }).then(function(result) {
+        if (!result.canceled && result.path) {
+          Shiny.setInputValue(inputId, {path: result.path, ts: Date.now()}, {priority: 'event'});
+        }
+      });
+    };
+
+    window.streamflowPickFile = function(inputId, title, filters) {
+      if (!window.electronAPI || !window.electronAPI.selectFile) {
+        Shiny.setInputValue(inputId, {path: null, error: 'no_electron'}, {priority: 'event'});
+        return;
+      }
+      window.electronAPI.selectFile({ title: title, filters: filters }).then(function(result) {
+        if (!result.canceled && result.path) {
+          Shiny.setInputValue(inputId, {path: result.path, ts: Date.now()}, {priority: 'event'});
+        }
+      });
+    };
+
+    window.streamflowSaveFile = function(inputId, title, filters, defaultPath) {
+      if (!window.electronAPI || !window.electronAPI.saveFile) {
+        Shiny.setInputValue(inputId, {path: null, error: 'no_electron'}, {priority: 'event'});
+        return;
+      }
+      window.electronAPI.saveFile({ title: title, filters: filters, defaultPath: defaultPath }).then(function(result) {
+        if (!result.canceled && result.path) {
+          Shiny.setInputValue(inputId, {path: result.path, ts: Date.now()}, {priority: 'event'});
+        }
+      });
+    };
   "))
 )
 

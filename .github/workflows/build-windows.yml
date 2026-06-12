@@ -110,7 +110,7 @@ jobs:
 
           # ── CRAN packages ─────────────────────────────────────────────────────
           pak::pak(c(
-            "shiny", "shinydashboard", "shinyFiles", "shinyjs",
+            "shiny", "shinydashboard", "shinyjs",
             "shinycssloaders", "DT", "plotly", "ggplot2", "dplyr",
             "tidyr", "colourpicker", "rhandsontable", "openxlsx",
             "umap", "Rtsne", "MASS", "fields", "zip", "jsonlite"
@@ -192,6 +192,13 @@ jobs:
         run: npm run build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 8b. Verify packaged payload ─────────────────────────────────────────
+      #    Runs BEFORE artifact upload / release so a broken installer (missing
+      #    R-Portable, CytoExploreR, shiny, or app files) can never be published.
+      - name: Verify packaged payload
+        shell: pwsh
+        run: ./build/verify-package.ps1 -UnpackedDir "dist/win-unpacked"
 
       # ── 9. Show output ───────────────────────────────────────────────────────
       - name: List build output

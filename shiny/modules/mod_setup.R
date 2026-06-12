@@ -14,12 +14,14 @@ setupUI <- function(id) {
         box(
           title = "Data Import", width = NULL, solidHeader = TRUE,
           tags$div(style = "margin-bottom: 10px;",
-            shinyDirButton(
-              ns("fcs_folder"),
-              label = "Browse FCS Folder",
-              title = "Select folder containing FCS files",
+            actionButton(
+              ns("fcs_folder_btn"),
+              label = tagList(icon("folder-open"), " Browse FCS Folder"),
               class = "btn btn-default btn-block",
-              icon  = icon("folder-open")
+              onclick = sprintf(
+                "streamflowPickFolder('%s', 'Select folder containing FCS files')",
+                ns("fcs_folder_picked")
+              )
             )
           ),
           uiOutput(ns("selected_folder_label")),
@@ -72,12 +74,14 @@ setupUI <- function(id) {
                 actionButton(ns("add_row"),    tagList(icon("plus"),   " Add Row"),    class = "btn btn-default btn-sm"),
                 actionButton(ns("remove_row"), tagList(icon("minus"),  " Remove Row"), class = "btn btn-danger btn-sm"),
                 actionButton(ns("save_annot"), tagList(icon("save"),   " Save CSV"),   class = "btn btn-success btn-sm"),
-                shinyFilesButton(
-                  ns("load_annot"),
-                  label    = tagList(icon("file-csv"), " Load CSV"),
-                  title    = "Select annotation CSV",
-                  multiple = FALSE,
-                  class    = "btn btn-default btn-sm"
+                actionButton(
+                  ns("load_annot_btn"),
+                  label   = tagList(icon("file-csv"), " Load CSV"),
+                  class   = "btn btn-default btn-sm",
+                  onclick = sprintf(
+                    "streamflowPickFile('%s', 'Select annotation CSV', [{name: 'CSV files', extensions: ['csv']}])",
+                    ns("load_annot_picked")
+                  )
                 ),
                 actionButton(ns("details_btn"),
                              tagList(icon("edit"), " Edit Details"),
@@ -100,12 +104,7 @@ setupUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 setupServer <- function(input, output, session, shared) {
-  ns      <- session$ns
-  volumes <- resolve_volumes()
-
-  shinyDirChoose(input,  "fcs_folder", roots = volumes, session = session)
-  shinyFileChoose(input, "load_annot", roots = volumes, session = session,
-                  filetypes = c("csv"))
+  ns <- session$ns
 
   local <- reactiveValues(
     folder_path = NULL,
@@ -119,14 +118,22 @@ setupServer <- function(input, output, session, shared) {
                              stringsAsFactors = FALSE)
   )
 
-  # ── Folder selection ──────────────────────────────────────────────────────
-  observeEvent(input$fcs_folder, {
-    req(is.list(input$fcs_folder))
-    p <- parseDirPath(volumes, input$fcs_folder)
-    if (length(p) > 0) {
-      local$folder_path <- p
-      shared$fcs_folder <- p
+  # ── Folder selection (native Electron dialog) ─────────────────────────────
+  observeEvent(input$fcs_folder_picked, {
+    sel <- input$fcs_folder_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("Folder selection requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
     }
+    p <- sel$path
+    if (is.null(p) || !nzchar(p)) return()
+    if (!dir.exists(p)) {
+      showNotification(paste("Folder not found:", p), type = "error", duration = 5)
+      return()
+    }
+    local$folder_path <- p
+    shared$fcs_folder <- p
   })
 
   output$selected_folder_label <- renderUI({
@@ -351,12 +358,21 @@ setupServer <- function(input, output, session, shared) {
     })
   })
 
-  observeEvent(input$load_annot, {
-    req(is.list(input$load_annot))
-    fi <- parseFilePaths(volumes, input$load_annot)
-    req(nrow(fi) > 0)
+  observeEvent(input$load_annot_picked, {
+    sel <- input$load_annot_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("File selection requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    p <- sel$path
+    if (is.null(p) || !nzchar(p)) return()
+    if (!file.exists(p) || tolower(tools::file_ext(p)) != "csv") {
+      showNotification("Please select an existing .csv file.", type = "error", duration = 5)
+      return()
+    }
     tryCatch({
-      df <- read.csv(as.character(fi$datapath), stringsAsFactors = FALSE)
+      df <- read.csv(p, stringsAsFactors = FALSE)
       local$annotation  <- df
       shared$annotation <- df
       showNotification("Annotation loaded.", type = "message", duration = 3)
