@@ -292,6 +292,12 @@ dimreduxServer <- function(input, output, session, shared) {
           sprintf("cyto_map() complete: %d cells, method = %s", nrow(result), input$method),
           type = "message", duration = 3
         )
+      } else {
+        # Neither cyto_map nor the manual fallback produced a usable embedding.
+        # Without this the panel just stays on its placeholder with no reason.
+        showNotification(
+          "Dimensionality reduction produced no result. Check channel selection and streamflow.log.",
+          type = "warning", duration = 6)
       }
     })
 

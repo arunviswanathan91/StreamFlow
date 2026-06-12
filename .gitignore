@@ -1,0 +1,22 @@
+# ── Internal / dev-only docs (kept locally, not for the public repo) ──────────
+AUDIT_REPORT.md
+BUILDING.md
+
+# ── Build outputs & dependencies ─────────────────────────────────────────────
+node_modules/
+dist/
+
+# ── Bundled R runtime (≈1 GB, produced by the build, never committed) ─────────
+R-Portable/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+install_log.txt
+
+# ── OS / editor cruft ────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/

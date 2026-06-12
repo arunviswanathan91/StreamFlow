@@ -35,10 +35,15 @@ server <- function(input, output, session) {
   )
 
   # ── Keep cross-session app_state synced for pop-out windows ──────────────
+  # Build the whole snapshot first, then publish it in one atomic assignment so a
+  # pop-out reading concurrently can never see a half-updated state.
   observe({
-    app_state$flowset    <- shared$trans_flowset %||% shared$comp_flowset %||% shared$raw_flowset
-    app_state$gating_set <- shared$gating_set
-    app_state$channels   <- shared$channels
+    snap <- list(
+      flowset    = shared$trans_flowset %||% shared$comp_flowset %||% shared$raw_flowset,
+      gating_set = shared$gating_set,
+      channels   = shared$channels
+    )
+    app_state$snapshot <- snap
   })
 
   # ── Module servers ────────────────────────────────────────────────────────
@@ -108,9 +113,19 @@ server <- function(input, output, session) {
       updateTabItems(session, "sidebar_menu", "setup")
       shinyjs::click("setup-load_fcs_btn")
     } else if (evt == "save_session") {
-      shinyjs::click("workspace-save_ws")
+      # Open the native Save dialog with a sanitized default filename.
+      exp_name  <- shared$experiment_name %||% "Untitled Experiment"
+      safe_name <- gsub('[\\\\/:*?"<>|[:cntrl:]]', "_", exp_name)
+      if (!nzchar(trimws(safe_name))) safe_name <- "Untitled Experiment"
+      default_fn <- paste0(safe_name, ".sfw")
+      shinyjs::runjs(sprintf(
+        "streamflowSaveFile('workspace-save_ws_picked', 'Save StreamFLOW Workspace', [{name:'StreamFLOW Workspace', extensions:['sfw']}], %s)",
+        jsonlite::toJSON(default_fn, auto_unbox = TRUE)
+      ))
     } else if (evt == "open_workspace") {
-      shinyjs::click("workspace-open_ws")
+      shinyjs::runjs(
+        "streamflowPickFile('workspace-open_ws_picked', 'Open StreamFLOW Workspace', [{name:'StreamFLOW Workspace', extensions:['sfw']}])"
+      )
     } else if (evt == "export_results") {
       updateTabItems(session, "sidebar_menu", "statistics")
       showNotification("Navigate to Statistics to export results.", type = "message", duration = 3)

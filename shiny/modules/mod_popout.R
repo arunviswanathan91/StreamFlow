@@ -37,7 +37,8 @@ popout_ui <- function(qs) {
 
 # ── Server for a pop-out window ────────────────────────────────────────────────
 popout_server <- function(input, output, session, qs) {
-  fs   <- app_state$flowset
+  # Read a single consistent snapshot published by the main session.
+  fs   <- app_state$snapshot$flowset
   samp <- qs$sample
 
   output$popout_controls <- renderUI({

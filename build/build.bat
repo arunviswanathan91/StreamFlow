@@ -43,21 +43,59 @@ for /f "tokens=*" %%v in ('npm --version') do set NPM_VER=%%v
 echo  npm: %NPM_VER%
 echo.
 
-:: Check R-Portable is present before building
-if not exist "%ROOT_DIR%\R-Portable" (
-    echo  WARNING: R-Portable folder not found at:
-    echo    %ROOT_DIR%\R-Portable
+:: ------------------------------------------------------------
+::  HARD GATE: refuse to build without a complete R-Portable.
+::  Shipping an installer with a missing/empty R-Portable produces
+::  the "R Portable Not Found" failure at launch, so abort instead
+::  of offering to "continue anyway".
+:: ------------------------------------------------------------
+if not exist "%ROOT_DIR%\R-Portable\bin\Rscript.exe" (
+    echo  ERROR: R-Portable is missing or incomplete.
+    echo    Expected: %ROOT_DIR%\R-Portable\bin\Rscript.exe
     echo.
-    echo  The installer will be built without R-Portable.
-    echo  Users will need to run install.bat after installation.
-    echo.
-    set /p "CONTINUE=Continue build anyway? (Y/N): "
-    if /i not "!CONTINUE!"=="Y" (
-        echo  Build cancelled.
-        pause
-        exit /b 0
-    )
+    goto :r_portable_missing
 )
+
+:: A bare R install with no packages would pass the check above but still
+:: produce a broken app at runtime. Require a real package marker.
+if not exist "%ROOT_DIR%\R-Portable\library\CytoExploreR" (
+    echo  ERROR: R-Portable has R but no packages installed.
+    echo    Expected: %ROOT_DIR%\R-Portable\library\CytoExploreR
+    echo.
+    goto :r_portable_missing
+)
+
+goto :r_portable_ok
+
+:r_portable_missing
+echo  StreamFLOW cannot be built without a complete bundled R runtime.
+echo.
+echo  Produce a working installer one of these two ways:
+echo.
+echo    1) RECOMMENDED - run the CI workflow
+echo       .github\workflows\build-windows.yml builds R-Portable
+echo       (R 4.4 + Bioconductor 3.19 + CytoExploreR) and a full
+echo       installer automatically. Push to the build branch or run
+echo       the "Build Windows" workflow via GitHub Actions.
+echo.
+echo    2) Populate R-Portable locally, then re-run this script:
+echo       - Install R 4.4.x.
+echo       - Run scripts\install_packages.R against it with
+echo         R_LIBS_USER pointed at "%ROOT_DIR%\R-Portable\library":
+echo            set "R_LIBS_USER=%ROOT_DIR%\R-Portable\library"
+echo            Rscript scripts\install_packages.R
+echo       - Copy the R 4.4 installation into "%ROOT_DIR%\R-Portable"
+echo         so that R-Portable\bin\Rscript.exe exists.
+echo       - Confirm BOTH of these exist before re-running:
+echo            R-Portable\bin\Rscript.exe
+echo            R-Portable\library\CytoExploreR
+echo.
+pause
+exit /b 1
+
+:r_portable_ok
+echo  R-Portable verified (Rscript.exe + CytoExploreR present).
+echo.
 
 :: Step 1: Install npm dependencies
 echo  [1/3] Installing npm dependencies...
@@ -117,7 +155,22 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-:: Step 4: Report output
+:: Step 4: Verify the packaged payload before declaring success.
+::         This catches a broken installer (missing R-Portable, shiny, or app
+::         files) no matter how the build was invoked.
+echo.
+echo  Verifying packaged payload...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%verify-package.ps1"
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo  ERROR: package verification failed. See the missing items listed above.
+    echo  The installer in dist\ is incomplete and must NOT be distributed.
+    pause
+    exit /b 1
+)
+echo.
+
+:: Step 5: Report output
 echo.
 echo  [3/3] Build complete!
 echo.

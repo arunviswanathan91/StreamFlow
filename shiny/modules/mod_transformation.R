@@ -57,10 +57,12 @@ transformationUI <- function(id) {
           uiOutput(ns("calibrate_channel_ui")),
           fluidRow(
             column(6,
-              numericInput(ns("cal_min"), "Min", value = NA)
+              # value = NULL renders an empty field without emitting the browser
+              # "value 'NA' cannot be parsed" warning that value = NA produces.
+              numericInput(ns("cal_min"), "Min", value = NULL)
             ),
             column(6,
-              numericInput(ns("cal_max"), "Max", value = NA)
+              numericInput(ns("cal_max"), "Max", value = NULL)
             )
           ),
           fluidRow(
@@ -453,6 +455,17 @@ transformationServer <- function(input, output, session, shared) {
     mn  <- input$cal_min
     mx  <- input$cal_max
     req(ch)
+    # Guard against empty/NA bounds — passing NA into cyto_calibrate is meaningless.
+    if (!is.numeric(mn) || !is.numeric(mx) || !is.finite(mn) || !is.finite(mx)) {
+      showNotification("Enter numeric Min and Max values before calibrating.",
+                       type = "warning", duration = 4)
+      return()
+    }
+    if (mn >= mx) {
+      showNotification("Calibration Min must be less than Max.",
+                       type = "warning", duration = 4)
+      return()
+    }
     tryCatch(
       safe_cyto(
         CytoExploreR::cyto_calibrate(channel = ch, minimum = mn, maximum = mx),

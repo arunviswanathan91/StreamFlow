@@ -15,6 +15,14 @@ if (!fs.existsSync(logDir)) {
 }
 log.transports.file.resolvePathFn = () => path.join(logDir, 'streamflow.log');
 log.transports.file.level = 'debug';
+// Cap the log so a long session piping verbose R stdout/stderr can't grow it
+// unbounded; electron-log rotates to streamflow.old.log past this size.
+log.transports.file.maxSize = 10 * 1024 * 1024; // 10 MB
+
+// Official download location, surfaced in the runtime error if the bundled R
+// runtime is ever missing (e.g. a user deleted resources/R-Portable). Update
+// this if the repository moves.
+const GITHUB_RELEASES_URL = 'https://github.com/arunviswanathan91/StreamFlow/releases';
 
 // Determine if running from packaged build or development
 const isPackaged = app.isPackaged;
@@ -39,6 +47,46 @@ const resourcesPath = isPackaged
 const rScriptPath = path.join(resourcesPath, 'R-Portable', 'bin', 'Rscript.exe');
 const shinyAppPath = path.join(resourcesPath, 'shiny', 'app.R');
 
+// Lock a window down: it may only navigate within the local Shiny server, and
+// any attempt to open a new window (target=_blank, window.open, etc.) is denied.
+// External http/https links are routed out to the user's real browser instead of
+// hijacking the app window. This guards against a malicious or unexpected link
+// rendered from FCS-metadata-derived strings inside the Shiny UI.
+function isAllowedAppUrl(targetUrl) {
+  if (!shinyPort) return false;
+  try {
+    const u = new URL(targetUrl);
+    return (u.protocol === 'http:' || u.protocol === 'https:') &&
+           u.hostname === '127.0.0.1' &&
+           u.port === String(shinyPort);
+  } catch (_) {
+    return false;
+  }
+}
+
+function hardenWindow(win) {
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    if (!isAllowedAppUrl(targetUrl)) {
+      event.preventDefault();
+      log.warn(`Blocked in-app navigation to: ${targetUrl}`);
+    }
+  });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        shell.openExternal(url);
+      } else {
+        log.warn(`Blocked window open with non-web protocol: ${url}`);
+      }
+    } catch (_) {
+      log.warn(`Blocked window open with invalid url: ${url}`);
+    }
+    return { action: 'deny' };
+  });
+}
+
 function createSplashWindow() {
   splashWindow = new BrowserWindow({
     width: 600,
@@ -56,6 +104,7 @@ function createSplashWindow() {
   });
 
   splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+  hardenWindow(splashWindow);
 
   splashWindow.once('ready-to-show', () => {
     splashWindow.show();
@@ -82,6 +131,7 @@ function createMainWindow() {
   });
 
   mainWindow.loadURL(`http://127.0.0.1:${shinyPort}`);
+  hardenWindow(mainWindow);
 
   mainWindow.once('ready-to-show', () => {
     if (splashWindow && !splashWindow.isDestroyed()) {
@@ -134,6 +184,7 @@ function openSampleWindow(opts) {
 
   win.setMenuBarVisibility(false);
   win.loadURL(`http://127.0.0.1:${shinyPort}/?${params.toString()}`);
+  hardenWindow(win);
   popoutWindows.add(win);
   win.on('closed', () => popoutWindows.delete(win));
   log.info(`Opened pop-out window for sample: ${o.sample}`);
@@ -288,11 +339,27 @@ function startRProcess() {
   log.info(`Port: ${shinyPort}`);
 
   if (!fs.existsSync(rScriptPath)) {
-    const errMsg = `R Portable not found at: ${rScriptPath}\n\nPlease run scripts/install.bat to set up R Portable.`;
-    log.error(errMsg);
-    dialog.showErrorBox('R Portable Not Found', errMsg);
+    // Dump what *is* present under resourcesPath so streamflow.log turns any
+    // future occurrence of this into a 5-second diagnosis instead of a repeat
+    // debugging session.
+    let listing = '(could not read resources directory)';
+    try {
+      listing = fs.readdirSync(resourcesPath).join(', ');
+    } catch (e) {
+      listing = `(readdir failed: ${e.message})`;
+    }
+    log.error(`R Portable not found at: ${rScriptPath}`);
+    log.error(`Contents of resourcesPath (${resourcesPath}): ${listing}`);
+
+    const errMsg =
+      'This installer is missing the bundled R runtime.\n\n' +
+      'Please reinstall using the full StreamFLOW installer from the official ' +
+      `release page:\n${GITHUB_RELEASES_URL}\n\n` +
+      'If reinstalling does not help, contact support.\n\n' +
+      `Resources path: ${resourcesPath}`;
+    dialog.showErrorBox('R Runtime Missing', errMsg);
     app.quit();
-    return;
+    return false;
   }
 
   if (!fs.existsSync(shinyAppPath)) {
@@ -300,7 +367,7 @@ function startRProcess() {
     log.error(errMsg);
     dialog.showErrorBox('App Files Missing', errMsg);
     app.quit();
-    return;
+    return false;
   }
 
   rProcess = spawn(rScriptPath, [shinyAppPath, '--port', String(shinyPort)], {
@@ -337,6 +404,7 @@ function startRProcess() {
   });
 
   log.info('R process spawned, waiting for Shiny to be ready...');
+  return true;
 }
 
 function pollShinyReady() {
@@ -417,6 +485,81 @@ ipcMain.on('open-sample-window', (_evt, opts) => {
   openSampleWindow(opts);
 });
 
+// ── Native file/folder dialogs ───────────────────────────────────────────────
+// These replace the shinyFiles browser modal (broken inside Chromium). The
+// renderer invokes them via the preload bridge; each returns { canceled, path }
+// and never throws across the IPC boundary.
+function dialogParent() {
+  return (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : null;
+}
+
+ipcMain.handle('dialog:selectFolder', async (_evt, options) => {
+  const parent = dialogParent();
+  if (!parent) return { canceled: true, path: null };
+  const opts = options || {};
+  try {
+    const result = await dialog.showOpenDialog(parent, {
+      title: opts.title || 'Select folder',
+      defaultPath: opts.defaultPath || undefined,
+      properties: ['openDirectory']
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      log.info('selectFolder: canceled');
+      return { canceled: true, path: null };
+    }
+    log.info(`selectFolder: ${result.filePaths[0]}`);
+    return { canceled: false, path: result.filePaths[0] };
+  } catch (err) {
+    log.error(`selectFolder failed: ${err.message}`);
+    return { canceled: true, path: null };
+  }
+});
+
+ipcMain.handle('dialog:selectFile', async (_evt, options) => {
+  const parent = dialogParent();
+  if (!parent) return { canceled: true, path: null };
+  const opts = options || {};
+  try {
+    const result = await dialog.showOpenDialog(parent, {
+      title: opts.title || 'Select file',
+      defaultPath: opts.defaultPath || undefined,
+      filters: Array.isArray(opts.filters) ? opts.filters : undefined,
+      properties: ['openFile']
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      log.info('selectFile: canceled');
+      return { canceled: true, path: null };
+    }
+    log.info(`selectFile: ${result.filePaths[0]}`);
+    return { canceled: false, path: result.filePaths[0] };
+  } catch (err) {
+    log.error(`selectFile failed: ${err.message}`);
+    return { canceled: true, path: null };
+  }
+});
+
+ipcMain.handle('dialog:saveFile', async (_evt, options) => {
+  const parent = dialogParent();
+  if (!parent) return { canceled: true, path: null };
+  const opts = options || {};
+  try {
+    const result = await dialog.showSaveDialog(parent, {
+      title: opts.title || 'Save file',
+      defaultPath: opts.defaultPath || undefined,
+      filters: Array.isArray(opts.filters) ? opts.filters : undefined
+    });
+    if (result.canceled || !result.filePath) {
+      log.info('saveFile: canceled');
+      return { canceled: true, path: null };
+    }
+    log.info(`saveFile: ${result.filePath}`);
+    return { canceled: false, path: result.filePath };
+  } catch (err) {
+    log.error(`saveFile failed: ${err.message}`);
+    return { canceled: true, path: null };
+  }
+});
+
 // App lifecycle
 app.whenReady().then(async () => {
   log.info('StreamFLOW starting up');
@@ -431,8 +574,12 @@ app.whenReady().then(async () => {
   }
 
   createSplashWindow();
-  startRProcess();
-  pollShinyReady();
+  // Only start polling if R actually launched. The missing-R / missing-app
+  // branches call app.quit() and return false; without this guard pollShinyReady
+  // would still set an interval polling a port that will never bind.
+  if (startRProcess()) {
+    pollShinyReady();
+  }
 });
 
 app.on('window-all-closed', () => {

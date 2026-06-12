@@ -31,11 +31,13 @@ compensationUI <- function(id) {
 
           conditionalPanel(
             condition = sprintf("input['%s'] == 'controls'", ns("comp_source")),
-            shinyDirButton(ns("controls_folder"),
-                           "Browse Controls Folder",
-                           "Single-stain controls folder",
-                           class = "btn btn-default btn-block",
-                           icon  = icon("folder-open")),
+            actionButton(ns("controls_folder_btn"),
+                         label = tagList(icon("folder-open"), " Browse Controls Folder"),
+                         class = "btn btn-default btn-block",
+                         onclick = sprintf(
+                           "streamflowPickFolder('%s', 'Single-stain controls folder')",
+                           ns("controls_folder_picked")
+                         )),
             uiOutput(ns("controls_folder_label"))
           ),
 
@@ -116,9 +118,7 @@ compensationUI <- function(id) {
 
 # ── Server ────────────────────────────────────────────────────────────────────
 compensationServer <- function(input, output, session, shared) {
-  ns      <- session$ns
-  volumes <- resolve_volumes()
-  shinyDirChoose(input, "controls_folder", roots = volumes, session = session)
+  ns <- session$ns
 
   local <- reactiveValues(
     spillover         = NULL,
@@ -132,10 +132,20 @@ compensationServer <- function(input, output, session, shared) {
              icon("check-circle"), " ", basename(local$controls_path))
   })
 
-  observeEvent(input$controls_folder, {
-    req(is.list(input$controls_folder))
-    p <- parseDirPath(volumes, input$controls_folder)
-    if (length(p) > 0) local$controls_path <- p
+  observeEvent(input$controls_folder_picked, {
+    sel <- input$controls_folder_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("Folder selection requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    p <- sel$path
+    if (is.null(p) || !nzchar(p)) return()
+    if (!dir.exists(p)) {
+      showNotification(paste("Folder not found:", p), type = "error", duration = 5)
+      return()
+    }
+    local$controls_path <- p
   })
 
   # ── Load / compute spillover ──────────────────────────────────────────────
@@ -189,6 +199,12 @@ compensationServer <- function(input, output, session, shared) {
         shared$spillover_matrix <- mat
         showNotification("Spillover matrix loaded via cyto_spillover_extract().",
                          type = "message", duration = 3)
+      } else {
+        # safe_cyto swallows the underlying error to the log; surface it so the
+        # user isn't left staring at an unchanged panel with no explanation.
+        showNotification(
+          "Could not obtain a spillover matrix from the selected source. See streamflow.log for details.",
+          type = "warning", duration = 6)
       }
     })
 

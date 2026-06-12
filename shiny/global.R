@@ -4,7 +4,6 @@
 suppressPackageStartupMessages({
   library(shiny)
   library(shinydashboard)
-  library(shinyFiles)
   library(shinyjs)
   library(shinycssloaders)
   library(DT)
@@ -32,36 +31,15 @@ suppressPackageStartupMessages({
 # "pop-out" window (opened by Electron with ?view=popout) read the flowSet and
 # GatingSet that the main session loaded. The main session keeps this synced.
 app_state <- new.env(parent = emptyenv())
-app_state$flowset    <- NULL
-app_state$gating_set <- NULL
-app_state$channels   <- NULL
+# A single list assigned atomically. A pop-out session always reads a complete,
+# self-consistent snapshot (all-old or all-new), never a torn mix of fields
+# while the main session is mid-update.
+app_state$snapshot <- list(flowset = NULL, gating_set = NULL, channels = NULL)
 
-# Robust file-browser volume detection.
-# getVolumes()() silently returns nothing in Electron's packaged R-Portable
-# environment. On Windows we fall back to scanning drive letters A-Z.
-resolve_volumes <- function() {
-  tryCatch({
-    vols <- c(Home = path.expand("~"), getVolumes()())
-    if (.Platform$OS.type == "windows" && length(vols) <= 1) {
-      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
-      drives <- drives[file.exists(drives)]
-      c(Home    = path.expand("~"),
-        Desktop = if (file.exists(file.path(path.expand("~"), "Desktop")))
-                    file.path(path.expand("~"), "Desktop") else NULL,
-        drives)
-    } else {
-      vols
-    }
-  }, error = function(e) {
-    if (.Platform$OS.type == "windows") {
-      drives <- setNames(paste0(LETTERS, ":/"), paste0(LETTERS, ":"))
-      drives <- drives[file.exists(drives)]
-      c(Home = path.expand("~"), drives)
-    } else {
-      c(Home = path.expand("~"))
-    }
-  })
-}
+# File/folder selection is handled by native Electron dialogs (see the
+# streamflowPick* helpers in ui.R and the dialog:* IPC handlers in
+# electron/main.js), so the shinyFiles package and its volume detection are no
+# longer needed.
 
 # Parse command-line arguments to get the port number
 args <- commandArgs(trailingOnly = TRUE)

@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Open a focused single-sample pop-out window (FlowJo-style)
   openSampleWindow: (opts) => ipcRenderer.send('open-sample-window', opts),
 
+  // Native file/folder pickers (replace the broken shinyFiles modal).
+  // Each resolves to { canceled: boolean, path: string | null }.
+  selectFolder: (options) => ipcRenderer.invoke('dialog:selectFolder', options),
+  selectFile:   (options) => ipcRenderer.invoke('dialog:selectFile', options),
+  saveFile:     (options) => ipcRenderer.invoke('dialog:saveFile', options),
+
   // Menu event listeners (Shiny listens for these via JS)
   onOpenFcsFolder: (callback) => ipcRenderer.on('menu-open-fcs-folder', callback),
   onSaveSession: (callback) => ipcRenderer.on('menu-save-session', callback),
