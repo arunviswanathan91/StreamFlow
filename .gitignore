@@ -5,6 +5,12 @@ BUILDING.md
 # ── Build outputs & dependencies ─────────────────────────────────────────────
 node_modules/
 dist/
+out/
+release/
+# npm debug output (npm-debug.log is matched by *.log below, these are not)
+npm-debug.log*
+yarn-error.log
+.npm/
 
 # ── Bundled R runtime (≈1 GB, produced by the build, never committed) ─────────
 R-Portable/
@@ -13,6 +19,26 @@ R-Portable/
 *.log
 logs/
 install_log.txt
+
+# ── R session artifacts (RStudio / Rscript leave these behind) ───────────────
+.Rhistory
+.RData
+.Rapp.history
+.Ruserdata
+.Rproj.user/
+
+# ── Secrets / local environment ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Temp & backup files ──────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*~
+# Office / OneDrive lock files (this repo lives under OneDrive\Documents)
+~$*
 
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 Thumbs.db
