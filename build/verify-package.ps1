@@ -82,7 +82,13 @@ if (Test-Path -LiteralPath $asar -PathType Leaf) {
     $asarCli = Join-Path $rootDir 'node_modules\.bin\asar.cmd'
     if (Test-Path -LiteralPath $asarCli -PathType Leaf) {
         try {
-            $listing = & $asarCli list $asar 2>$null
+            # @electron/asar's `list` builds paths with Node's path.join, which
+            # emits OS-native separators — backslashes on Windows (the CI runner).
+            # Normalise both sides to forward slashes so the comparison works
+            # regardless of platform; otherwise '\electron\main.js' never matches
+            # the '/electron/main.js' literal and present files look "missing".
+            $listing = & $asarCli list $asar 2>$null |
+                ForEach-Object { ($_ -replace '\\', '/').Trim() }
             foreach ($entry in @('/electron/main.js', '/electron/preload.js', '/electron/splash.html')) {
                 if ($listing -contains $entry) {
                     Write-Host "  [OK]      asar:$entry" -ForegroundColor Green
