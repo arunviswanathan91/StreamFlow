@@ -183,15 +183,32 @@ jobs:
           Write-Host "R-Portable total size: ${sizeMB} MB"
 
       # ── 7. npm install ───────────────────────────────────────────────────────
+      #    Always run (even on cache hit) to ensure dependency tree is valid.
+      #    --prefer-offline makes this fast when node_modules is already cached.
       - name: Install npm dependencies
-        if: steps.cache-node.outputs.cache-hit != 'true'
-        run: npm install
+        run: npm install --prefer-offline
 
       # ── 8. Build electron app ────────────────────────────────────────────────
       - name: Build StreamFLOW installer
         run: npm run build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 8a. Debug: show asar contents ─────────────────────────────────────
+      - name: Debug – list asar contents
+        if: always()
+        shell: pwsh
+        run: |
+          $asar = "dist/win-unpacked/resources/app.asar"
+          $cli  = "node_modules/.bin/asar.cmd"
+          if ((Test-Path $asar) -and (Test-Path $cli)) {
+            Write-Host "=== app.asar contents ==="
+            & $cli list $asar
+          } else {
+            Write-Host "app.asar or asar CLI not found; skipping"
+            Write-Host "  asar exists: $(Test-Path $asar)"
+            Write-Host "  cli  exists: $(Test-Path $cli)"
+          }
 
       # ── 8b. Verify packaged payload ─────────────────────────────────────────
       #    Runs BEFORE artifact upload / release so a broken installer (missing
