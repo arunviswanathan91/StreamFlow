@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Each resolves to { canceled: boolean, path: string | null }.
   selectFolder: (options) => ipcRenderer.invoke('dialog:selectFolder', options),
   selectFile:   (options) => ipcRenderer.invoke('dialog:selectFile', options),
+  selectFiles:  (options) => ipcRenderer.invoke('dialog:selectFiles', options),
   saveFile:     (options) => ipcRenderer.invoke('dialog:saveFile', options),
 
   // Menu event listeners (Shiny listens for these via JS)

@@ -582,6 +582,18 @@ full_ui <- tagList(
       });
     };
 
+    window.streamflowPickFiles = function(inputId, title, filters) {
+      if (!window.electronAPI || !window.electronAPI.selectFiles) {
+        Shiny.setInputValue(inputId, {paths: null, error: 'no_electron'}, {priority: 'event'});
+        return;
+      }
+      window.electronAPI.selectFiles({ title: title, filters: filters }).then(function(result) {
+        if (!result.canceled && result.paths && result.paths.length > 0) {
+          Shiny.setInputValue(inputId, {paths: result.paths, ts: Date.now()}, {priority: 'event'});
+        }
+      });
+    };
+
     window.streamflowSaveFile = function(inputId, title, filters, defaultPath) {
       if (!window.electronAPI || !window.electronAPI.saveFile) {
         Shiny.setInputValue(inputId, {path: null, error: 'no_electron'}, {priority: 'event'});

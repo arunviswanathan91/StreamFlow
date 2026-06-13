@@ -538,6 +538,29 @@ ipcMain.handle('dialog:selectFile', async (_evt, options) => {
   }
 });
 
+ipcMain.handle('dialog:selectFiles', async (_evt, options) => {
+  const parent = dialogParent();
+  if (!parent) return { canceled: true, paths: null };
+  const opts = options || {};
+  try {
+    const result = await dialog.showOpenDialog(parent, {
+      title: opts.title || 'Select files',
+      defaultPath: opts.defaultPath || undefined,
+      filters: Array.isArray(opts.filters) ? opts.filters : undefined,
+      properties: ['openFile', 'multiSelections']
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      log.info('selectFiles: canceled');
+      return { canceled: true, paths: null };
+    }
+    log.info(`selectFiles: ${result.filePaths.length} file(s) selected`);
+    return { canceled: false, paths: result.filePaths };
+  } catch (err) {
+    log.error(`selectFiles failed: ${err.message}`);
+    return { canceled: true, paths: null };
+  }
+});
+
 ipcMain.handle('dialog:saveFile', async (_evt, options) => {
   const parent = dialogParent();
   if (!parent) return { canceled: true, path: null };

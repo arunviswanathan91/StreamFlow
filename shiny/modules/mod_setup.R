@@ -13,14 +13,26 @@ setupUI <- function(id) {
       column(4,
         box(
           title = "Data Import", width = NULL, solidHeader = TRUE,
-          tags$div(style = "margin-bottom: 10px;",
+          tags$div(
+            style = "display:flex;gap:6px;margin-bottom:10px;",
             actionButton(
               ns("fcs_folder_btn"),
-              label = tagList(icon("folder-open"), " Browse FCS Folder"),
-              class = "btn btn-default btn-block",
+              label = tagList(icon("folder-open"), " Browse Folder"),
+              class = "btn btn-default",
+              style = "flex:1;",
               onclick = sprintf(
                 "streamflowPickFolder('%s', 'Select folder containing FCS files')",
                 ns("fcs_folder_picked")
+              )
+            ),
+            actionButton(
+              ns("fcs_files_btn"),
+              label = tagList(icon("file-medical"), " Select Files"),
+              class = "btn btn-default",
+              style = "flex:1;",
+              onclick = sprintf(
+                "streamflowPickFiles('%s', 'Select FCS files', [{name:'FCS Files',extensions:['fcs','FCS']}])",
+                ns("fcs_files_picked")
               )
             )
           ),
@@ -29,7 +41,8 @@ setupUI <- function(id) {
           checkboxInput(ns("recursive"), "Include sub-folders",    value = FALSE),
           checkboxInput(ns("do_clean"),  "Run flowAI quality check (cyto_clean)", value = FALSE),
           checkboxInput(ns("do_barcode"),"Barcode samples (cyto_barcode)",        value = FALSE),
-          checkboxInput(ns("parse_names"),"Auto-parse names into experiment details", value = FALSE),
+          # cyto_names_parse() is interactive (prompts for delimiter) and hangs
+          # in headless Electron — names are auto-parsed safely on load instead.
           actionButton(
             ns("load_fcs_btn"),
             label = tagList(icon("upload"), " Load FCS Files"),
@@ -107,15 +120,16 @@ setupServer <- function(input, output, session, shared) {
   ns <- session$ns
 
   local <- reactiveValues(
-    folder_path = NULL,
-    flowset     = NULL,
-    annotation  = data.frame(
+    folder_path  = NULL,
+    picked_files = NULL,   # set when user picks files directly (overrides folder scan)
+    flowset      = NULL,
+    annotation   = data.frame(
       SampleName = character(), Group = character(),
       Treatment  = character(), Replicate = character(),
       TimePoint  = character(), stringsAsFactors = FALSE
     ),
-    marker_map  = data.frame(Channel = character(), Marker = character(),
-                             stringsAsFactors = FALSE)
+    marker_map   = data.frame(Channel = character(), Marker = character(),
+                              stringsAsFactors = FALSE)
   )
 
   # ── Folder selection (native Electron dialog) ─────────────────────────────
@@ -134,6 +148,36 @@ setupServer <- function(input, output, session, shared) {
     }
     local$folder_path <- p
     shared$fcs_folder <- p
+    showNotification(
+      paste0("Folder selected: ", basename(p)),
+      type = "message", duration = 3
+    )
+  })
+
+  # ── Direct FCS file selection ─────────────────────────────────────────────
+  observeEvent(input$fcs_files_picked, {
+    sel <- input$fcs_files_picked
+    if (is.list(sel) && identical(sel$error, "no_electron")) {
+      showNotification("File selection requires the StreamFLOW desktop app.",
+                       type = "warning", duration = 5)
+      return()
+    }
+    paths <- sel$paths
+    if (is.null(paths) || length(paths) == 0) return()
+    valid <- paths[file.exists(paths)]
+    if (length(valid) == 0) {
+      showNotification("None of the selected files could be found.",
+                       type = "error", duration = 5)
+      return()
+    }
+    parent_dir <- unique(dirname(valid))
+    local$folder_path <- if (length(parent_dir) == 1) parent_dir else dirname(valid[1])
+    local$picked_files <- valid
+    shared$fcs_folder  <- local$folder_path
+    showNotification(
+      sprintf("%d FCS file(s) selected directly.", length(valid)),
+      type = "message", duration = 3
+    )
   })
 
   output$selected_folder_label <- renderUI({
@@ -150,52 +194,88 @@ setupServer <- function(input, output, session, shared) {
     req(local$folder_path)
     folder <- local$folder_path
     shared$status <- "busy"
+    shinyjs::disable("load_fcs_btn")
 
-    withProgress(message = "Loading FCS files…", value = 0, {
+    fs <- withProgress(message = "Loading FCS files…", value = 0, {
 
-      incProgress(0.05, detail = "Scanning for .fcs files…")
-      fcs_files <- list.files(folder, pattern = "\\.fcs$",
-                              recursive  = isTRUE(input$recursive),
-                              full.names = TRUE, ignore.case = TRUE)
-
-      if (length(fcs_files) == 0) {
-        showNotification("No FCS files found in the selected folder.",
-                         type = "warning", duration = 5)
-        shared$status <- "idle"
-        return()
+      incProgress(0.05, detail = "Locating FCS files…")
+      fcs_files <- if (!is.null(local$picked_files)) {
+        local$picked_files
+      } else {
+        list.files(folder, pattern = "\\.fcs$",
+                   recursive  = isTRUE(input$recursive),
+                   full.names = TRUE, ignore.case = TRUE)
       }
 
-      # ── cyto_load: load FCS into ncdfFlowSet ───────────────────────────────
-      incProgress(0.15, detail = sprintf("cyto_load(): reading %d files…", length(fcs_files)))
-      fs <- tryCatch(
-        safe_cyto(
-          CytoExploreR::cyto_load(fcs_files),
-          "cyto_load failed"
-        ),
+      if (length(fcs_files) == 0) {
+        showNotification(
+          paste0("No .fcs files found in: ", basename(folder),
+                 if (isTRUE(input$recursive)) "" else " — try enabling 'Include sub-folders'"),
+          type = "warning", duration = 7
+        )
+        return(NULL)
+      }
+
+      showNotification(
+        sprintf("Found %d FCS file(s). Reading (this may take a minute for large files)…", length(fcs_files)),
+        type = "message", duration = 5
+      )
+
+      # ── Validate each file header before bulk read ─────────────────────────
+      # cyto_load() loads saved workspaces, NOT raw FCS — do not use it here.
+      incProgress(0.10, detail = sprintf("Validating %d FCS headers…", length(fcs_files)))
+      valid_files <- Filter(function(f) {
+        tryCatch({ flowCore::read.FCSheader(f); TRUE }, error = function(e) {
+          message(sprintf("[StreamFLOW] Skipping unreadable FCS: %s — %s",
+                          basename(f), conditionMessage(e)))
+          FALSE
+        })
+      }, fcs_files)
+
+      if (length(valid_files) == 0) {
+        showNotification(
+          "No valid FCS files found. Ensure the folder contains uncorrupted .fcs files.",
+          type = "error", duration = 10
+        )
+        return(NULL)
+      }
+
+      if (length(valid_files) < length(fcs_files)) {
+        showNotification(
+          sprintf("%d of %d file(s) were skipped (unreadable headers).",
+                  length(fcs_files) - length(valid_files), length(fcs_files)),
+          type = "warning", duration = 6
+        )
+      }
+
+      # ── flowCore::read.flowSet — primary FCS loader ────────────────────────
+      incProgress(0.20, detail = sprintf("Reading %d file(s) with flowCore…", length(valid_files)))
+      loaded_fs <- tryCatch(
+        flowCore::read.flowSet(files = valid_files, transformation = FALSE),
         error = function(e) {
-          showNotification(paste("cyto_load error:", conditionMessage(e)),
-                           type = "error", duration = 8)
+          showNotification(
+            paste0("flowCore::read.flowSet() failed: ", conditionMessage(e)),
+            type = "error", duration = 10
+          )
           NULL
         }
       )
 
-      # Fallback to flowCore if cyto_load unavailable
-      if (is.null(fs)) {
-        incProgress(0, detail = "Falling back to flowCore::read.flowSet()…")
-        valid_files <- Filter(function(f) {
-          tryCatch({ read.FCSheader(f); TRUE }, error = function(e) {
-            showNotification(paste("Skipping:", basename(f)), type = "warning", duration = 3)
-            FALSE
-          })
-        }, fcs_files)
-        if (length(valid_files) == 0) { shared$status <- "idle"; return() }
-        fs <- tryCatch(flowCore::read.flowSet(files = valid_files, transformation = FALSE),
-                       error = function(e) {
-                         showNotification(paste("Load error:", conditionMessage(e)),
-                                          type = "error", duration = 8); NULL })
+      if (is.null(loaded_fs)) {
+        return(NULL)
       }
-      req(fs)
-      incProgress(0.15)
+
+      incProgress(0.10)
+      loaded_fs
+    })
+
+    if (is.null(fs)) {
+      shared$status <- "idle"
+      shinyjs::enable("load_fcs_btn")
+      return()
+    }
+
+    withProgress(message = "Processing loaded files…", value = 0.5, {
 
       # ── cyto_barcode: assign sample-ID barcodes ────────────────────────────
       if (isTRUE(input$do_barcode)) {
@@ -229,16 +309,20 @@ setupServer <- function(input, output, session, shared) {
         error = function(e) sampleNames(fs)
       )
 
-      # ── cyto_names_parse: parse details from file names ───────────────────
-      annot_df <- if (isTRUE(input$parse_names)) {
-        tryCatch(
-          {
-            parsed <- safe_cyto(CytoExploreR::cyto_names_parse(fs), "cyto_names_parse failed")
-            if (is.data.frame(parsed)) parsed else NULL
-          },
-          error = function(e) NULL
-        )
-      } else NULL
+      # ── Parse names into details (non-interactive, regex-based) ─────────────
+      # cyto_names_parse() prompts interactively for a delimiter and will hang
+      # permanently in headless Electron — never call it here.
+      annot_df <- tryCatch({
+        parts <- strsplit(tools::file_path_sans_ext(basename(sample_names)),
+                          "[_\\-\\s]+")
+        max_cols <- max(lengths(parts))
+        if (max_cols >= 2) {
+          mat <- t(sapply(parts, function(x) {
+            length(x) <- max_cols; x[is.na(x)] <- ""; x
+          }))
+          as.data.frame(mat, stringsAsFactors = FALSE)
+        } else NULL
+      }, error = function(e) NULL)
 
       if (is.null(annot_df) || nrow(annot_df) == 0) {
         annot_df <- data.frame(
@@ -254,8 +338,9 @@ setupServer <- function(input, output, session, shared) {
           annot_df$SampleName <- sample_names
       }
 
-      local$flowset    <- fs
-      local$annotation <- annot_df
+      local$picked_files <- NULL   # consumed; next load uses folder scan
+      local$flowset      <- fs
+      local$annotation   <- annot_df
       shared$raw_flowset    <- fs
       shared$annotation     <- annot_df
       shared$n_samples      <- length(fs)
@@ -282,13 +367,14 @@ setupServer <- function(input, output, session, shared) {
 
       incProgress(0.1, detail = "Done!")
       showNotification(
-        sprintf("Loaded %d FCS files via cyto_load(). %d fluorescent channels detected.",
+        sprintf("Successfully loaded %d FCS file(s). %d fluorescent channel(s) detected.",
                 length(fs), length(fluor_ch)),
-        type = "message", duration = 4
+        type = "message", duration = 5
       )
     })
 
     shared$status <- "idle"
+    shinyjs::enable("load_fcs_btn")
   })
 
   # ── cyto_details_edit (button) ────────────────────────────────────────────
