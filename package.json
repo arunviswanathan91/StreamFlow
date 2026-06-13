@@ -57,7 +57,7 @@
       "buildResources": "build"
     },
     "files": [
-      "electron/",
+      "electron/**/*",
       "package.json"
     ]
   }
