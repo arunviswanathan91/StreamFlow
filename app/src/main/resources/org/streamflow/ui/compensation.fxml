@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.CompensationController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Compensation" styleClass="title"/>
+        <Label text="Extract the spillover matrix embedded in the FCS, or compute one from single-colour controls, then apply it."
+               styleClass="subtitle" wrapText="true"/>
+
+        <HBox spacing="8.0">
+            <children>
+                <Button fx:id="extractButton" text="Extract from FCS" onAction="#onExtract">
+                    <graphic><FontIcon iconLiteral="fas-file-import"/></graphic>
+                </Button>
+                <Button fx:id="computeButton" text="Compute from Controls" onAction="#onCompute">
+                    <graphic><FontIcon iconLiteral="fas-calculator"/></graphic>
+                </Button>
+                <Button fx:id="applyButton" text="Apply" onAction="#onApply" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-check"/></graphic>
+                </Button>
+                <Button fx:id="residualButton" text="Residual diagnostic" onAction="#onResidual">
+                    <graphic><FontIcon iconLiteral="fas-th"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+
+        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
+            <children>
+                <TableView fx:id="matrixTable" HBox.hgrow="ALWAYS"/>
+                <VBox spacing="6.0" prefWidth="380.0">
+                    <children>
+                        <Label text="Residual correlation" styleClass="title"/>
+                        <Label text="After compensation, fluorescence channels should be ~uncorrelated. |r|&gt;0.2 flags over/under-compensation." styleClass="subtitle" wrapText="true"/>
+                        <ScrollPane fitToWidth="true" fitToHeight="true" VBox.vgrow="ALWAYS" styleClass="plot-pane">
+                            <content>
+                                <StackPane>
+                                    <children>
+                                        <ImageView fx:id="residualView"/>
+                                    </children>
+                                </StackPane>
+                            </content>
+                        </ScrollPane>
+                        <TableView fx:id="flaggedTable" prefHeight="160.0">
+                            <columns>
+                                <TableColumn fx:id="pairColR" text="Channel pair" prefWidth="220.0"/>
+                                <TableColumn fx:id="rColR"    text="r"            prefWidth="60.0"/>
+                                <TableColumn fx:id="signColR" text="Issue"        prefWidth="80.0"/>
+                            </columns>
+                            <placeholder><Label text="Run diagnostic after applying compensation."/></placeholder>
+                        </TableView>
+                    </children>
+                </VBox>
+            </children>
+        </HBox>
+    </children>
+</VBox>

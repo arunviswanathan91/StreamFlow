@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.SplitPane?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.control.TextField?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Priority?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.SetupController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Setup — Import FCS" styleClass="title"/>
+
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Experiment:"/>
+                <TextField fx:id="experimentField" promptText="Untitled Experiment" prefWidth="280.0"/>
+            </children>
+        </HBox>
+
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Button fx:id="chooseFolderButton" text="Choose FCS Folder…" onAction="#onChooseFolder"/>
+                <CheckBox fx:id="recursiveCheck" text="Include sub-folders"/>
+                <Button fx:id="loadButton" text="Load FCS" onAction="#onLoad"/>
+                <Button fx:id="keywordsButton" text="FCS Keywords…" onAction="#onShowKeywords"/>
+                <Button fx:id="exportGatingMlButton" text="Export GatingML…" onAction="#onExportGatingMl"/>
+                <Button fx:id="exportFcsButton" text="Export FCS…" onAction="#onExportFcs"/>
+                <Button fx:id="panelCheckButton" text="Panel check…" onAction="#onPanelCheck"/>
+            </children>
+        </HBox>
+        <Label fx:id="folderLabel" text="No folder selected" styleClass="subtitle"/>
+        <Label fx:id="summaryLabel" text="" styleClass="subtitle"/>
+
+        <SplitPane dividerPositions="0.5" VBox.vgrow="ALWAYS">
+            <items>
+                <VBox spacing="4.0">
+                    <children>
+                        <Label text="Samples"/>
+                        <TableView fx:id="sampleTable" VBox.vgrow="ALWAYS">
+                            <columns>
+                                <TableColumn fx:id="sampleNameCol" text="Sample" prefWidth="240.0"/>
+                                <TableColumn fx:id="sampleEventsCol" text="Events" prefWidth="100.0"/>
+                            </columns>
+                        </TableView>
+                    </children>
+                </VBox>
+                <VBox spacing="4.0">
+                    <children>
+                        <Label text="Channels"/>
+                        <TableView fx:id="channelTable" VBox.vgrow="ALWAYS">
+                            <columns>
+                                <TableColumn fx:id="channelNameCol" text="Channel" prefWidth="130.0"/>
+                                <TableColumn fx:id="channelMarkerCol" text="Marker" prefWidth="160.0"/>
+                                <TableColumn fx:id="channelTypeCol" text="Type" prefWidth="110.0"/>
+                            </columns>
+                        </TableView>
+                    </children>
+                </VBox>
+            </items>
+        </SplitPane>
+    </children>
+</VBox>

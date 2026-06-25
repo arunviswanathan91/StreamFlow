@@ -1,6 +1,7 @@
 # ── Internal / dev-only docs (kept locally, not for the public repo) ──────────
 AUDIT_REPORT.md
 BUILDING.md
+MANUAL_TESTING.md
 
 # ── Build outputs & dependencies ─────────────────────────────────────────────
 node_modules/
@@ -15,10 +16,45 @@ yarn-error.log
 # ── Bundled R runtime (≈1 GB, produced by the build, never committed) ─────────
 R-Portable/
 
+# ── Vendored dev tooling (large binaries kept locally, never committed) ───────
+# JDKs and Maven are set up by CI / the dev scripts, not stored in git.
+jdk-25.0.3+9/
+jdk-26.0.1/
+apache-maven-3.9.16/
+# Ikonli is consumed as a Maven dependency, not from its source tree.
+ikonli-master/
+# Vendored R package sources — cloned/extracted locally, installed into the R
+# library at build time, never committed (hundreds of MB of external source).
+engine/vendor/
+# Vendored Python package sources / wheels for the Python migration (large).
+python-migration/
+engine/py-vendor/
+# Python virtual environment for the engine (~500 MB, recreated by install scripts).
+engine/py-env/
+.venv/
+venv/
+env/
+
+# ── Python bytecode / caches ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# claude-code-java toolkit (review skills/templates), not part of the app build.
+claude-code-java-main/
+
+# ── Java / Maven build output ────────────────────────────────────────────────
+target/
+*.class
+
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/
 install_log.txt
+# Captured stdout/stderr from install/build runs (engine_install.out, py_install.out, …)
+*.out
 
 # ── R session artifacts (RStudio / Rscript leave these behind) ───────────────
 .Rhistory
@@ -40,9 +76,19 @@ install_log.txt
 # Office / OneDrive lock files (this repo lives under OneDrive\Documents)
 ~$*
 
+# ── Large / private test data (FCS files, fixtures — never for the public repo) ─
+test-assests/
+test-assets/
+test-data/
+*.fcs
+
+# ── Local Claude Code config (personal permissions + machine-specific paths) ──
+.claude/
+
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 Thumbs.db
 desktop.ini
 .DS_Store
 .vscode/
 .idea/
+*.iml

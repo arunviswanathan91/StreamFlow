@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.Slider?>
+<?import javafx.scene.control.TitledPane?>
+<?import javafx.scene.control.ToolBar?>
+<?import javafx.scene.control.Tooltip?>
+<?import javafx.scene.control.TreeView?>
+<?import javafx.scene.layout.BorderPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+
+<BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+            fx:controller="org.streamflow.ui.GraphWindowController" styleClass="app-root">
+
+    <top>
+        <VBox>
+            <children>
+                <ToolBar styleClass="statusbar">
+                    <items>
+                        <Button fx:id="prevSampleButton" text="◀">
+                            <tooltip><Tooltip text="Previous sample (Left arrow)"/></tooltip>
+                        </Button>
+                        <ComboBox fx:id="sampleJumpCombo" prefWidth="200.0"/>
+                        <Button fx:id="nextSampleButton" text="▶">
+                            <tooltip><Tooltip text="Next sample (Right arrow)"/></tooltip>
+                        </Button>
+                        <Separator orientation="VERTICAL"/>
+                        <Label text="Plot:"/>
+                        <ComboBox fx:id="plotTypeCombo"/>
+                        <Separator orientation="VERTICAL"/>
+                        <Label text="Gate:"/>
+                        <ComboBox fx:id="toolCombo"/>
+                        <Separator orientation="VERTICAL"/>
+                        <Button fx:id="channelsButton" text="Channels…" onAction="#onChannels">
+                            <tooltip><Tooltip text="Name detector channels with their target (CD4 …)"/></tooltip>
+                        </Button>
+                        <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
+                            <tooltip><Tooltip text="Copy plot image to clipboard (paste into PowerPoint)"/></tooltip>
+                        </Button>
+                        <Button fx:id="svgButton" text="SVG" onAction="#onSaveSvg">
+                            <tooltip><Tooltip text="Save the plot as an editable SVG vector file"/></tooltip>
+                        </Button>
+                        <Separator orientation="VERTICAL"/>
+                        <Button fx:id="undoButton" text="↶ Undo" onAction="#onUndo">
+                            <tooltip><Tooltip text="Undo the last gate change (Ctrl+Z)"/></tooltip>
+                        </Button>
+                        <Button fx:id="redoButton" text="↷ Redo" onAction="#onRedo">
+                            <tooltip><Tooltip text="Redo (Ctrl+Y / Ctrl+Shift+Z)"/></tooltip>
+                        </Button>
+                        <Separator orientation="VERTICAL"/>
+                        <CheckBox fx:id="snapCheck" text="Snap" selected="false" style="-fx-text-fill:#EAEFF5;">
+                            <tooltip><Tooltip text="Magnetically snap gate edges to density valleys while gating (off by default)"/></tooltip>
+                        </CheckBox>
+                        <CheckBox fx:id="confidenceCheck" text="Confidence" selected="false" style="-fx-text-fill:#EAEFF5;">
+                            <tooltip><Tooltip text="Show a green/yellow/red dot per gate by how cleanly its border separates populations (off by default)"/></tooltip>
+                        </CheckBox>
+                        <CheckBox fx:id="backgateCheck" text="Backgate" selected="false" style="-fx-text-fill:#EAEFF5;">
+                            <tooltip><Tooltip text="When on, selecting a descendant population overlays its events (orange) on the current plot instead of drilling in (off by default)"/></tooltip>
+                        </CheckBox>
+                        <Button fx:id="fmoButton" text="Set FMO">
+                            <tooltip><Tooltip text="Mark this sample as the FMO control for the shown channel(s): draws a dashed 95th-percentile reference line on every plot of that channel. Shift-click to clear."/></tooltip>
+                        </Button>
+                        <Button fx:id="compareButton" text="Compare" onAction="#onCompareStrip">
+                            <tooltip><Tooltip text="Show this population on the same axes across all opened samples; click a thumbnail to open that sample."/></tooltip>
+                        </Button>
+                        <CheckBox fx:id="smoothCheck" text="Smooth" selected="true" style="-fx-text-fill:#EAEFF5;"/>
+                        <Label text="Hist:"/>
+                        <ComboBox fx:id="histModeCombo"/>
+                        <Slider fx:id="bandwidthSlider" prefWidth="80.0" min="0.0" max="1.0" value="0.5">
+                            <tooltip><Tooltip text="Histogram smoothing bandwidth"/></tooltip>
+                        </Slider>
+                    </items>
+                </ToolBar>
+                <HBox fx:id="breadcrumbBar" styleClass="statusbar" spacing="2.0"/>
+                <HBox fx:id="downsampleBanner" spacing="6.0" alignment="CENTER_LEFT"
+                      managed="false" visible="false"
+                      style="-fx-background-color:#FFF3CD;-fx-border-color:#FFC107;-fx-border-width:0 0 1 0;-fx-padding:3 12 3 12;">
+                    <children>
+                        <Label text="⚠" style="-fx-font-size:11;-fx-text-fill:#856404;"/>
+                        <Label fx:id="downsampleLabel" text="" style="-fx-font-size:11;-fx-text-fill:#856404;"/>
+                    </children>
+                </HBox>
+            </children>
+        </VBox>
+    </top>
+
+    <left>
+        <VBox alignment="CENTER" styleClass="content" spacing="6.0">
+            <children>
+                <Label text="Y" styleClass="subtitle"/>
+                <ComboBox fx:id="yAxisCombo" prefWidth="130.0"/>
+                <ComboBox fx:id="yScaleCombo" prefWidth="110.0"/>
+                <Button fx:id="yAxisOptsButton" text="⚙">
+                    <tooltip><Tooltip text="Adjust Y axis scale (width / cofactor / range)"/></tooltip>
+                </Button>
+            </children>
+        </VBox>
+    </left>
+
+    <center>
+        <StackPane fx:id="plotHost"/>
+    </center>
+
+    <right>
+        <VBox styleClass="content" spacing="6.0" prefWidth="230.0">
+            <children>
+                <Label text="Gating tree" styleClass="subtitle"/>
+                <Label text="(click a population to view it)" styleClass="subtitle" wrapText="true"/>
+                <TreeView fx:id="gateTree" VBox.vgrow="ALWAYS"/>
+                <Button fx:id="removeGateButton" text="Remove population" onAction="#onRemoveGate"/>
+                <TitledPane text="Options" expanded="false" animated="false">
+                    <VBox spacing="5.0" style="-fx-padding:6;">
+                        <CheckBox fx:id="lightModeCheck" text="Light background">
+                            <tooltip><Tooltip text="Switch the plot to a white background for printing/export"/></tooltip>
+                        </CheckBox>
+                        <CheckBox fx:id="labelsVisibleCheck" text="Show gate labels" selected="true">
+                            <tooltip><Tooltip text="Toggle visibility of all gate name/stat labels on the plot"/></tooltip>
+                        </CheckBox>
+                        <CheckBox fx:id="fmoVisibleCheck" text="Show FMO lines" selected="true">
+                            <tooltip><Tooltip text="Hide the FMO reference lines without clearing them (Set FMO / Shift-click clears)"/></tooltip>
+                        </CheckBox>
+                    </VBox>
+                </TitledPane>
+            </children>
+        </VBox>
+    </right>
+
+    <bottom>
+        <VBox>
+            <children>
+                <HBox alignment="CENTER" styleClass="content" spacing="8.0">
+                    <children>
+                        <Label text="X" styleClass="subtitle"/>
+                        <ComboBox fx:id="xAxisCombo" prefWidth="170.0"/>
+                        <ComboBox fx:id="xScaleCombo" prefWidth="110.0"/>
+                        <Button fx:id="xAxisOptsButton" text="⚙">
+                            <tooltip><Tooltip text="Adjust X axis scale (width / cofactor / range)"/></tooltip>
+                        </Button>
+                        <Region HBox.hgrow="ALWAYS"/>
+                    </children>
+                </HBox>
+                <HBox style="-fx-background-color:#0A1525; -fx-padding:2 8 2 8;">
+                    <Label text="P Polygon · R Rect · E Ellipse · I Interval · Q Quadrant · N None · Del Remove · Ctrl+Z Undo · Ctrl+Y Redo · Ctrl+C Copy gate · Ctrl+V Paste · ← → Navigate"
+                           style="-fx-font-size:10; -fx-text-fill:#374E6A;"/>
+                </HBox>
+                <HBox styleClass="statusbar">
+                    <children>
+                        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+                    </children>
+                </HBox>
+            </children>
+        </VBox>
+    </bottom>
+
+</BorderPane>
