@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.Slider?>
+<?import javafx.scene.control.Spinner?>
+<?import javafx.scene.control.Tooltip?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Priority?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+<?import org.streamflow.ui.AnalysisChart?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.CellCycleController"
+      styleClass="content" spacing="8.0">
+    <children>
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Cell Cycle Analysis" styleClass="title"/>
+                <Button fx:id="helpButton" text="What is this?" onAction="#onHelp">
+                    <graphic><FontIcon iconLiteral="fas-question-circle"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Sample:"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="180.0"/>
+                <Label text="DNA channel:"/>
+                <ComboBox fx:id="channelCombo" prefWidth="150.0"/>
+                <Label text="Model:"/>
+                <ComboBox fx:id="modelCombo"/>
+                <Label text="Bins:"/>
+                <Spinner fx:id="binsSpinner" editable="true" prefWidth="100.0"/>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+                <Button fx:id="runButton" text="Fit" onAction="#onRun" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-wave-square"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+
+        <HBox spacing="10.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Show:" styleClass="subtitle"/>
+                <CheckBox fx:id="showHist" text="Histogram" selected="true"/>
+                <CheckBox fx:id="showG1" text="G0/G1" selected="true"/>
+                <CheckBox fx:id="showS" text="S" selected="true"/>
+                <CheckBox fx:id="showG2" text="G2/M" selected="true"/>
+                <CheckBox fx:id="showModel" text="Model" selected="true"/>
+                <Label text="  X-zoom:" styleClass="subtitle"/>
+                <Slider fx:id="xZoom" min="0.1" max="1.0" value="1.0" prefWidth="140.0">
+                    <tooltip><Tooltip text="Shrink the X axis to zoom into the G0/G1 + S region"/></tooltip>
+                </Slider>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Button fx:id="exportPngButton" text="Export PNG" onAction="#onExportPng"/>
+                <Button fx:id="exportSvgButton" text="Export SVG" onAction="#onExportSvg"/>
+            </children>
+        </HBox>
+
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+
+        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
+            <children>
+                <StackPane HBox.hgrow="ALWAYS" styleClass="plot-pane">
+                    <children>
+                        <AnalysisChart fx:id="chart"/>
+                    </children>
+                </StackPane>
+                <VBox fx:id="resultsBox" spacing="6.0" prefWidth="230.0">
+                    <children>
+                        <Label text="Results" styleClass="title"/>
+                        <Label fx:id="g1Label" text="G0/G1: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="sLabel" text="S: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="g2Label" text="G2/M: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="cvLabel" text="CV: —" style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
+                        <Label fx:id="fitLabel" text="" style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
+                    </children>
+                </VBox>
+            </children>
+        </HBox>
+    </children>
+</VBox>

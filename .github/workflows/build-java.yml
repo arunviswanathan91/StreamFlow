@@ -1,0 +1,92 @@
+name: build-java
+
+# CI for the JavaFX desktop app (app/) + headless compute engine (engine/).
+#
+# The app is now Python-first: the Java bridge spawns the Python (FlowKit) engine
+# by default, with the legacy R engine kept as a fallback until it is retired. This
+# job therefore stands up BOTH engines so the test suite exercises the real data
+# path on each:
+#   * Python  — a venv at engine/py-env with FlowKit installed. PyEngineTest and the
+#               command tests auto-detect this exact path and run against it.
+#   * R       — R 4.4 + jsonlite so the JavaFX<->R ProtocolConformanceTest runs for
+#               real (it auto-skips if R is missing).
+#
+# Tests that need large FCS fixtures (test-assests/, gitignored) self-skip in CI via
+# JUnit assumptions — that is expected. The heavy Bioconductor/CytoExploreR stack is
+# NOT installed here; module integration tests get their own gated job later.
+#
+# This job does NOT produce the packaged StreamFLOW.exe — jpackage packaging
+# (app/package.ps1) is a separate release pipeline and is still being aligned with
+# the Python engine.
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - 'engine/**'
+      - '.github/workflows/build-java.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'engine/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25 (Microsoft, LTS)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '25'
+          cache: maven
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Create engine venv + install FlowKit
+        shell: pwsh
+        run: |
+          # PyEngineTest / command tests expect the venv at engine\py-env (the same
+          # path run-dev.ps1 uses), so create it there exactly.
+          python -m venv engine\py-env
+          engine\py-env\Scripts\python.exe -m pip install --upgrade pip
+          # flowkit pulls flowio, flowutils, numpy, scipy, pandas; matplotlib is used
+          # by the render/stats commands; scikit-learn/umap-learn/openTSNE power the
+          # Dim. Reduction, Clustering and Classifier modules.
+          engine\py-env\Scripts\python.exe -m pip install flowkit matplotlib scikit-learn umap-learn openTSNE phenograph flowsom
+          engine\py-env\Scripts\python.exe -c "import flowkit; print('FlowKit', flowkit.__version__)"
+
+      - name: Set up R 4.4 (legacy engine fallback)
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+
+      - name: Install jsonlite
+        run: Rscript -e "install.packages('jsonlite', repos='https://cloud.r-project.org')"
+        shell: cmd
+
+      - name: Build and test (Python + R engine bridges)
+        working-directory: app
+        shell: cmd
+        run: >
+          mvn -B clean test
+          "-Dstreamflow.rscript=%RSCRIPT_PATH%"
+        env:
+          # r-lib/actions exposes R on PATH; resolve Rscript explicitly for the bridge.
+          # The Python tests self-configure via the engine\py-env path created above.
+          RSCRIPT_PATH: Rscript
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: app/target/surefire-reports/

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.Scatter3DController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="3D Scatter" styleClass="title"/>
+        <Label text="Render three channels as an orbitable 3-D point cloud (subsampled to 50k). Drag to rotate, scroll to zoom. Reads cached events — open the sample in a graph window first."
+               styleClass="subtitle" wrapText="true"/>
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Sample:"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="200.0"/>
+                <Label text="X:"/>
+                <ComboBox fx:id="xCombo" prefWidth="130.0"/>
+                <Label text="Y:"/>
+                <ComboBox fx:id="yCombo" prefWidth="130.0"/>
+                <Label text="Z:"/>
+                <ComboBox fx:id="zCombo" prefWidth="130.0"/>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+                <Button fx:id="renderButton" text="Render" onAction="#onRender" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-cube"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+        <StackPane fx:id="host" VBox.vgrow="ALWAYS" style="-fx-background-color:#0D1B2A;"/>
+    </children>
+</VBox>
