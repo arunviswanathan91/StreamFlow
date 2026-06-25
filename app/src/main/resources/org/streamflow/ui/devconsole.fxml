@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.TextArea?>
+<?import javafx.scene.layout.FlowPane?>
+<?import javafx.scene.layout.VBox?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.DevConsoleController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Developer / Engine Console" styleClass="title"/>
+        <Label text="Verifies the JavaFX ⇄ R bridge. Start 'Sleep' then switch tabs: the window stays responsive."
+               styleClass="subtitle" wrapText="true"/>
+        <FlowPane hgap="8.0" vgap="8.0">
+            <children>
+                <Button fx:id="pingButton" text="Ping" onAction="#onPing"/>
+                <Button fx:id="versionButton" text="Engine Version" onAction="#onVersion"/>
+                <Button fx:id="sleepButton" text="Sleep (5s, cancellable)" onAction="#onSleep"/>
+                <Button fx:id="errorButton" text="Trigger Error" onAction="#onError"/>
+                <Button fx:id="noisyButton" text="Noisy stdout" onAction="#onNoisy"/>
+            </children>
+        </FlowPane>
+        <TextArea fx:id="outputArea" editable="false" VBox.vgrow="ALWAYS" styleClass="console"/>
+    </children>
+</VBox>

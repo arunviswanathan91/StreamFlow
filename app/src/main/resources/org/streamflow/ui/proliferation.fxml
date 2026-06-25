@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Spinner?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.ProliferationController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Proliferation Index" styleClass="title"/>
+        <Label text="Fit a dye-dilution histogram (CFSE / CTV / Ki-67) with equal-σ, log2-spaced Gaussian generations. Reports precursor-corrected Proliferation &amp; Division Index (FlowJo convention)."
+               styleClass="subtitle" wrapText="true"/>
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Sample:"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="200.0"/>
+                <Label text="Dye channel:"/>
+                <ComboBox fx:id="channelCombo" prefWidth="160.0"/>
+                <Label text="Max generations:"/>
+                <Spinner fx:id="peaksSpinner" editable="true" prefWidth="100.0"/>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+                <Button fx:id="runButton" text="Fit" onAction="#onRun" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-wave-square"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
+            <children>
+                <ScrollPane fitToWidth="true" fitToHeight="true" HBox.hgrow="ALWAYS" styleClass="plot-pane">
+                    <content>
+                        <StackPane>
+                            <children>
+                                <ImageView fx:id="plotView"/>
+                            </children>
+                        </StackPane>
+                    </content>
+                </ScrollPane>
+                <VBox spacing="6.0" prefWidth="260.0">
+                    <children>
+                        <Label text="Indices" styleClass="title"/>
+                        <Label fx:id="piLabel" text="Proliferation Index: —"/>
+                        <Label fx:id="diLabel" text="Division Index: —"/>
+                        <Label fx:id="divLabel" text="\% Divided: —"/>
+                        <Label text="Generations" styleClass="title"/>
+                        <TableView fx:id="genTable" VBox.vgrow="ALWAYS">
+                            <columns>
+                                <TableColumn fx:id="genCol" text="Gen" prefWidth="50.0"/>
+                                <TableColumn fx:id="countCol" text="Count" prefWidth="100.0"/>
+                                <TableColumn fx:id="pctCol" text="\%" prefWidth="80.0"/>
+                            </columns>
+                        </TableView>
+                    </children>
+                </VBox>
+            </children>
+        </HBox>
+    </children>
+</VBox>

@@ -1,0 +1,32 @@
+<configuration>
+
+  <!-- Console (stderr) — visible in dev; absent when packaged as a windowed exe. -->
+  <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.err</target>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{20} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Rolling file in %APPDATA%\StreamFlow\logs (falls back to ~ if APPDATA unset).
+       This is the lifeline once the app is a windowed .exe with no terminal: Java
+       errors AND the R stderr stream (pumped through slf4j by RBridge) land here,
+       so a user can send "the app froze" logs with the exact R stack trace. -->
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${APPDATA:-${user.home}}/StreamFlow/logs/app.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${APPDATA:-${user.home}}/StreamFlow/logs/app.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>10MB</maxFileSize>
+      <maxHistory>14</maxHistory>
+      <totalSizeCap>100MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDERR"/>
+    <appender-ref ref="FILE"/>
+  </root>
+</configuration>

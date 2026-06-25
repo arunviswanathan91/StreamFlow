@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Spinner?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Priority?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.ClusteringController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Clustering" styleClass="title"/>
+        <Label text="FlowSOM or PhenoGraph clustering of a sample's fluorescence channels, with a median-expression heatmap."
+               styleClass="subtitle" wrapText="true"/>
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Method:"/>
+                <ComboBox fx:id="methodCombo"/>
+                <Label text="Sample:"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="200.0"/>
+                <Label text="Clusters (k):"/>
+                <Spinner fx:id="kSpinner" editable="true" prefWidth="90.0"/>
+                <Label text="Events:"/>
+                <Spinner fx:id="eventsSpinner" editable="true" prefWidth="120.0"/>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+                <Button fx:id="runButton" text="Run" onAction="#onRun" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-th"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+        <HBox spacing="10.0" VBox.vgrow="ALWAYS">
+            <children>
+                <ScrollPane fitToWidth="true" fitToHeight="true" HBox.hgrow="ALWAYS" styleClass="plot-pane">
+                    <content>
+                        <StackPane>
+                            <children>
+                                <ImageView fx:id="heatmapView"/>
+                            </children>
+                        </StackPane>
+                    </content>
+                </ScrollPane>
+                <VBox spacing="4.0" prefWidth="240.0">
+                    <children>
+                        <Label text="Clusters" styleClass="subtitle"/>
+                        <ListView fx:id="clusterList" VBox.vgrow="ALWAYS"/>
+                    </children>
+                </VBox>
+            </children>
+        </HBox>
+    </children>
+</VBox>

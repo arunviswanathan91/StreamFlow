@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.SplitPane?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.StatComparisonController"
+      styleClass="content" spacing="12.0">
+    <children>
+        <Label text="Statistical Comparison" styleClass="title"/>
+        <Label text="Compare a gate's frequency across sample groups. Auto-selects Mann-Whitney (2 groups), Wilcoxon (paired) or Kruskal-Wallis + Dunn (3+ groups). Type a group label next to each sample, pick the gate, then Run."
+               styleClass="subtitle" wrapText="true"/>
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Gate:"/>
+                <ComboBox fx:id="gateCombo" prefWidth="220.0"/>
+                <CheckBox fx:id="pairedCheck" text="Paired"/>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+                <Button fx:id="runButton" text="Run Test" onAction="#onRun" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-calculator"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
+        <SplitPane dividerPositions="0.38" VBox.vgrow="ALWAYS">
+            <items>
+                <VBox spacing="4.0">
+                    <children>
+                        <Label text="Samples → Groups"/>
+                        <TableView fx:id="sampleTable" editable="true" VBox.vgrow="ALWAYS">
+                            <columns>
+                                <TableColumn fx:id="sampleCol" text="Sample" prefWidth="160.0"/>
+                                <TableColumn fx:id="freqCol" text="Freq %" prefWidth="80.0"/>
+                                <TableColumn fx:id="groupCol" text="Group (edit)" prefWidth="120.0"/>
+                            </columns>
+                        </TableView>
+                    </children>
+                </VBox>
+                <VBox spacing="6.0">
+                    <children>
+                        <Label fx:id="resultLabel" text="Result: —" styleClass="title"/>
+                        <TableView fx:id="posthocTable" prefHeight="120.0">
+                            <columns>
+                                <TableColumn fx:id="pairCol" text="Pair" prefWidth="200.0"/>
+                                <TableColumn fx:id="pCol" text="p (adj)" prefWidth="90.0"/>
+                                <TableColumn fx:id="starCol" text="Sig" prefWidth="60.0"/>
+                            </columns>
+                        </TableView>
+                        <ScrollPane fitToWidth="true" fitToHeight="true" VBox.vgrow="ALWAYS" styleClass="plot-pane">
+                            <content>
+                                <StackPane>
+                                    <children>
+                                        <ImageView fx:id="plotView"/>
+                                    </children>
+                                </StackPane>
+                            </content>
+                        </ScrollPane>
+                    </children>
+                </VBox>
+            </items>
+        </SplitPane>
+    </children>
+</VBox>

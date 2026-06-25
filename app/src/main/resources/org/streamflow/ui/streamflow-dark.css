@@ -1,0 +1,195 @@
+/* StreamFLOW dark theme — ported from the Shiny palette (global.R):
+   bg #0D1B2A, panel #1B2A3B, accent #00B4D8, grid #243447,
+   text #E0E0E0 / muted #B0C4D8. */
+
+.root {
+    -fx-bg:        #0D1B2A;
+    -fx-panel:     #1B2A3B;
+    -fx-panel-2:   #243447;
+    -fx-accent-c:  #00B4D8;
+    -fx-text-c:    #EAEFF5;
+    -fx-text-mut:  #C7D6E8;
+    -fx-font-family: "Segoe UI", "Inter", sans-serif;
+    -fx-font-size: 13px;
+}
+
+.app-root {
+    -fx-background-color: -fx-bg;
+}
+
+/* Menu bar */
+.menu-bar {
+    -fx-background-color: -fx-panel;
+    -fx-border-color: -fx-panel-2;
+    -fx-border-width: 0 0 1 0;
+}
+/* Top-level menu titles (File, Help) live in menu-buttons inside the bar */
+.menu-bar > .container > .menu-button > .label {
+    -fx-text-fill: -fx-text-c;
+}
+.menu-bar > .container > .menu-button:hover,
+.menu-bar > .container > .menu-button:focused,
+.menu-bar > .container > .menu-button:showing {
+    -fx-background-color: -fx-panel-2;
+}
+.menu-bar > .container > .menu-button:hover > .label,
+.menu-bar > .container > .menu-button:showing > .label {
+    -fx-text-fill: -fx-text-c;
+}
+/* Drop-down popup for menus and any context menu */
+.context-menu {
+    -fx-background-color: -fx-panel;
+    -fx-border-color: -fx-panel-2;
+    -fx-border-width: 1;
+}
+.menu .label,
+.menu-item .label {
+    -fx-text-fill: -fx-text-c;
+}
+.menu-item:focused,
+.menu-item:hovered,
+.menu:focused,
+.menu:hovered {
+    -fx-background-color: -fx-accent-c;
+}
+.menu-item:focused .label,
+.menu-item:hovered .label {
+    -fx-text-fill: -fx-bg;
+}
+.menu-item:disabled .label {
+    -fx-text-fill: -fx-text-mut;
+    -fx-opacity: 0.6;
+}
+
+/* Sidebar */
+.sidebar {
+    -fx-background-color: -fx-panel;
+    -fx-padding: 0;
+}
+.brand {
+    -fx-text-fill: -fx-accent-c;
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+    -fx-padding: 16 16 12 16;
+}
+.list-view {
+    -fx-background-color: -fx-panel;
+    -fx-control-inner-background: -fx-panel;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+.list-cell {
+    -fx-background-color: -fx-panel;
+    -fx-text-fill: -fx-text-mut;
+    -fx-padding: 10 16 10 16;
+}
+.list-cell:filled:hover {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-text-c;
+}
+.list-cell:filled:selected {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-accent-c;
+}
+
+/* Content */
+.content {
+    -fx-padding: 20;
+    -fx-background-color: -fx-bg;
+}
+.title {
+    -fx-text-fill: -fx-accent-c;
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+}
+.subtitle {
+    -fx-text-fill: -fx-text-mut;
+}
+
+/* Buttons */
+.button {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-text-c;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+.button:hover {
+    -fx-background-color: derive(#243447, 18%);
+}
+.button:default,
+.button:focused {
+    -fx-border-color: -fx-accent-c;
+    -fx-border-radius: 4;
+}
+.button:disabled {
+    -fx-opacity: 0.45;
+}
+.button.primary {
+    -fx-background-color: -fx-accent-c;
+    -fx-text-fill: #06222E;
+    -fx-font-weight: bold;
+}
+.button.primary:hover {
+    -fx-background-color: derive(#00B4D8, 12%);
+}
+/* Ikonli icons inherit text colour */
+.ikonli-font-icon {
+    -fx-icon-color: -fx-text-c;
+    -fx-fill: -fx-text-c;
+}
+.button.primary .ikonli-font-icon {
+    -fx-icon-color: #06222E;
+    -fx-fill: #06222E;
+}
+
+/* Console / text area */
+.console,
+.text-area {
+    -fx-control-inner-background: #0A1622;
+    -fx-text-fill: -fx-text-c;
+    -fx-font-family: "Cascadia Mono", "Consolas", monospace;
+    -fx-font-size: 12px;
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 4;
+}
+.text-area .content {
+    -fx-background-color: #0A1622;
+}
+
+/* Plot pane */
+.plot-pane, .plot-pane > .viewport {
+    -fx-background-color: -fx-bg;
+}
+
+/* Status bar */
+.statusbar {
+    -fx-background-color: -fx-panel;
+    -fx-padding: 6 12 6 12;
+    -fx-alignment: center-left;
+}
+.statusbar .label {
+    -fx-text-fill: -fx-text-mut;
+}
+.engine-status {
+    -fx-text-fill: -fx-accent-c;
+}
+
+/* Progress bar */
+.progress-bar > .bar {
+    -fx-background-color: -fx-accent-c;
+    -fx-background-radius: 3;
+}
+.progress-bar > .track {
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 3;
+}
+
+/* Scrollbars */
+.scroll-bar:vertical, .scroll-bar:horizontal {
+    -fx-background-color: -fx-panel;
+}
+.scroll-bar .thumb {
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 4;
+}
