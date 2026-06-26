@@ -2,17 +2,20 @@ package org.streamflow.ui;
 
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.beans.property.ReadOnlyStringWrapper;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXML;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
@@ -33,7 +36,12 @@ import java.util.TreeSet;
 public class CrossSampleController implements ContextAware {
 
     @FXML private Button refreshButton;
+    @FXML private Button selectAllButton;
+    @FXML private Button selectNoneButton;
     @FXML private Label statusLabel;
+    @FXML private TableView<SampleSel> sampleSelectTable;
+    @FXML private TableColumn<SampleSel, Boolean> selUseCol;
+    @FXML private TableColumn<SampleSel, String> selNameCol;
     @FXML private TableView<GateRow> matrixTable;
     @FXML private TableView<ConsRow> consistencyTable;
     @FXML private TableColumn<ConsRow, String> cGateCol, cMeanCol, cSdCol, cCvCol, cFlagCol;
@@ -44,10 +52,18 @@ public class CrossSampleController implements ContextAware {
     private final ObservableList<GateRow> matrixRows = FXCollections.observableArrayList();
     private final ObservableList<ConsRow> consRows = FXCollections.observableArrayList();
     private final ObservableList<DriftRow> driftRows = FXCollections.observableArrayList();
+    private final ObservableList<SampleSel> sampleSel = FXCollections.observableArrayList();
 
     private AppContext ctx;
-    private List<String> sampleList = new ArrayList<>();   // samples with cached data
+    private List<String> sampleList = new ArrayList<>();   // selected + loaded samples
     private List<String> gateList = new ArrayList<>();      // union of gate names
+
+    /** A selectable sample row in the left-hand picker. */
+    public static final class SampleSel {
+        final String name;
+        final SimpleBooleanProperty use = new SimpleBooleanProperty(true);
+        SampleSel(String name) { this.name = name; }
+    }
 
     /** A gate's frequency across all samples (aligned to {@link #sampleList}). */
     public static final class GateRow {
@@ -72,6 +88,12 @@ public class CrossSampleController implements ContextAware {
 
     @FXML
     public void initialize() {
+        selUseCol.setCellValueFactory(c -> c.getValue().use);
+        selUseCol.setCellFactory(CheckBoxTableCell.forTableColumn(selUseCol));
+        selUseCol.setEditable(true);
+        selNameCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(shortName(c.getValue().name)));
+        sampleSelectTable.setItems(sampleSel);
+        sampleSelectTable.setEditable(true);
         cGateCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(c.getValue().gate()));
         cMeanCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(c.getValue().mean()));
         cSdCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(c.getValue().sd()));
@@ -98,22 +120,71 @@ public class CrossSampleController implements ContextAware {
     public void init(AppContext context) {
         this.ctx = context;
         setDisabled(false);
-        refresh();
+        syncSampleSelList();
+        clearViews("Tick samples on the left, then click Compute.");
     }
 
-    @FXML private void onRefresh() { refresh(); }
+    @FXML private void onRefresh() { compute(); }
+    @FXML private void onSelectAll()  { for (SampleSel s : sampleSel) s.use.set(true);  sampleSelectTable.refresh(); }
+    @FXML private void onSelectNone() { for (SampleSel s : sampleSel) s.use.set(false); sampleSelectTable.refresh(); }
 
-    private void refresh() {
+    /** Rebuild the picker from the workspace sample list, preserving existing tick state. */
+    private void syncSampleSelList() {
         if (ctx == null) return;
-        WorkspaceModel ws = ctx.workspace();
+        Map<String, Boolean> prev = new LinkedHashMap<>();
+        for (SampleSel s : sampleSel) prev.put(s.name, s.use.get());
+        sampleSel.clear();
+        for (String s : ctx.workspace().sampleNames()) {
+            SampleSel row = new SampleSel(s);
+            if (prev.containsKey(s)) row.use.set(prev.get(s));
+            sampleSel.add(row);
+        }
+    }
 
-        // samples with cached events
+    private void clearViews(String status) {
+        matrixRows.clear(); consRows.clear(); driftRows.clear();
+        matrixTable.getColumns().clear();
+        driftTable.getColumns().clear();
+        sampleList = new ArrayList<>(); gateList = new ArrayList<>();
+        drawRadar();
+        statusLabel.setText(status);
+    }
+
+    /** Gather the ticked samples, load their events on demand, then build the four views. */
+    private void compute() {
+        if (ctx == null) return;
+        syncSampleSelList();
+        List<String> selected = new ArrayList<>();
+        for (SampleSel s : sampleSel) if (s.use.get()) selected.add(s.name);
+        if (selected.size() < 1) { clearViews("Tick at least one sample, then Compute."); return; }
+        if (!anyGatesFor(selected)) {
+            info("Gates not detected",
+                 "The selected samples have no gated populations.\n\nDraw a gating strategy in a graph "
+                 + "window and apply it to all samples (Workstation → right-click → Apply to all), then Compute.");
+            clearViews("No gates on the selected samples.");
+            return;
+        }
+        statusLabel.setText("Loading events for " + selected.size() + " sample(s)…");
+        EventLoader.ensureLoaded(ctx, selected, statusLabel::setText, () -> computeViews(selected));
+    }
+
+    private boolean anyGatesFor(List<String> samples) {
+        WorkspaceModel ws = ctx.workspace();
+        for (String s : samples) {
+            if (!ws.hasTree(s)) continue;
+            for (PopNode n : ws.treeFor(s).selfAndDescendants()) if (!n.isRoot()) return true;
+        }
+        return false;
+    }
+
+    /** Build the matrix/consistency/radar/drift views over the (now loaded) selected samples. */
+    private void computeViews(List<String> selected) {
+        WorkspaceModel ws = ctx.workspace();
         sampleList = new ArrayList<>();
-        for (String s : ws.sampleNames()) {
+        for (String s : selected) {
             EventData d = ws.data(s);
             if (d != null && d.rows() > 0) sampleList.add(s);
         }
-        // union of gate names across those samples
         TreeSet<String> gates = new TreeSet<>();
         for (String s : sampleList) {
             PopNode root = ws.treeFor(s);
@@ -122,14 +193,10 @@ public class CrossSampleController implements ContextAware {
         gateList = new ArrayList<>(gates);
 
         if (sampleList.isEmpty() || gateList.isEmpty()) {
-            matrixRows.clear(); consRows.clear(); driftRows.clear();
-            matrixTable.getColumns().clear();
-            statusLabel.setText("Open samples (graph windows) and draw gates to populate cross-sample views.");
-            drawRadar();
+            clearViews("No gated populations on the selected samples.");
             return;
         }
 
-        // frequency matrix: gate -> per-sample freq
         Map<String, double[]> freqByGate = new LinkedHashMap<>();
         for (String g : gateList) freqByGate.put(g, new double[sampleList.size()]);
         for (int si = 0; si < sampleList.size(); si++) {
@@ -150,6 +217,13 @@ public class CrossSampleController implements ContextAware {
         if (!gateList.isEmpty()) driftGateCombo.getSelectionModel().selectFirst();
 
         statusLabel.setText(String.format("%d sample(s) × %d gate(s).", sampleList.size(), gateList.size()));
+    }
+
+    /** Simple modal info dialog with a single OK button. */
+    private void info(String title, String msg) {
+        Alert a = new Alert(Alert.AlertType.INFORMATION);
+        a.setTitle(title); a.setHeaderText(title); a.setContentText(msg);
+        a.showAndWait();
     }
 
     // ---- #15 gate × sample matrix -------------------------------------------
@@ -393,5 +467,7 @@ public class CrossSampleController implements ContextAware {
     private void setDisabled(boolean d) {
         refreshButton.setDisable(d);
         driftGateCombo.setDisable(d);
+        selectAllButton.setDisable(d);
+        selectNoneButton.setDisable(d);
     }
 }

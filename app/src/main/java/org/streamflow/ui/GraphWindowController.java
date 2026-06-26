@@ -179,6 +179,7 @@ public class GraphWindowController {
             Stage stage = new Stage();
             stage.setTitle("StreamFLOW — " + title);
             stage.setScene(scene);
+            AppIcons.apply(stage);
             return new Win(stage, c);
         } catch (Exception e) {
             throw new RuntimeException("Could not open graph window: " + e.getMessage(), e);
@@ -883,7 +884,10 @@ public class GraphWindowController {
             double newHi = hi > 0 ? hi * 10 : 1000;
             if (xAxis) plot.setXMax(newHi); else plot.setYMax(newHi);
         });
-        HBox extend = new HBox(6, extMinus, extPlus);
+        // Revert just the range (undo Extend) without resetting the transform width like Auto does.
+        Button resetRange = new Button("Reset range");
+        resetRange.setOnAction(ev -> { if (xAxis) plot.resetXRange(); else plot.resetYRange(); });
+        HBox extend = new HBox(6, extMinus, extPlus, resetRange);
         extend.setAlignment(Pos.CENTER_LEFT);
 
         Label title = new Label((xAxis ? "X" : "Y") + " axis · " + (chan == null ? "" : chan));
@@ -974,11 +978,12 @@ public class GraphWindowController {
         gp.add(new Label("Export DPI:"), 0, 1); gp.add(dpiSlider, 1, 1); gp.add(dpiLabel, 2, 1);
         gp.add(gateLabelsCheck, 0, 2);
 
-        Dialog<Void> dlg = new Dialog<>();
+        Dialog<ButtonType> dlg = new Dialog<>();
         dlg.setTitle("Export options");
         dlg.setHeaderText(null);
         dlg.getDialogPane().setContent(gp);
         dlg.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dlg.setResultConverter(bt -> bt);
 
         if (dlg.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
             // Save settings
@@ -1328,6 +1333,7 @@ public class GraphWindowController {
         sp.setStyle("-fx-background:#0D1B2A; -fx-background-color:#0D1B2A;");
         String pop = currentNode.isRoot() ? rootName : currentNode.name();
         Stage stage = new Stage();
+        AppIcons.apply(stage);
         stage.setTitle("Compare — " + pop + " across " + samples.size() + " samples");
         Scene scene = new Scene(sp, Math.min(1200, 60 + samples.size() * 250), 320);
         scene.getStylesheets().add(GraphWindowController.class
