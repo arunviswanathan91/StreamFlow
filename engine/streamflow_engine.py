@@ -668,6 +668,252 @@ def _apply_compensation(i, a):
     return {"channels": channels, "applied": applied}
 
 
+@command("comp_preview")
+def _comp_preview(i, a):
+    """Preview the effect of a spillover matrix on ONE channel pair WITHOUT committing it
+    globally. Compensates the requested channels in-memory with numpy (comp = raw @ inv(S),
+    matching FlowKit's detectors-as-rows convention) so the user can see the before/after of
+    *edited* coefficients before clicking Apply. Channels outside the spillover set pass through
+    unchanged.
+
+    args: {sample, x, y, channels, matrix}  (channels/matrix optional → falls back to stored)
+    Returns {x, y, raw_file, comp_file, rows, cols=2, total}
+    """
+    import numpy as np
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    a = a or {}
+    s = _sample_by_name(a.get("sample"))
+    pnn = list(s.pnn_labels)
+    xch, ych = a.get("x"), a.get("y")
+    if not xch or xch not in pnn or not ych or ych not in pnn:
+        raise ValueError("Both x and y channels must be valid fluorescence channels.")
+
+    channels = list(a.get("channels") or [])
+    matrix = [list(r) for r in (a.get("matrix") or [])]
+    if not channels or not matrix:
+        cm = STATE.get("comp_matrix")
+        if not cm:
+            raise ValueError("No compensation matrix to preview — Extract or Compute first.")
+        channels, matrix = cm["channels"], cm["matrix"]
+
+    # restrict the spillover to channels actually present, preserving matrix order
+    present = [c for c in channels if c in pnn]
+    keep = [k for k, c in enumerate(channels) if c in pnn]
+    S = np.array(matrix, dtype=float)[np.ix_(keep, keep)]
+    spill_cols = [pnn.index(c) for c in present]
+
+    raw_all = np.asarray(s.get_events(source="raw"), dtype=float)
+    raw_spill = raw_all[:, spill_cols]
+    try:
+        comp_spill = raw_spill @ np.linalg.inv(S)
+    except np.linalg.LinAlgError:
+        raise ValueError("Spillover matrix is singular — check for a zero/duplicated row.")
+
+    def comp_col(ch):
+        # compensated value if ch is a spillover channel, else the unchanged raw column
+        if ch in present:
+            return comp_spill[:, present.index(ch)]
+        return raw_all[:, pnn.index(ch)]
+
+    raw_pair = np.column_stack([raw_all[:, pnn.index(xch)], raw_all[:, pnn.index(ych)]])
+    comp_pair = np.column_stack([comp_col(xch), comp_col(ych)])
+
+    n = raw_pair.shape[0]
+    cap = int(a.get("n", 100000))
+    if n > cap:
+        idx = np.random.default_rng(0).choice(n, cap, replace=False)
+        raw_pair = raw_pair[idx]
+        comp_pair = comp_pair[idx]
+
+    ts = int(time.time() * 1000)
+    raw_path = os.path.join(CONTROL_DIR, "sfcpr_%s_%d.bin" % (i, ts))
+    comp_path = os.path.join(CONTROL_DIR, "sfcpc_%s_%d.bin" % (i, ts))
+    raw_pair.astype("<f4").tofile(raw_path)
+    comp_pair.astype("<f4").tofile(comp_path)
+    return {"x": xch, "y": ych, "raw_file": raw_path, "comp_file": comp_path,
+            "rows": int(raw_pair.shape[0]), "cols": 2, "total": int(n)}
+
+
+def _otsu_threshold(vals, bins=256):
+    """Otsu's bimodal split on a 1-D array (expects a display space, e.g. arcsinh)."""
+    import numpy as np
+    finite = vals[np.isfinite(vals)]
+    if finite.size < 10:
+        return float(np.median(finite)) if finite.size else 0.0
+    lo, hi = np.percentile(finite, [0.5, 99.5])
+    if hi <= lo:
+        return float(hi)
+    counts, edges = np.histogram(finite, bins=bins, range=(lo, hi))
+    counts = counts.astype(float)
+    total = counts.sum()
+    if total == 0:
+        return float((lo + hi) / 2)
+    mids = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(counts)
+    w1 = total - w0
+    sum_cum = np.cumsum(counts * mids)
+    mu_total = sum_cum[-1]
+    eps = 1e-12
+    mu0 = sum_cum / (w0 + eps)
+    mu1 = (mu_total - sum_cum) / (w1 + eps)
+    between = w0 * w1 * (mu0 - mu1) ** 2
+    return float(mids[int(np.argmax(between))])
+
+
+def _scatter_cleanup_mask(ev, pnn, fsc, ssc):
+    """FlowJo-style size cleanup: keep the central scatter population (debris/saturation
+    removed) via a percentile box on FSC/SSC. Returns a boolean mask over rows."""
+    import numpy as np
+    mask = np.ones(ev.shape[0], dtype=bool)
+    for ch in (fsc, ssc):
+        if ch and ch in pnn:
+            v = ev[:, pnn.index(ch)]
+            fin = v[np.isfinite(v)]
+            if fin.size:
+                lo, hi = np.percentile(fin, [5, 95])
+                mask &= (v >= lo) & (v <= hi)
+    return mask
+
+
+@command("compute_spillover_from_controls")
+def _compute_spillover_from_controls(i, a):
+    """Compute a spillover matrix from single-colour controls + an (optional) universal
+    negative, FlowJo-style (Bagwell & Adams 1993):
+
+      1. size-cleanup gate (FSC/SSC percentile box) on every control,
+      2. split each single-stain control's PRIMARY detector into positive/negative (Otsu in
+         arcsinh space); require >100 positive events and >=2% of the gated parent,
+      3. spillover[p][d] = median(positive_d) - negative_baseline_d  (unstained autofluorescence
+         if a universal negative is supplied, else the control's own negative population),
+      4. normalise each row so its primary detector = 1.0.
+
+    args: {unstained?, controls?:[{sample,channel}], scatter?:{x,y}}
+          (controls auto-assigned by brightest detector when omitted)
+    Returns {channels, matrix, controls:[{channel,sample,threshold,threshold_t,n_pos,n_neg,
+             pct_pos,ok,hist:{x,counts}}], scatter:{x,y}, unstained}
+    """
+    import numpy as np
+    if not STATE["meta"]:
+        raise ValueError("Load the control FCS files first.")
+    a = a or {}
+
+    pnn0 = list(STATE["meta"][0]["pnn"])
+    fluor = [c for c in pnn0 if not _scatter(c)]
+    if len(fluor) < 2:
+        raise ValueError("Need at least 2 fluorescence detectors for compensation.")
+
+    scatter = a.get("scatter") or {}
+    fsc = scatter.get("x") or next((c for c in pnn0 if re.search(r"FSC.?A|FSC", c, re.I)), None)
+    ssc = scatter.get("y") or next((c for c in pnn0 if re.search(r"SSC.?A|SSC", c, re.I)), None)
+
+    unstained = a.get("unstained")
+    controls_in = a.get("controls")
+    sample_names = [m["name"] for m in STATE["meta"]]
+
+    def _brightest(name, used):
+        """Detector with the highest gated median (FlowJo's auto-matching heuristic)."""
+        s = _sample_by_name(name)
+        ev = np.asarray(s.get_events(source="raw"), dtype=float)
+        pnn = list(s.pnn_labels)
+        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc)
+        evg = ev[mask] if mask.any() else ev
+        best, best_med = None, -np.inf
+        for c in fluor:
+            med = float(np.median(evg[:, pnn.index(c)]))
+            if med > best_med and c not in used:
+                best_med, best = med, c
+        return best
+
+    # default: every non-unstained sample is a single-stain control (auto-assigned)
+    if controls_in is None:
+        controls_in = [{"sample": nm} for nm in sample_names if not (unstained and nm == unstained)]
+
+    # resolve each control's detector, auto-assigning by brightest where unspecified
+    controls, used = [], set()
+    for ctrl in controls_in:
+        nm = ctrl.get("sample")
+        if not nm or nm not in sample_names:
+            continue
+        ch = ctrl.get("channel") or _brightest(nm, used)
+        if ch:
+            used.add(ch)
+            controls.append({"sample": nm, "channel": ch})
+
+    if not controls:
+        raise ValueError("No single-stain controls — assign controls or load single-stain files.")
+
+    detectors = [c["channel"] for c in controls]
+
+    # universal-negative autofluorescence baseline per detector
+    baseline = {}
+    if unstained and unstained in sample_names:
+        su = _sample_by_name(unstained)
+        evu = np.asarray(su.get_events(source="raw"), dtype=float)
+        pnnu = list(su.pnn_labels)
+        mu = _scatter_cleanup_mask(evu, pnnu, fsc, ssc)
+        evug = evu[mu] if mu.any() else evu
+        for d in detectors:
+            baseline[d] = float(np.median(evug[:, pnnu.index(d)]))
+
+    # per-control positive/negative threshold overrides (arcsinh space), keyed by sample name —
+    # set when the user drags the split on a control's separation histogram.
+    overrides = a.get("threshold_overrides") or {}
+
+    n = len(detectors)
+    matrix = [[1.0 if r == c else 0.0 for c in range(n)] for r in range(n)]
+    reports = []
+
+    for ri, ctrl in enumerate(controls):
+        if is_cancelled(i):
+            raise Cancelled()
+        send_progress(i, (ri + 0.5) / n, "Gating %s…" % ctrl["sample"])
+        name, primary = ctrl["sample"], ctrl["channel"]
+        s = _sample_by_name(name)
+        ev = np.asarray(s.get_events(source="raw"), dtype=float)
+        pnn = list(s.pnn_labels)
+        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc)
+        evg = ev[mask] if mask.any() else ev
+        prim = evg[:, pnn.index(primary)]
+
+        prim_t = np.arcsinh(prim / 150.0)
+        thr_t = float(overrides[name]) if name in overrides else _otsu_threshold(prim_t)
+        thr = float(np.sinh(thr_t) * 150.0)
+        pos_mask = prim >= thr
+        neg_mask = ~pos_mask
+        n_pos, n_neg = int(pos_mask.sum()), int(neg_mask.sum())
+        pct_pos = 100.0 * n_pos / max(1, evg.shape[0])
+        ok = n_pos > 100 and pct_pos >= 2.0
+
+        def neg_med(d):
+            if d in baseline:
+                return baseline[d]
+            col = evg[:, pnn.index(d)]
+            return float(np.median(col[neg_mask])) if neg_mask.any() else 0.0
+
+        pos = evg[pos_mask] if pos_mask.any() else evg
+        signal = {d: float(np.median(pos[:, pnn.index(d)])) - neg_med(d) for d in detectors}
+        denom = signal[primary] if abs(signal[primary]) > 1e-9 else 1.0
+        for ci, d in enumerate(detectors):
+            matrix[ri][ci] = round(signal[d] / denom, 5)
+        matrix[ri][ri] = 1.0
+
+        finite = prim_t[np.isfinite(prim_t)]
+        lo, hi = (np.percentile(finite, [0.5, 99.5]) if finite.size else (0.0, 1.0))
+        counts, edges = np.histogram(finite, bins=80, range=(lo, hi))
+        xmid = 0.5 * (edges[:-1] + edges[1:])
+        reports.append({
+            "channel": primary, "sample": name,
+            "threshold": thr, "threshold_t": thr_t,
+            "n_pos": n_pos, "n_neg": n_neg, "pct_pos": round(pct_pos, 2), "ok": bool(ok),
+            "hist": {"x": xmid.tolist(), "counts": counts.tolist()},
+        })
+
+    STATE["comp_matrix"] = {"channels": detectors, "matrix": matrix, "fk_matrix": None}
+    return {"channels": detectors, "matrix": matrix, "controls": reports,
+            "scatter": {"x": fsc, "y": ssc}, "unstained": unstained}
+
+
 # ---- transformation ---------------------------------------------------------
 
 @command("list_fluor_channels")
@@ -1052,9 +1298,6 @@ def _run_proliferation(i, a):
     import numpy as np
     from scipy.optimize import curve_fit
     from scipy.signal import find_peaks
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     if not STATE["meta"]:
         raise ValueError("Load data first.")
@@ -1145,30 +1388,24 @@ def _run_proliferation(i, a):
     generations = [{"gen": g, "count": int(round(N[g])),
                     "pct": round(100.0 * N[g] / total_cells, 2)} for g in gens]
 
-    send_progress(i, 0.85, "Rendering…")
-    palette = plt.cm.viridis(np.linspace(0, 0.92, len(gens)))
-    fig, ax = plt.subplots(figsize=(7, 5), facecolor="white")
-    ax.set_facecolor("white")
-    ax.bar(x, y, width=dx, color="#D8DEE9", edgecolor="none")
+    # Build per-generation curves for the interactive JavaFX chart (no matplotlib needed)
     fit_c = np.zeros_like(x)
-    for idx, g in enumerate(gens):
+    gen_curves = []
+    for g in gens:
         gc = amps[g] * np.exp(-0.5 * ((x - (mu0 - g * delta)) / sig) ** 2)
         fit_c = fit_c + gc
-        ax.fill_between(x, 0, gc, color=palette[idx], alpha=0.6, label="Gen %d" % g)
-    ax.plot(x, fit_c, color="#111111", lw=1.2, ls="--", label="Model")
-    ax.set_xlabel("log10(%s)  — brighter → fewer divisions" % channel)
-    ax.set_ylabel("Count")
-    ax.set_title("Proliferation · PI=%.2f  DI=%.2f  Divided=%.1f%%" % (PI, DI, pct_divided))
-    ax.legend(fontsize=7, ncol=2, framealpha=0.9)
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR, "sfpr_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
+        gen_curves.append({"gen": g, "y": gc.tolist()})
 
-    return {"png": png_path, "channel": channel,
+    return {"channel": channel,
             "PI": round(float(PI), 3), "DI": round(float(DI), 3),
             "pct_divided": round(float(pct_divided), 2),
-            "generations": generations, "n": int(vals.size)}
+            "generations": generations, "n": int(vals.size),
+            "curves": {
+                "x": x.tolist(),
+                "hist": y.tolist(),
+                "generations": gen_curves,
+                "total": fit_c.tolist()
+            }}
 
 
 # ---- analysis A4: statistical comparison between groups --------------------
@@ -1438,6 +1675,7 @@ def _run_apoptosis(i, a):
         "png":              png_path,
         "annexin_channel":  annexin_ch,
         "pi_channel":       pi_ch,
+        "events":           {"ann": ax_s.tolist(), "pi": py_s.tolist()},
     }
 
 

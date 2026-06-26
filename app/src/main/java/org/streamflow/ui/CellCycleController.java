@@ -37,7 +37,7 @@ public class CellCycleController implements ContextAware {
 
     @FXML private ComboBox<String> sampleCombo, channelCombo, modelCombo;
     @FXML private Spinner<Integer> binsSpinner;
-    @FXML private Button refreshButton, runButton, helpButton, exportPngButton, exportSvgButton;
+    @FXML private Button refreshButton, runButton, helpButton, copyButton, exportPngButton, exportSvgButton;
     @FXML private CheckBox showHist, showG1, showS, showG2, showModel;
     @FXML private Slider xZoom;
     @FXML private Label statusLabel, g1Label, sLabel, g2Label, cvLabel, fitLabel;
@@ -138,6 +138,17 @@ public class CellCycleController implements ContextAware {
     }
 
     @FXML
+    private void onCopy() {
+        int dpi = ctx != null ? ctx.settings().exportDpi() : 300;
+        javafx.scene.image.WritableImage img = chart.snapshotAtDpi(dpi);
+        if (img == null) { statusLabel.setText("Nothing to copy — run a fit first."); return; }
+        javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
+        cc.putImage(img);
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(cc);
+        statusLabel.setText("Copied " + dpi + " DPI cell cycle plot — paste into PowerPoint.");
+    }
+
+    @FXML
     private void onExportPng() {
         int dpi = ctx != null ? ctx.settings().exportDpi() : 300;
         javafx.scene.image.WritableImage img = chart.snapshotAtDpi(dpi);
@@ -206,6 +217,6 @@ public class CellCycleController implements ContextAware {
     private void setDisabled(boolean d) {
         sampleCombo.setDisable(d); channelCombo.setDisable(d); modelCombo.setDisable(d);
         binsSpinner.setDisable(d); refreshButton.setDisable(d); runButton.setDisable(d);
-        exportPngButton.setDisable(d); exportSvgButton.setDisable(d);
+        copyButton.setDisable(d); exportPngButton.setDisable(d); exportSvgButton.setDisable(d);
     }
 }

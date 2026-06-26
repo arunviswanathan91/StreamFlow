@@ -34,7 +34,10 @@
                 </Menu>
                 <Menu text="Help">
                     <items>
-                        <MenuItem text="About StreamFLOW" onAction="#onSettings"/>
+                        <MenuItem text="User Guide" onAction="#onUserGuide"/>
+                        <MenuItem text="Compensation Help" onAction="#onCompensationHelp"/>
+                        <SeparatorMenuItem/>
+                        <MenuItem text="About StreamFLOW" onAction="#onAbout"/>
                     </items>
                 </Menu>
             </menus>

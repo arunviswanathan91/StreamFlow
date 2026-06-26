@@ -38,6 +38,7 @@ public class StreamFlowApp extends Application {
         stage.setMinWidth(1100);
         stage.setMinHeight(700);
         stage.setScene(scene);
+        org.streamflow.ui.AppIcons.apply(stage);
         stage.show();
 
         startEngine();

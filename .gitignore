@@ -82,8 +82,25 @@ test-assets/
 test-data/
 *.fcs
 
-# ── Local Claude Code config (personal permissions + machine-specific paths) ──
+# ── AI assistant artifacts (never for the public repo) ───────────────────────
+# Local Claude Code config (personal permissions + machine-specific paths),
+# project instruction files, memories, and any other coding-assistant scratch.
 .claude/
+CLAUDE.md
+CLAUDE.local.md
+.claude.json
+*.local.md
+.cursor/
+.cursorrules
+.aider*
+.continue/
+.windsurf/
+.github/copilot-instructions.md
+# AI-generated planning / report scratch left at the repo root
+PLAN.md
+NOTES.md
+TODO.ai.md
+SCRATCH.md
 
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 Thumbs.db

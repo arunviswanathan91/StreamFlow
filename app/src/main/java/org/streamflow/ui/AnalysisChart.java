@@ -39,6 +39,14 @@ public final class AnalysisChart extends Region {
     private double xMin = 0, xMax = 1;           // current (zoomable) X view
     private double xDataMin = 0, xDataMax = 1;   // full data extent
 
+    // optional draggable threshold (e.g. a compensation positive/negative split)
+    private double thresholdX = Double.NaN;
+    private boolean thresholdEnabled = false;
+    private boolean draggingThreshold = false;
+    private java.util.function.Consumer<Double> onThresholdChange;
+    private double lastLeft = 60, lastPw = 1;    // captured each redraw for pixel<->data mapping
+    private boolean legendVisible = true;        // hide on compact charts where it overlaps bars
+
     private static final double ML = 60, MR = 16, MT = 30, MB = 46;
 
     public AnalysisChart() {
@@ -46,6 +54,29 @@ public final class AnalysisChart extends Region {
         widthProperty().addListener((o, a, b) -> redraw());
         heightProperty().addListener((o, a, b) -> redraw());
         setMinSize(200, 160);
+        canvas.setOnMousePressed(e -> {
+            if (thresholdEnabled && Math.abs(e.getX() - sx(thresholdX, lastLeft, lastPw)) < 8) draggingThreshold = true;
+        });
+        canvas.setOnMouseDragged(e -> { if (draggingThreshold) { thresholdX = dataXAt(e.getX()); redraw(); } });
+        canvas.setOnMouseReleased(e -> {
+            if (draggingThreshold) { draggingThreshold = false; if (onThresholdChange != null) onThresholdChange.accept(thresholdX); }
+        });
+        canvas.setOnMouseMoved(e -> {
+            if (thresholdEnabled) canvas.setCursor(Math.abs(e.getX() - sx(thresholdX, lastLeft, lastPw)) < 8
+                    ? javafx.scene.Cursor.H_RESIZE : javafx.scene.Cursor.DEFAULT);
+        });
+    }
+
+    /** Show or hide the series legend (hide on small charts where it overlaps the bars). */
+    public void setLegendVisible(boolean b) { this.legendVisible = b; redraw(); }
+
+    /** Show a draggable vertical threshold at data-X {@code x}; NaN hides it. */
+    public void setThreshold(double x) { this.thresholdX = x; this.thresholdEnabled = !Double.isNaN(x); redraw(); }
+    /** Notified with the new data-X when the user finishes dragging the threshold. */
+    public void setOnThresholdChange(java.util.function.Consumer<Double> c) { this.onThresholdChange = c; }
+    private double dataXAt(double px) {
+        double t = xMin + (px - lastLeft) / Math.max(1, lastPw) * (xMax - xMin);
+        return Math.max(xMin, Math.min(xMax, t));
     }
 
     // ---- data API ------------------------------------------------------------
@@ -167,14 +198,27 @@ public final class AnalysisChart extends Region {
             g.fillText(fmt(yv), 26, top + ph - k / 4.0 * ph + 3);
         }
 
-        // legend (top-right)
-        double ly = top + 6, lx = left + pw - 150;
-        g.setFont(Font.font("Segoe UI", 10));
-        for (Series s : series.values()) {
-            if (!s.visible) continue;
-            g.setFill(s.color); g.fillRect(lx, ly - 8, 12, 10);
-            g.setFill(Color.web("#222222")); g.fillText(s.name, lx + 16, ly + 1);
-            ly += 15;
+        // draggable threshold line (compensation positive/negative split)
+        lastLeft = left; lastPw = pw;
+        if (thresholdEnabled && !Double.isNaN(thresholdX)) {
+            double tx = sx(thresholdX, left, pw);
+            g.setStroke(Color.web("#00B4D8")); g.setLineWidth(1.6); g.setLineDashes(5, 4);
+            g.strokeLine(tx, top, tx, top + ph);
+            g.setLineDashes((double[]) null);
+            g.setFill(Color.web("#00B4D8"));
+            g.fillPolygon(new double[]{tx - 5, tx + 5, tx}, new double[]{top, top, top + 9}, 3);
+        }
+
+        // legend (top-right) — optional, since on small/compact charts it can overlap the bars
+        if (legendVisible) {
+            double ly = top + 6, lx = left + pw - 150;
+            g.setFont(Font.font("Segoe UI", 10));
+            for (Series s : series.values()) {
+                if (!s.visible) continue;
+                g.setFill(s.color); g.fillRect(lx, ly - 8, 12, 10);
+                g.setFill(Color.web("#222222")); g.fillText(s.name, lx + 16, ly + 1);
+                ly += 15;
+            }
         }
     }
 
