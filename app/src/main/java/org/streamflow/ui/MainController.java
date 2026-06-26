@@ -348,6 +348,137 @@ public class MainController implements JobRunner {
         }
     }
 
+    // ---- help + about -------------------------------------------------------
+
+    @FXML private void onUserGuide()        { showHelpWindow("StreamFLOW — User Guide", USER_GUIDE); }
+    @FXML private void onCompensationHelp() { showHelpWindow("StreamFLOW — Compensation Help", COMPENSATION_HELP); }
+
+    @FXML
+    private void onAbout() {
+        javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(12);
+        box.setAlignment(javafx.geometry.Pos.CENTER);
+        box.setStyle("-fx-padding:28; -fx-background-color:#0D1B2A;");
+        javafx.scene.image.Image logo = AppIcons.logo();
+        if (logo != null) {
+            javafx.scene.image.ImageView iv = new javafx.scene.image.ImageView(logo);
+            iv.setFitWidth(120); iv.setFitHeight(120); iv.setPreserveRatio(true);
+            box.getChildren().add(iv);
+        }
+        Label name = new Label("StreamFLOW 2.0"); name.getStyleClass().add("title");
+        Label desc = new Label("Native JavaFX flow-cytometry analysis with a Python / FlowKit engine.\n"
+                + "FlowJo-class gating, compensation, and analysis — open and reproducible.");
+        desc.getStyleClass().add("subtitle"); desc.setWrapText(true);
+        desc.setStyle("-fx-text-alignment:center;"); desc.setMaxWidth(420);
+        box.getChildren().addAll(name, desc);
+
+        javafx.scene.control.Dialog<javafx.scene.control.ButtonType> dlg = new javafx.scene.control.Dialog<>();
+        dlg.setTitle("About StreamFLOW"); dlg.setHeaderText(null);
+        dlg.getDialogPane().setContent(box);
+        dlg.getDialogPane().getButtonTypes().add(javafx.scene.control.ButtonType.CLOSE);
+        dlg.getDialogPane().getStylesheets().add(
+                getClass().getResource("/org/streamflow/ui/streamflow-dark.css").toExternalForm());
+        dlg.getDialogPane().getStyleClass().add("app-root");
+        if (window() != null) dlg.initOwner(window());
+        dlg.showAndWait();
+    }
+
+    /** A scrollable, dark-themed help window: logo header + a list of {heading, body} sections. */
+    private void showHelpWindow(String title, String[][] sections) {
+        javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(12);
+        box.getStyleClass().add("content");
+        box.setStyle("-fx-padding:24;");
+
+        javafx.scene.layout.HBox header = new javafx.scene.layout.HBox(14);
+        header.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        javafx.scene.image.Image logo = AppIcons.logo();
+        if (logo != null) {
+            javafx.scene.image.ImageView iv = new javafx.scene.image.ImageView(logo);
+            iv.setFitWidth(56); iv.setFitHeight(56); iv.setPreserveRatio(true);
+            header.getChildren().add(iv);
+        }
+        Label t = new Label(title); t.getStyleClass().add("title");
+        header.getChildren().add(t);
+        box.getChildren().add(header);
+
+        for (String[] sec : sections) {
+            Label h = new Label(sec[0]);
+            h.getStyleClass().add("title"); h.setStyle("-fx-font-size:15;");
+            Label b = new Label(sec[1]);
+            b.getStyleClass().add("subtitle"); b.setWrapText(true); b.setMaxWidth(700);
+            box.getChildren().addAll(h, b);
+        }
+
+        javafx.scene.control.ScrollPane sp = new javafx.scene.control.ScrollPane(box);
+        sp.setFitToWidth(true);
+        javafx.scene.Scene scene = new javafx.scene.Scene(sp, 780, 660);
+        scene.getStylesheets().add(
+                getClass().getResource("/org/streamflow/ui/streamflow-dark.css").toExternalForm());
+        javafx.stage.Stage stage = new javafx.stage.Stage();
+        stage.setTitle(title);
+        stage.setScene(scene);
+        AppIcons.apply(stage);
+        stage.show();
+    }
+
+    private static final String[][] USER_GUIDE = {
+        {"1 · Load your data",
+         "File → Load FCS… to import one or many .fcs files (they must share a panel). The sidebar "
+         + "lists every analysis module; the Workstation gives a FlowJo-style multi-sample overview."},
+        {"2 · Gate in a Graph Window",
+         "Double-click a sample (Workstation) to open a Graph Window. Pick X/Y channels and a scale "
+         + "(Linear / Log / Logicle / ArcSinh — fluorescence defaults to Logicle). Draw gates with the "
+         + "tool buttons (P polygon, R rectangle, E ellipse, I interval, Q quadrant). Each gate becomes "
+         + "a population in the gating tree; double-click a population to drill into it. Gates sync "
+         + "across every window and are saved with the workspace."},
+        {"3 · Compensation",
+         "The Compensation module extracts an embedded spillover matrix, or computes one from single-"
+         + "stain controls (Compute from Controls → wizard). Edit coefficients in the heatmap or table, "
+         + "Preview the before/after on any channel pair, then Apply. See Help → Compensation Help."},
+        {"4 · Analysis modules",
+         "Cell Cycle (Watson / Dean-Jett-Fox), Proliferation (dye-dilution generations), Apoptosis "
+         + "(Annexin/PI quadrants) — all interactive with adjustable fits and publication export. "
+         + "Statistics, Cross-Sample, Classifier (PCA/RF), Kinetic, Longitudinal, Dim. Reduction and "
+         + "Clustering read the shared workspace. Classifier and Cross-Sample are selection-based: tick "
+         + "the samples to include and their events load on demand."},
+        {"5 · Export",
+         "Any plot's Copy button puts a high-DPI image on the clipboard (set the DPI under File → "
+         + "Settings, or in the Graph Window's export-options dialog); Save SVG writes a vector file. "
+         + "Analysis Log → Methods generates a journal-ready methods paragraph from your gating tree."},
+        {"6 · Workspace",
+         "File → Save Workspace… writes a .sfw file with every sample's gating tree, compensation and "
+         + "settings; Open Workspace… restores them. GatingML export is available for interchange."},
+    };
+
+    private static final String[][] COMPENSATION_HELP = {
+        {"What compensation does",
+         "Fluorophores emit across multiple detectors (spillover). Compensation subtracts that spillover "
+         + "using an N×N spillover matrix so each channel reflects only its own fluorophore."},
+        {"Option A — Extract from FCS",
+         "If the cytometer wrote a $SPILL/$SPILLOVER matrix into the file, Extract from FCS loads it "
+         + "directly. Many instruments embed an identity matrix (no spillover) — if the heatmap is all "
+         + "zeros off-diagonal, compute one from controls instead."},
+        {"Option B — Compute from Controls (wizard)",
+         "Load your single-stain controls + an unstained (universal negative). In the wizard, set each "
+         + "file's Role (Unstained / Single stain / Ignore) and Detector (auto-matched by brightest "
+         + "signal — override if wrong). StreamFLOW applies a size-cleanup gate (FSC/SSC), splits each "
+         + "control's primary detector into negative/positive (Otsu), and computes spillover as the "
+         + "median positive signal minus unstained autofluorescence, normalised so the diagonal = 1.0 "
+         + "(Bagwell-Adams). Drag the dashed line on any separation histogram to adjust its split."},
+        {"Do I need the size gate?",
+         "Yes — a scatter (FSC/SSC) cleanup gate removes debris and dead cells whose odd autofluorescence "
+         + "biases the medians, so it makes the matrix more accurate. The positive/negative split on the "
+         + "arcsinh histogram is the core of the calculation; the size gate just cleans the input. "
+         + "StreamFLOW does the cleanup automatically (central-percentile box) before the split."},
+        {"Edit, preview, apply",
+         "Edit any coefficient in the heatmap (click a cell) or the Matrix table — the two stay in sync. "
+         + "Use Before/After preview on a spillover pair to see the effect of the current matrix (a tight "
+         + "diagonal in the After plot means good compensation). Click Apply to compensate all samples."},
+        {"Residual diagnostic",
+         "After applying, run the Residual diagnostic: it correlates the compensated channels and flags "
+         + "any pair with |r| > 0.2 (over- or under-compensation), outlining the offending coefficients "
+         + "right on the heatmap so you know which to nudge."},
+    };
+
     // ---- helpers ------------------------------------------------------------
 
     private FileChooser workspaceChooser(String title) {

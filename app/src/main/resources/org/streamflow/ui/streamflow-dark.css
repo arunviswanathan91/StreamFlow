@@ -162,6 +162,107 @@
     -fx-background-color: -fx-bg;
 }
 
+/* Tables (dark, to match the theme — modena defaults to white otherwise) */
+.table-view {
+    -fx-background-color: -fx-panel;
+    -fx-control-inner-background: -fx-panel;
+    -fx-control-inner-background-alt: derive(#1B2A3B, 5%);
+    -fx-table-cell-border-color: -fx-panel-2;
+    -fx-background-radius: 4;
+    -fx-padding: 0;
+}
+.table-view .column-header-background,
+.table-view .column-header,
+.table-view .filler {
+    -fx-background-color: -fx-panel-2;
+}
+.table-view .column-header .label {
+    -fx-text-fill: -fx-text-c;
+    -fx-font-weight: bold;
+}
+.table-row-cell {
+    -fx-background-color: -fx-panel;
+    -fx-table-cell-border-color: transparent;
+}
+.table-row-cell:odd {
+    -fx-background-color: derive(#1B2A3B, 5%);
+}
+.table-row-cell:filled:hover {
+    -fx-background-color: -fx-panel-2;
+}
+.table-row-cell:filled:selected {
+    -fx-background-color: derive(#00B4D8, -45%);
+}
+.table-cell {
+    -fx-text-fill: -fx-text-c;
+    -fx-border-color: transparent;
+    -fx-padding: 5 8 5 8;
+}
+.table-view .placeholder .label {
+    -fx-text-fill: -fx-text-mut;
+}
+
+/* Combo boxes */
+.combo-box {
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 4;
+}
+.combo-box .list-cell {
+    -fx-text-fill: -fx-text-c;
+    -fx-background-color: transparent;
+    -fx-padding: 4 8 4 8;
+}
+.combo-box .arrow { -fx-background-color: -fx-text-mut; }
+.combo-box-popup .list-view {
+    -fx-background-color: -fx-panel;
+    -fx-control-inner-background: -fx-panel;
+    -fx-border-color: -fx-panel-2;
+}
+.combo-box-popup .list-cell {
+    -fx-text-fill: -fx-text-c;
+    -fx-background-color: -fx-panel;
+    -fx-padding: 6 10 6 10;
+}
+.combo-box-popup .list-cell:filled:hover,
+.combo-box-popup .list-cell:filled:selected {
+    -fx-background-color: -fx-accent-c;
+    -fx-text-fill: -fx-bg;
+}
+
+/* Split panes + scroll panes */
+.split-pane {
+    -fx-background-color: -fx-bg;
+    -fx-padding: 0;
+}
+.split-pane > .split-pane-divider {
+    -fx-background-color: -fx-panel-2;
+    -fx-padding: 0 1 0 1;
+}
+.scroll-pane {
+    -fx-background-color: -fx-bg;
+}
+.scroll-pane > .viewport {
+    -fx-background-color: -fx-bg;
+}
+
+/* Tab pane */
+.tab-pane > .tab-header-area > .tab-header-background {
+    -fx-background-color: -fx-panel;
+}
+.tab-pane .tab {
+    -fx-background-color: -fx-panel-2;
+    -fx-padding: 4 12 4 12;
+}
+.tab-pane .tab:selected {
+    -fx-background-color: -fx-bg;
+}
+.tab-pane .tab .tab-label {
+    -fx-text-fill: -fx-text-mut;
+}
+.tab-pane .tab:selected .tab-label {
+    -fx-text-fill: -fx-accent-c;
+}
+
 /* Status bar */
 .statusbar {
     -fx-background-color: -fx-panel;

@@ -4,15 +4,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import javafx.beans.property.ReadOnlyStringWrapper;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXML;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.control.cell.TextFieldTableCell;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -21,8 +24,10 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -42,12 +47,15 @@ public class ClassifierController implements ContextAware {
 
     @FXML private Button  refreshButton;
     @FXML private Button  runButton;
+    @FXML private Button  selectAllButton;
+    @FXML private Button  selectNoneButton;
     @FXML private Label   featCountLabel;
     @FXML private Label   statusLabel;
     @FXML private ImageView plotView;
-    @FXML private TableView<SampleRow>          sampleTable;
-    @FXML private TableColumn<SampleRow, String> sampleCol;
-    @FXML private TableColumn<SampleRow, String> groupCol;
+    @FXML private TableView<SampleRow>           sampleTable;
+    @FXML private TableColumn<SampleRow, Boolean> useCol;
+    @FXML private TableColumn<SampleRow, String>  sampleCol;
+    @FXML private TableColumn<SampleRow, String>  groupCol;
     @FXML private TableView<LoadRow>             loadingTable;
     @FXML private TableColumn<LoadRow, String>   featCol;
     @FXML private TableColumn<LoadRow, String>   pc1Col;
@@ -59,6 +67,7 @@ public class ClassifierController implements ContextAware {
 
     public static final class SampleRow {
         final String name;
+        final SimpleBooleanProperty use = new SimpleBooleanProperty(true);
         final StringProperty group = new SimpleStringProperty("");
         SampleRow(String name) { this.name = name; }
     }
@@ -69,6 +78,9 @@ public class ClassifierController implements ContextAware {
     public void initialize() {
         plotView.setPreserveRatio(true);
 
+        useCol.setCellValueFactory(c -> c.getValue().use);
+        useCol.setCellFactory(CheckBoxTableCell.forTableColumn(useCol));
+        useCol.setEditable(true);
         sampleCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(c.getValue().name));
         groupCol.setCellValueFactory(c -> c.getValue().group);
         groupCol.setCellFactory(TextFieldTableCell.forTableColumn());
@@ -98,12 +110,14 @@ public class ClassifierController implements ContextAware {
         WorkspaceModel ws = ctx.workspace();
 
         Map<String, String> prevGroups = new LinkedHashMap<>();
-        for (SampleRow r : sampleRows) prevGroups.put(r.name, r.group.get());
+        Map<String, Boolean> prevUse = new LinkedHashMap<>();
+        for (SampleRow r : sampleRows) { prevGroups.put(r.name, r.group.get()); prevUse.put(r.name, r.use.get()); }
 
         sampleRows.clear();
         for (String s : ws.sampleNames()) {
             SampleRow row = new SampleRow(s);
             if (prevGroups.containsKey(s)) row.group.set(prevGroups.get(s));
+            if (prevUse.containsKey(s)) row.use.set(prevUse.get(s));
             sampleRows.add(row);
         }
 
@@ -125,15 +139,51 @@ public class ClassifierController implements ContextAware {
         return names.size();
     }
 
+    @FXML private void onSelectAll()  { for (SampleRow r : sampleRows) r.use.set(true);  sampleTable.refresh(); }
+    @FXML private void onSelectNone() { for (SampleRow r : sampleRows) r.use.set(false); sampleTable.refresh(); }
+
     @FXML
     private void onRun() {
         if (ctx == null) return;
-        WorkspaceModel ws = ctx.workspace();
+        List<String> selected = new ArrayList<>();
+        for (SampleRow r : sampleRows) if (r.use.get()) selected.add(r.name);
+        if (selected.size() < 2) {
+            info("Select samples", "Tick at least 2 samples to run PCA.");
+            return;
+        }
+        // gates live in the workspace tree, independent of events — check before loading anything
+        if (!anyGatesFor(selected)) {
+            info("Gates not detected",
+                 "The selected samples have no gated populations.\n\nDraw a gating strategy in a "
+                 + "graph window and apply it to all samples (Workstation → right-click → Apply to all), "
+                 + "then run the classifier.");
+            return;
+        }
+        runButton.setDisable(true);
+        statusLabel.setText("Loading events for " + selected.size() + " sample(s)…");
+        // events load on demand — no need to open each sample in a graph window first
+        EventLoader.ensureLoaded(ctx, selected, statusLabel::setText, () -> {
+            runButton.setDisable(false);
+            runClassifier(selected);
+        });
+    }
 
+    /** True if any of the given samples has at least one gate in its workspace tree. */
+    private boolean anyGatesFor(List<String> samples) {
+        WorkspaceModel ws = ctx.workspace();
+        for (String s : samples) {
+            if (!ws.hasTree(s)) continue;
+            for (PopNode n : ws.treeFor(s).selfAndDescendants()) if (!n.isRoot()) return true;
+        }
+        return false;
+    }
+
+    private void runClassifier(List<String> selected) {
+        WorkspaceModel ws = ctx.workspace();
         // Build feature matrix: {sample: {gate_name: frequency}}
         ObjectNode features = JSON.createObjectNode();
         int computed = 0;
-        for (String sname : ws.sampleNames()) {
+        for (String sname : selected) {
             EventData evData = ws.data(sname);
             if (evData == null || evData.rows() == 0) continue;
             PopNode root = ws.treeFor(sname);
@@ -149,21 +199,20 @@ public class ClassifierController implements ContextAware {
                 int cnt = 0; for (boolean b : keep) if (b) cnt++;
                 featVec.put(n.name(), 100.0 * cnt / evData.rows());
             }
-            if (featVec.size() > 0) {
-                features.set(sname, featVec);
-                computed++;
-            }
+            if (featVec.size() > 0) { features.set(sname, featVec); computed++; }
         }
 
         if (computed < 2) {
-            statusLabel.setText("Need at least 2 samples with gated events. "
-                    + "Open samples in graph windows to cache their events.");
+            info("Gates not detected",
+                 "Fewer than 2 of the selected samples have gated populations.\n\nApply your gating "
+                 + "strategy to all selected samples, then run again.");
+            statusLabel.setText("Need ≥2 samples with gates.");
             return;
         }
 
         ObjectNode grpNode = JSON.createObjectNode();
         for (SampleRow r : sampleRows)
-            if (!r.group.get().isBlank()) grpNode.put(r.name, r.group.get().trim());
+            if (r.use.get() && !r.group.get().isBlank()) grpNode.put(r.name, r.group.get().trim());
 
         ObjectNode a = JSON.createObjectNode();
         a.set("features", features);
@@ -171,6 +220,15 @@ public class ClassifierController implements ContextAware {
 
         statusLabel.setText("Running PCA on " + computed + " samples…");
         ctx.jobs().run(ctx.bridge().command("run_classifier", a), this::showResult);
+    }
+
+    /** Simple modal info dialog with a single OK button. */
+    private void info(String title, String msg) {
+        Alert a = new Alert(Alert.AlertType.INFORMATION);
+        a.setTitle(title);
+        a.setHeaderText(title);
+        a.setContentText(msg);
+        a.showAndWait();
     }
 
     private void showResult(JsonNode result) {
@@ -211,5 +269,7 @@ public class ClassifierController implements ContextAware {
     private void setDisabled(boolean d) {
         refreshButton.setDisable(d);
         runButton.setDisable(d);
+        selectAllButton.setDisable(d);
+        selectNoneButton.setDisable(d);
     }
 }

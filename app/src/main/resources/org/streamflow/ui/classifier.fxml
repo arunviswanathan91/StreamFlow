@@ -44,13 +44,20 @@
                 <VBox spacing="6.0" prefWidth="300.0">
                     <children>
                         <Label text="Samples / Groups" styleClass="title"/>
-                        <Label text="Assign group labels to add Random Forest:" styleClass="subtitle" wrapText="true"/>
+                        <Label text="Tick the samples to include (events load on demand — no need to open them), and assign group labels to add Random Forest:" styleClass="subtitle" wrapText="true"/>
+                        <HBox spacing="6.0">
+                            <children>
+                                <Button fx:id="selectAllButton" text="All" onAction="#onSelectAll"/>
+                                <Button fx:id="selectNoneButton" text="None" onAction="#onSelectNone"/>
+                            </children>
+                        </HBox>
                         <TableView fx:id="sampleTable" VBox.vgrow="ALWAYS">
                             <columns>
-                                <TableColumn fx:id="sampleCol" text="Sample" prefWidth="160.0"/>
-                                <TableColumn fx:id="groupCol"  text="Group"  prefWidth="110.0"/>
+                                <TableColumn fx:id="useCol"    text="Use"    prefWidth="44.0"/>
+                                <TableColumn fx:id="sampleCol" text="Sample" prefWidth="150.0"/>
+                                <TableColumn fx:id="groupCol"  text="Group"  prefWidth="100.0"/>
                             </columns>
-                            <placeholder><Label text="Load FCS + draw gates first."/></placeholder>
+                            <placeholder><Label text="Load FCS first."/></placeholder>
                         </TableView>
                         <Label text="Top loadings" styleClass="title"/>
                         <TableView fx:id="loadingTable" prefHeight="160.0">

@@ -1,25 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
-<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.SplitPane?>
+<?import javafx.scene.control.Tab?>
+<?import javafx.scene.control.TabPane?>
 <?import javafx.scene.control.TableColumn?>
 <?import javafx.scene.control.TableView?>
-<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Priority?>
+<?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
 <?import org.kordamp.ikonli.javafx.FontIcon?>
+<?import org.streamflow.ui.CompMatrixView?>
+<?import org.streamflow.ui.CytoPlot?>
 
 <VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
       fx:controller="org.streamflow.ui.CompensationController"
-      styleClass="content" spacing="12.0">
+      styleClass="content" spacing="10.0">
     <children>
         <Label text="Compensation" styleClass="title"/>
-        <Label text="Extract the spillover matrix embedded in the FCS, or compute one from single-colour controls, then apply it."
+        <Label text="Extract the embedded spillover matrix or compute one from controls, edit coefficients in the heatmap or table, preview the before/after on any channel pair, then Apply. The residual diagnostic flags over/under-compensated pairs straight onto the heatmap."
                styleClass="subtitle" wrapText="true"/>
 
-        <HBox spacing="8.0">
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Button fx:id="extractButton" text="Extract from FCS" onAction="#onExtract">
                     <graphic><FontIcon iconLiteral="fas-file-import"/></graphic>
@@ -30,6 +37,7 @@
                 <Button fx:id="applyButton" text="Apply" onAction="#onApply" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-check"/></graphic>
                 </Button>
+                <Separator orientation="VERTICAL"/>
                 <Button fx:id="residualButton" text="Residual diagnostic" onAction="#onResidual">
                     <graphic><FontIcon iconLiteral="fas-th"/></graphic>
                 </Button>
@@ -37,33 +45,71 @@
         </HBox>
         <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
 
-        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
-            <children>
-                <TableView fx:id="matrixTable" HBox.hgrow="ALWAYS"/>
-                <VBox spacing="6.0" prefWidth="380.0">
-                    <children>
-                        <Label text="Residual correlation" styleClass="title"/>
-                        <Label text="After compensation, fluorescence channels should be ~uncorrelated. |r|&gt;0.2 flags over/under-compensation." styleClass="subtitle" wrapText="true"/>
-                        <ScrollPane fitToWidth="true" fitToHeight="true" VBox.vgrow="ALWAYS" styleClass="plot-pane">
+        <SplitPane fx:id="splitPane" dividerPositions="0.52" VBox.vgrow="ALWAYS">
+            <items>
+                <TabPane fx:id="leftTabs" tabClosingPolicy="UNAVAILABLE">
+                    <tabs>
+                        <Tab text="Heatmap">
                             <content>
-                                <StackPane>
+                                <StackPane styleClass="plot-pane">
                                     <children>
-                                        <ImageView fx:id="residualView"/>
+                                        <CompMatrixView fx:id="heatmap"/>
                                     </children>
                                 </StackPane>
                             </content>
-                        </ScrollPane>
-                        <TableView fx:id="flaggedTable" prefHeight="160.0">
+                        </Tab>
+                        <Tab text="Matrix table">
+                            <content>
+                                <TableView fx:id="matrixTable"/>
+                            </content>
+                        </Tab>
+                    </tabs>
+                </TabPane>
+
+                <VBox spacing="8.0">
+                    <children>
+                        <Label text="Before / After preview" styleClass="title"/>
+                        <HBox spacing="8.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="Sample:"/>
+                                <ComboBox fx:id="sampleCombo" prefWidth="150.0"/>
+                                <Label text="X:"/>
+                                <ComboBox fx:id="xCombo" prefWidth="120.0"/>
+                                <Label text="Y:"/>
+                                <ComboBox fx:id="yCombo" prefWidth="120.0"/>
+                                <Button fx:id="previewButton" text="Preview" onAction="#onPreview" styleClass="primary">
+                                    <graphic><FontIcon iconLiteral="fas-eye"/></graphic>
+                                </Button>
+                            </children>
+                        </HBox>
+                        <HBox spacing="8.0" VBox.vgrow="ALWAYS">
+                            <children>
+                                <VBox spacing="2.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <Label text="Before (uncompensated)" styleClass="subtitle"/>
+                                        <CytoPlot fx:id="rawPlot" VBox.vgrow="ALWAYS"/>
+                                    </children>
+                                </VBox>
+                                <VBox spacing="2.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <Label text="After (with current matrix)" styleClass="subtitle"/>
+                                        <CytoPlot fx:id="compPlot" VBox.vgrow="ALWAYS"/>
+                                    </children>
+                                </VBox>
+                            </children>
+                        </HBox>
+                        <Label text="Residual correlation (|r|&gt;0.2 flags over/under-comp)" styleClass="subtitle"/>
+                        <TableView fx:id="flaggedTable" prefHeight="150.0">
                             <columns>
                                 <TableColumn fx:id="pairColR" text="Channel pair" prefWidth="220.0"/>
                                 <TableColumn fx:id="rColR"    text="r"            prefWidth="60.0"/>
-                                <TableColumn fx:id="signColR" text="Issue"        prefWidth="80.0"/>
+                                <TableColumn fx:id="signColR" text="Issue"        prefWidth="90.0"/>
                             </columns>
-                            <placeholder><Label text="Run diagnostic after applying compensation."/></placeholder>
+                            <placeholder><Label text="Run the residual diagnostic after applying compensation."/></placeholder>
                         </TableView>
                     </children>
                 </VBox>
-            </children>
-        </HBox>
+            </items>
+        </SplitPane>
     </children>
 </VBox>

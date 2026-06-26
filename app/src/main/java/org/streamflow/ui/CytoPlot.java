@@ -516,16 +516,37 @@ public class CytoPlot extends Region {
         return yScale == Scale.LOGICLE ? yLogicle.inverse(t) : unscaleVal(t, yScale, yCof);
     }
 
+    // last Logicle build params, so we rebuild the 16k-entry LUT only when T or W actually change
+    private double xLogT = Double.NaN, xLogW = Double.NaN, yLogT = Double.NaN, yLogW = Double.NaN;
+
     private void recomputeRanges() {
         if (data == null || xChan == null) return;
-        double[] xr = data.range(data.indexOf(xChan));
+        // Guard the mid-swap state: setData() invalidates synchronously while xChan may still hold a
+        // previous view's channel that isn't in the new data — skip until the matching setView lands.
+        int xc = data.indexOf(xChan);
+        if (xc < 0) return;
+        double[] xr = data.range(xc);
         xmin = Double.isNaN(xMinOv) ? xr[0] : xMinOv; xmax = Double.isNaN(xMaxOv) ? xr[1] : xMaxOv;
-        if (xScale == Scale.LOGICLE) { xWeff = effW(xmin, xmax, xW); xLogicle = new Logicle(Math.max(xmax, 1), xWeff, LG_M, 0); }
+        if (xScale == Scale.LOGICLE) {
+            xWeff = effW(xmin, xmax, xW);
+            double T = Math.max(xmax, 1);
+            if (xLogicle == null || T != xLogT || xWeff != xLogW) {   // reuse the LUT when unchanged
+                xLogicle = new Logicle(T, xWeff, LG_M, 0); xLogT = T; xLogW = xWeff;
+            }
+        }
         sxMin = sxv(xmin); sxMax = sxv(xmax); if (sxMax <= sxMin) sxMax = sxMin + 1;
         if (!isHistogram()) {
-            double[] yr = data.range(data.indexOf(yChan));
+            int yc = data.indexOf(yChan);
+            if (yc < 0) return;
+            double[] yr = data.range(yc);
             ymin = Double.isNaN(yMinOv) ? yr[0] : yMinOv; ymax = Double.isNaN(yMaxOv) ? yr[1] : yMaxOv;
-            if (yScale == Scale.LOGICLE) { yWeff = effW(ymin, ymax, yW); yLogicle = new Logicle(Math.max(ymax, 1), yWeff, LG_M, 0); }
+            if (yScale == Scale.LOGICLE) {
+                yWeff = effW(ymin, ymax, yW);
+                double T = Math.max(ymax, 1);
+                if (yLogicle == null || T != yLogT || yWeff != yLogW) {
+                    yLogicle = new Logicle(T, yWeff, LG_M, 0); yLogT = T; yLogW = yWeff;
+                }
+            }
             syMin = syv(ymin); syMax = syv(ymax); if (syMax <= syMin) syMax = syMin + 1;
         }
     }
@@ -1046,14 +1067,27 @@ public class CytoPlot extends Region {
         g.translate(16, py + ph / 2 + 30); g.rotate(-90);
         g.fillText(isHistogram() ? "Count" : chLabel(yChan), 0, 0);
         g.restore();
-        // scale-aware ticks (decades for log/arcsinh, even for linear)
+        // scale-aware ticks (decades for log/arcsinh, even for linear). On logicle/log the decades
+        // pile up near zero, so drop any label closer than a min pixel gap to the previous one.
         g.setFill(tickC); g.setFont(Font.font(10));
-        for (double tv : axisTicks(xmin, xmax, xScale)) {
-            g.fillText(fmt(tv), pxX(tv) - 14, py + ph + 16);
+        java.util.List<Double> xt = new ArrayList<>(axisTicks(xmin, xmax, xScale));
+        xt.sort(java.util.Comparator.comparingDouble(this::pxX));
+        double lastXp = -1e9;
+        for (double tv : xt) {
+            double xp = pxX(tv);
+            if (xp - lastXp < 30) continue;          // labels are wide horizontally
+            lastXp = xp;
+            g.fillText(fmt(tv), xp - 14, py + ph + 16);
         }
         if (!isHistogram()) {
-            for (double tv : axisTicks(ymin, ymax, yScale)) {
-                g.fillText(fmt(tv), 24, pxY(tv) + 3);
+            java.util.List<Double> yt = new ArrayList<>(axisTicks(ymin, ymax, yScale));
+            yt.sort(java.util.Comparator.comparingDouble(this::pxY));
+            double lastYp = -1e9;
+            for (double tv : yt) {
+                double yp = pxY(tv);
+                if (yp - lastYp < 14) continue;      // ~one line height vertically
+                lastYp = yp;
+                g.fillText(fmt(tv), 24, yp + 3);
             }
         } else {
             // Histogram Y axis: label counts from 0 to the peak count.

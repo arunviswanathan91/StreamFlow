@@ -60,8 +60,11 @@
                     <tooltip><Tooltip text="Shrink the X axis to zoom into the G0/G1 + S region"/></tooltip>
                 </Slider>
                 <Region HBox.hgrow="ALWAYS"/>
-                <Button fx:id="exportPngButton" text="Export PNG" onAction="#onExportPng"/>
-                <Button fx:id="exportSvgButton" text="Export SVG" onAction="#onExportSvg"/>
+                <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
+                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                </Button>
+                <Button fx:id="exportPngButton" text="PNG" onAction="#onExportPng"/>
+                <Button fx:id="exportSvgButton" text="SVG" onAction="#onExportSvg"/>
             </children>
         </HBox>
 

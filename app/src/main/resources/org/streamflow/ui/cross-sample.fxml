@@ -19,17 +19,37 @@
       styleClass="content" spacing="12.0">
     <children>
         <Label text="Cross-Sample Analysis" styleClass="title"/>
-        <Label text="Compare gated population frequencies across all opened samples: a gate×sample matrix, a per-gate consistency (CV) check, a population radar, and an MFI drift heatmap. Reads the shared workspace — open samples in graph windows to include them."
+        <Label text="Compare gated population frequencies across selected samples: a gate×sample matrix, a per-gate consistency (CV) check, a population radar, and an MFI drift heatmap. Tick the samples to include — events load on demand."
                styleClass="subtitle" wrapText="true"/>
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
-                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                <Button fx:id="refreshButton" text="Compute" onAction="#onRefresh" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
                 </Button>
                 <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
             </children>
         </HBox>
-        <TabPane VBox.vgrow="ALWAYS" tabClosingPolicy="UNAVAILABLE">
+        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
+        <children>
+        <VBox spacing="6.0" prefWidth="230.0">
+            <children>
+                <Label text="Samples" styleClass="subtitle"/>
+                <HBox spacing="6.0">
+                    <children>
+                        <Button fx:id="selectAllButton" text="All" onAction="#onSelectAll"/>
+                        <Button fx:id="selectNoneButton" text="None" onAction="#onSelectNone"/>
+                    </children>
+                </HBox>
+                <TableView fx:id="sampleSelectTable" VBox.vgrow="ALWAYS">
+                    <columns>
+                        <TableColumn fx:id="selUseCol"  text="Use"    prefWidth="44.0"/>
+                        <TableColumn fx:id="selNameCol" text="Sample" prefWidth="160.0"/>
+                    </columns>
+                    <placeholder><Label text="Load FCS first."/></placeholder>
+                </TableView>
+            </children>
+        </VBox>
+        <TabPane HBox.hgrow="ALWAYS" VBox.vgrow="ALWAYS" tabClosingPolicy="UNAVAILABLE">
             <tabs>
                 <Tab text="Gate × Sample">
                     <content>
@@ -91,5 +111,7 @@
                 </Tab>
             </tabs>
         </TabPane>
+        </children>
+        </HBox>
     </children>
 </VBox>
