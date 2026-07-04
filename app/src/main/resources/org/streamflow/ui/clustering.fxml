@@ -51,7 +51,7 @@
                         <Canvas fx:id="heatmapCanvas"/>
                     </children>
                 </StackPane>
-                <VBox spacing="4.0" prefWidth="220.0">
+                <VBox spacing="4.0" prefWidth="220.0" minWidth="190.0" HBox.hgrow="NEVER">
                     <children>
                         <Label text="Clusters" styleClass="subtitle"/>
                         <ListView fx:id="clusterList" VBox.vgrow="ALWAYS"/>

@@ -10,12 +10,19 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
+import javafx.geometry.Insets;
+import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.cell.TextFieldTableCell;
+import javafx.scene.layout.VBox;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
 import javafx.util.converter.DoubleStringConverter;
 
 import java.nio.file.Files;
@@ -35,7 +42,8 @@ public class CompensationController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    @FXML private Button extractButton, computeButton, applyButton, residualButton, previewButton;
+    @FXML private Button extractButton, computeButton, applyButton, residualButton, previewButton, helpButton;
+    @FXML private CheckBox nnlsCheckBox;
     @FXML private Label statusLabel;
     @FXML private TableView<Row> matrixTable;
     @FXML private CompMatrixView heatmap;
@@ -120,9 +128,16 @@ public class CompensationController implements ContextAware, Refreshable {
         if (ctx == null) return;
         statusLabel.setText("Applying compensation…");
         ObjectNode args = matrixArgs();
-        ctx.jobs().run(ctx.bridge().command("apply_compensation", args),
-                r -> statusLabel.setText("Compensation applied to "
-                        + r.path("channels").size() + " channels. Use Preview to verify, then run the residual diagnostic."));
+        if (args == null) args = new com.fasterxml.jackson.databind.node.ObjectNode(JSON.getNodeFactory());
+        if (nnlsCheckBox != null && nnlsCheckBox.isSelected()) args.put("mode", "nnls");
+        final ObjectNode finalArgs = args;
+        ctx.jobs().run(ctx.bridge().command("apply_compensation", finalArgs), r -> {
+            ctx.workspace().compApplied().set(true);
+            statusLabel.setText("Compensation applied to "
+                    + r.path("channels").size() + " channels"
+                    + ("nnls".equals(r.path("mode").asText()) ? " (NNLS)" : "")
+                    + ". Use Preview to verify, then run the residual diagnostic.");
+        });
     }
 
     /** Build {channels, matrix} from the current (possibly edited) table model, or null if empty. */
@@ -270,6 +285,68 @@ public class CompensationController implements ContextAware, Refreshable {
                     + " — flagged on the heatmap; adjust those coefficients.");
         if (ctx != null) ctx.auditLog().add(AuditLog.Type.COMPENSATION,
                 result.path("sample").asText(), "Residual diagnostic: " + nf + " flagged pair(s)");
+    }
+
+    @FXML
+    private void onHelp() {
+        Stage dlg = new Stage();
+        dlg.setTitle("Compensation — Mode Guide");
+        dlg.initModality(Modality.APPLICATION_MODAL);
+
+        VBox content = new VBox(14);
+        content.setPadding(new Insets(18));
+        content.setMaxWidth(520);
+
+        String[][] modes = {
+            {"Classic (MFI ratio)",
+                "Splits events into positive and negative using an Otsu threshold, then computes "
+                + "spillover as (MFI_positive_in_other) / (MFI_positive_in_primary). "
+                + "Best for clean, bright stains with clear bimodal separation. "
+                + "Fast and interpretable — the default."},
+            {"GMM split",
+                "Like Classic but uses a 2-component Gaussian Mixture Model to find the "
+                + "positive/negative threshold instead of Otsu. More accurate when the two "
+                + "populations are unevenly sized or the valley between them is shallow."},
+            {"Regression",
+                "Fits a slope (spillover = k × primary) through ALL gated events using "
+                + "least-squares — no positive/negative split needed. Robust when the stain is "
+                + "dim or the positive fraction is very small, since it uses the full cloud "
+                + "rather than the positive tail only."},
+            {"Huber Robust",
+                "Like Regression but uses Huber loss, which down-weights outliers. Dead cells "
+                + "and debris that slip through the scatter gate do not skew the slope. "
+                + "Recommended for samples with high debris or aggregates."},
+            {"NNLS apply mode",
+                "When applying the matrix, uses Non-Negative Least Squares per event instead "
+                + "of simple matrix inversion. Clips physically impossible negative fluorescence "
+                + "values to zero. Useful for highly compensated panels where standard inversion "
+                + "produces large negatives. Enable the checkbox before clicking Apply."},
+            {"Pre-remove debris (GMM)  [wizard]",
+                "Before computing spillover, fits a 2-component GMM on the log-magnitude of "
+                + "FSC and SSC to identify the low-scatter debris cluster and remove it. "
+                + "Cleaner event pool → more accurate spillover. Enable the checkbox in the "
+                + "Compensation Wizard before clicking Compute matrix."}
+        };
+
+        for (String[] entry : modes) {
+            Label title = new Label(entry[0]);
+            title.setStyle("-fx-font-weight:bold; -fx-font-size:13;");
+            Label body = new Label(entry[1]);
+            body.setWrapText(true);
+            body.setStyle("-fx-text-fill:-fx-mid-text-color; -fx-font-size:12;");
+            body.setMaxWidth(480);
+            VBox block = new VBox(4, title, body);
+            content.getChildren().add(block);
+        }
+
+        ScrollPane sp = new ScrollPane(content);
+        sp.setFitToWidth(true);
+        sp.setPrefViewportHeight(480);
+        sp.setStyle("-fx-background-color:transparent;");
+
+        dlg.setScene(new Scene(sp, 540, 500));
+        dlg.show();
+        dlg.toFront();
     }
 
     private void setDisabled(boolean d) {

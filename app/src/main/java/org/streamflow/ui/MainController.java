@@ -45,6 +45,7 @@ public class MainController implements JobRunner {
     @FXML private StackPane contentPane;
     @FXML private Label statusLabel;
     @FXML private Label engineLabel;
+    @FXML private Label compBadge;
     @FXML private ProgressBar progressBar;
     @FXML private Button cancelButton;
     @FXML private org.controlsfx.control.ToggleSwitch autoSaveToggle;
@@ -139,6 +140,8 @@ public class MainController implements JobRunner {
         AppContext ctx = new AppContext(bridge, this, new ChannelAliases(), workspace, settings, new AuditLog(), new FmoStore(),
                 name -> Platform.runLater(() -> navList.getSelectionModel().select(name)));
         this.appCtx = ctx;
+        compBadge.visibleProperty().bind(workspace.compApplied());
+        compBadge.managedProperty().bind(workspace.compApplied());
         for (Object c : controllers.values()) {
             if (c instanceof ContextAware ca) ca.init(ctx);
         }
@@ -587,6 +590,8 @@ public class MainController implements JobRunner {
 
     @FXML private void onUserGuide()        { showHelpWindow("StreamFLOW — User Guide", USER_GUIDE); }
     @FXML private void onCompensationHelp() { showHelpWindow("StreamFLOW — Compensation Help", COMPENSATION_HELP); }
+
+    @FXML private void onCompBadgeClick() { navList.getSelectionModel().select("Compensation"); }
 
     @FXML
     private void onAbout() {

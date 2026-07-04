@@ -12,12 +12,17 @@ import javafx.fxml.FXML;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.cell.ComboBoxTableCell;
+import javafx.geometry.Pos;
 import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
@@ -55,7 +60,9 @@ public class CompWizardController {
     static final String ROLE_IGNORE = "Ignore";
     static final String AUTO = "(auto)";
 
-    @FXML private ComboBox<String> fscCombo, sscCombo;
+    @FXML private ComboBox<String> fscCombo, sscCombo, methodCombo;
+    @FXML private CheckBox debrisCheckBox;
+    @FXML private ProgressIndicator computeSpinner;
     @FXML private Button computeButton, useButton, closeButton, scatterResetButton;
     @FXML private TableView<Assignment> assignTable;
     @FXML private TableColumn<Assignment, String> sampleCol, roleCol, detectorCol;
@@ -64,7 +71,8 @@ public class CompWizardController {
     @FXML private CytoPlot scatterPlot;
     @FXML private Label statusLabel;
 
-    private EventData scatterData;          // a control's FSC/SSC events, for the cleanup gate
+    private EventData scatterData;          // the currently displayed stain's FSC/SSC events
+    private String currentScatterSample;    // which stain is shown in the scatter plot
 
     private AppContext ctx;
     private Stage stage;
@@ -73,6 +81,8 @@ public class CompWizardController {
 
     private final ObservableList<Assignment> assignments = FXCollections.observableArrayList();
     private final List<String> fluorChannels = new ArrayList<>();
+    // per-stain size-cleanup gates: sample name → [x_min, x_max, y_min, y_max] in raw data space
+    private final Map<String, double[]> stainGates = new HashMap<>();
     // per-control positive/negative threshold overrides (arcsinh space), set by dragging a histogram split
     private final Map<String, Double> thresholdOverrides = new HashMap<>();
 
@@ -117,12 +127,35 @@ public class CompWizardController {
 
     @FXML
     public void initialize() {
+        methodCombo.getItems().setAll("Classic (MFI ratio)", "GMM split", "Regression", "Huber Robust");
+        methodCombo.getSelectionModel().select(0);
+
         assignTable.setItems(assignments);
         sampleCol.setCellValueFactory(c -> new ReadOnlyStringWrapper(c.getValue().getSample()));
         roleCol.setCellValueFactory(c -> c.getValue().roleProperty());
         roleCol.setCellFactory(ComboBoxTableCell.forTableColumn(ROLE_SINGLE, ROLE_UNSTAINED, ROLE_IGNORE));
         detectorCol.setCellValueFactory(c -> c.getValue().detectorProperty());
         useButton.setDisable(true);
+
+        // When a row is clicked, show that stain's own scatter + restore its saved gate.
+        assignTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
+            if (sel == null) return;
+            saveCurrentGate();
+            currentScatterSample = sel.getSample();
+            loadScatter(sel.getSample());
+        });
+
+        // Auto-save whenever the user moves/resizes the cleanup gate.
+        scatterPlot.setOnGateChanged(g -> saveCurrentGate());
+    }
+
+    /** Persist the scatter cleanup gate for the currently displayed stain. */
+    private void saveCurrentGate() {
+        if (currentScatterSample == null || scatterPlot.gates().isEmpty()) return;
+        CytoPlot.Gate g = scatterPlot.gates().get(0);
+        if (g.xs != null && g.xs.length >= 2 && g.ys != null && g.ys.length >= 2)
+            stainGates.put(currentScatterSample, new double[]{
+                    minOf(g.xs), maxOf(g.xs), minOf(g.ys), maxOf(g.ys)});
     }
 
     /** Fetch the loaded samples + fluorescence channels and seed the assignment table. */
@@ -180,7 +213,7 @@ public class CompWizardController {
             String ref = firstWithRole(ROLE_UNSTAINED);
             if (ref == null) ref = firstWithRole(ROLE_SINGLE);
             if (ref == null && !samples.isEmpty()) ref = samples.get(0);
-            if (ref != null) loadScatter(ref);
+            if (ref != null) { currentScatterSample = ref; loadScatter(ref); }
         });
     }
 
@@ -189,7 +222,7 @@ public class CompWizardController {
         return null;
     }
 
-    /** Load a control's FSC/SSC events and show them with a default central cleanup rectangle. */
+    /** Load a control's FSC/SSC events and show them with its saved (or default) cleanup gate. */
     private void loadScatter(String sample) {
         if (ctx == null || fscCombo.getValue() == null || sscCombo.getValue() == null) return;
         ObjectNode args = JSON.createObjectNode();
@@ -209,9 +242,19 @@ public class CompWizardController {
                 scatterPlot.setView(fscCombo.getValue(), sscCombo.getValue(),
                         CytoPlot.Scale.LINEAR, CytoPlot.Scale.LINEAR, "pseudocolor");
                 scatterPlot.clearGates();
-                scatterPlot.addGate(defaultCleanupGate());
+                double[] saved = stainGates.get(sample);
+                if (saved != null) {
+                    // restore this stain's previously set gate
+                    CytoPlot.Gate g = new CytoPlot.Gate("cleanup", "rectangle",
+                            fscCombo.getValue(), sscCombo.getValue(),
+                            new double[]{saved[0], saved[1]}, new double[]{saved[2], saved[3]});
+                    g.border = Color.web("#00B4D8");
+                    scatterPlot.addGate(g);
+                } else {
+                    scatterPlot.addGate(defaultCleanupGate());
+                }
             } catch (Exception ex) {
-                statusLabel.setText("Could not load scatter for the cleanup gate: " + ex.getMessage());
+                statusLabel.setText("Could not load scatter for " + sample + ": " + ex.getMessage());
             }
         });
     }
@@ -281,15 +324,26 @@ public class CompWizardController {
         ObjectNode scatter = args.putObject("scatter");
         if (fscCombo.getValue() != null) scatter.put("x", fscCombo.getValue());
         if (sscCombo.getValue() != null) scatter.put("y", sscCombo.getValue());
-        // the user-drawn FSC/SSC cleanup rectangle overrides the engine's percentile box
-        if (!scatterPlot.gates().isEmpty()) {
-            CytoPlot.Gate g = scatterPlot.gates().get(0);
-            if (g.xs != null && g.ys != null && g.xs.length >= 2 && g.ys.length >= 2) {
-                ObjectNode gate = scatter.putObject("gate");
-                gate.put("x_min", minOf(g.xs)); gate.put("x_max", maxOf(g.xs));
-                gate.put("y_min", minOf(g.ys)); gate.put("y_max", maxOf(g.ys));
-            }
+        // save and pass the current stain's gate before computing
+        saveCurrentGate();
+        // pass per-stain gates (each stain may have its own cleanup gate)
+        if (!stainGates.isEmpty()) {
+            ObjectNode sg = args.putObject("stain_gates");
+            stainGates.forEach((nm, coords) -> {
+                ObjectNode gn = sg.putObject(nm);
+                gn.put("x_min", coords[0]); gn.put("x_max", coords[1]);
+                gn.put("y_min", coords[2]); gn.put("y_max", coords[3]);
+            });
         }
+
+        // split method: map UI label → engine method string
+        String sel = methodCombo.getValue();
+        String engineMethod = "GMM split".equals(sel) ? "gmm"
+                : "Regression".equals(sel) ? "regression"
+                : "Huber Robust".equals(sel) ? "huber"
+                : "classic";
+        args.put("method", engineMethod);
+        if (debrisCheckBox.isSelected()) args.put("pre_remove_debris", true);
 
         // carry any manual positive/negative split overrides (from dragging a histogram)
         if (!thresholdOverrides.isEmpty()) {
@@ -297,11 +351,15 @@ public class CompWizardController {
             thresholdOverrides.forEach(ov::put);
         }
 
+        computeSpinner.setVisible(true);
+        computeButton.setDisable(true);
         statusLabel.setText("Gating controls and computing spillover…");
         ctx.jobs().run(ctx.bridge().command("compute_spillover_from_controls", args), this::showResults);
     }
 
     private void showResults(JsonNode result) {
+        computeSpinner.setVisible(false);
+        computeButton.setDisable(false);
         lastResult = result;
         List<String> channels = new ArrayList<>();
         result.path("channels").forEach(n -> channels.add(n.asText()));
@@ -337,7 +395,7 @@ public class CompWizardController {
             chart.setX(x);
             chart.addSeries("Negative", neg, Color.web("#7A8AA0"), AnalysisChart.Kind.BARS);
             chart.addSeries("Positive", pos, Color.web("#2C7FB8"), AnalysisChart.Kind.BARS);
-            chart.setTitle(ch + (ok ? "  ✓ (grey=neg, blue=pos)" : "  ⚠ (grey=neg, blue=pos)"));
+            chart.setTitle(ch + (ok ? "  ✓" : "  ⚠"));
             // draggable positive/negative split → override that control's threshold and recompute
             chart.setThreshold(thrT);
             chart.setOnThresholdChange(newThr -> {
@@ -347,15 +405,27 @@ public class CompWizardController {
             });
             chart.refresh();
 
-            String cap = String.format("%s — %.1f%% pos, %,d events%s",
-                    sample, c.path("pct_pos").asDouble(),
-                    c.path("n_pos").asInt(), ok ? "" : "  (weak separation)");
+            double si = c.path("stain_index").asDouble(-1);
+            String siStr = si >= 0 ? String.format("  SI=%.1f", si) : "";
+            // SI ≥ 5: good (green), 2–5: moderate (yellow), < 2: weak (red/orange)
+            String siColor = si >= 5 ? "#2ECC71" : (si >= 2 ? "#F1C40F" : "#E74C3C");
+            String cap = String.format("%s — %.1f%% pos, %,d events", sample,
+                    c.path("pct_pos").asDouble(), c.path("n_pos").asInt());
             Label capLbl = new Label(cap);
             capLbl.setWrapText(true);
             capLbl.setMaxWidth(250);
-            capLbl.setStyle(ok ? "-fx-text-fill:#C7D6E8; -fx-font-size:10;"
-                               : "-fx-text-fill:#F5A623; -fx-font-size:10;");
-            VBox cell = new VBox(2, chart, capLbl);
+            String baseColor = ok ? "#C7D6E8" : "#F5A623";
+            capLbl.setStyle("-fx-text-fill:" + baseColor + "; -fx-font-size:10;");
+            Label siLbl = new Label(siStr.isBlank() ? "" : "Stain Index:" + siStr);
+            siLbl.setStyle("-fx-text-fill:" + siColor + "; -fx-font-size:10; -fx-font-weight:bold;");
+            if (!ok) siLbl.setText((siLbl.getText().isBlank() ? "" : siLbl.getText() + "  ") + "⚠ weak separation");
+            Region negSwatch = new Region(); negSwatch.setPrefSize(10, 10); negSwatch.setStyle("-fx-background-color:#7A8AA0;");
+            Region posSwatch = new Region(); posSwatch.setPrefSize(10, 10); posSwatch.setStyle("-fx-background-color:#2C7FB8;");
+            Label negLbl = new Label("Neg"); negLbl.setStyle("-fx-text-fill:#7A8AA0; -fx-font-size:10;");
+            Label posLbl = new Label("Pos"); posLbl.setStyle("-fx-text-fill:#2C7FB8; -fx-font-size:10;");
+            HBox legend = new HBox(4, negSwatch, negLbl, posSwatch, posLbl);
+            legend.setAlignment(Pos.CENTER_LEFT);
+            VBox cell = new VBox(2, legend, chart, capLbl, siLbl);
             histBox.getChildren().add(cell);
         }
 

@@ -16,6 +16,7 @@
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
 <?import org.controlsfx.control.ToggleSwitch?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
 
 <BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
             fx:controller="org.streamflow.ui.MainController" styleClass="app-root">
@@ -70,6 +71,12 @@
                 </ToggleSwitch>
                 <Label fx:id="statusLabel" text="Idle"/>
                 <Region HBox.hgrow="ALWAYS"/>
+                <Label fx:id="compBadge" text="Comp applied" visible="false" managed="false"
+                       style="-fx-text-fill:#2ECC71; -fx-font-size:11; -fx-cursor:hand;"
+                       onMouseClicked="#onCompBadgeClick">
+                    <graphic><FontIcon iconLiteral="fas-check-circle" iconSize="13" iconColor="#2ECC71"/></graphic>
+                    <tooltip><Tooltip text="Compensation is applied. Double-click to open Compensation module."/></tooltip>
+                </Label>
                 <ProgressBar fx:id="progressBar" prefWidth="180.0" progress="0.0"/>
                 <Button fx:id="cancelButton" text="Cancel"/>
                 <Label fx:id="engineLabel" text="Engine: starting…" styleClass="engine-status"/>
