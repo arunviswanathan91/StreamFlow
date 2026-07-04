@@ -1,6 +1,8 @@
 package org.streamflow.ui;
 
 import javafx.application.Platform;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 
@@ -29,6 +31,9 @@ public final class WorkspaceModel {
     private final Map<String, Integer> eventCounts = new HashMap<>();   // total events per sample (from load_fcs), for QC
     private PopNode gateClipboard;                                       // copy/paste a gate subtree across samples
 
+    // True once Apply Compensation has succeeded in this session.
+    private final BooleanProperty compApplied = new SimpleBooleanProperty(false);
+
     // Observable sample list — populated by SetupController after load_fcs completes.
     private final ObservableList<String> allSamples = FXCollections.observableArrayList();
     // Channel names for the loaded experiment (all samples share one panel).
@@ -37,6 +42,11 @@ public final class WorkspaceModel {
     private final List<Runnable> treeListeners = new ArrayList<>();
     // Listeners notified (on the FX thread, with the sample name) when event data is cached.
     private final List<java.util.function.Consumer<String>> dataListeners = new ArrayList<>();
+
+    // ---- compensation state --------------------------------------------------
+
+    /** Observable flag — true once Apply Compensation succeeds. Bind UI badges to this. */
+    public BooleanProperty compApplied() { return compApplied; }
 
     // ---- sample + channel registry (from SetupController) --------------------
 

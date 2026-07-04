@@ -43,7 +43,7 @@
                         <Canvas fx:id="biplotCanvas"/>
                     </children>
                 </StackPane>
-                <VBox spacing="6.0" prefWidth="300.0">
+                <VBox spacing="6.0" prefWidth="300.0" minWidth="260.0" HBox.hgrow="NEVER">
                     <children>
                         <Label text="Samples / Groups" styleClass="title"/>
                         <Label text="Tick the samples to include; assign group labels to add Random Forest:" styleClass="subtitle" wrapText="true"/>

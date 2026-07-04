@@ -37,7 +37,7 @@
                     <xAxis><NumberAxis fx:id="xAxis" label="Timepoint" forceZeroInRange="false"/></xAxis>
                     <yAxis><NumberAxis fx:id="yAxis" label="\% of all events"/></yAxis>
                 </LineChart>
-                <VBox spacing="6.0" prefWidth="320.0">
+                <VBox spacing="6.0" prefWidth="320.0" minWidth="280.0" HBox.hgrow="NEVER">
                     <children>
                         <Label text="Samples" styleClass="title"/>
                         <Label text="Assign subject + numeric timepoint:" styleClass="subtitle" wrapText="true"/>

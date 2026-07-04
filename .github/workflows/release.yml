@@ -67,6 +67,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          # No pip cache — stage-python.ps1 builds a self-contained venv; there is
+          # no root-level requirements.txt for setup-python to key the cache on.
 
       - name: Stage portable Python (FlowKit engine)
         shell: pwsh

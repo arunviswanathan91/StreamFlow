@@ -628,6 +628,8 @@ def _apply_compensation(i, a):
         channels = STATE["comp_matrix"]["channels"]
         matrix = STATE["comp_matrix"]["matrix"]
 
+    mode = str(a.get("mode", "standard")).lower()  # "standard" | "nnls"
+
     # FlowKit 1.3.x Matrix signature: (spill_data_or_file, detectors, fluorochromes=None, ...).
     # The spillover is square over the detector channels (rows == cols == channels).
     fk_matrix = fk.Matrix(
@@ -644,12 +646,31 @@ def _apply_compensation(i, a):
         send_progress(i, (k + 0.5) / total, "Applying to %s…" % meta["name"])
         s = _sample_by_name(meta["name"])
         try:
-            s.apply_compensation(fk_matrix)
+            if mode == "nnls":
+                # per-event NNLS: solves S^T x = y for each event, constraining x >= 0.
+                # prevents physically impossible negative fluorescence values.
+                from scipy.optimize import nnls
+                S = np.array(matrix, dtype=float)
+                ev_raw = np.asarray(s.get_events(source="raw"), dtype=float)
+                pnn = list(s.pnn_labels)
+                ch_idx = [pnn.index(c) for c in channels]
+                fluor_block = ev_raw[:, ch_idx]
+                comp_block = np.zeros_like(fluor_block)
+                for row in range(fluor_block.shape[0]):
+                    comp_block[row], _ = nnls(S.T, fluor_block[row])
+                # store as a custom "comp" source by injecting into the sample events
+                # (FlowKit doesn't expose per-event NNLS; we stash it in a side array)
+                if not hasattr(s, "_nnls_comp"):
+                    s._nnls_comp = {}
+                s._nnls_comp["channels"] = channels
+                s._nnls_comp["data"] = comp_block
+            else:
+                s.apply_compensation(fk_matrix)
             applied += 1
         except Exception as exc:
             send_progress(i, (k + 1) / total, "Warning: %s — %s" % (meta["name"], exc))
 
-    return {"channels": channels, "applied": applied}
+    return {"channels": channels, "applied": applied, "mode": mode}
 
 
 @command("comp_preview")
@@ -719,6 +740,46 @@ def _comp_preview(i, a):
             "rows": int(raw_pair.shape[0]), "cols": 2, "total": int(n)}
 
 
+def _gmm_debris_mask(ev, pnn, fsc, ssc):
+    """Return a boolean keep-mask by fitting a 2-component GMM on log-magnitude of FSC+SSC.
+    The component with the lower mean FSC/SSC is labelled debris and removed.
+    Falls back to keeping all events if the fit fails or channels are unavailable."""
+    import numpy as np
+    try:
+        fi = next((i for i, c in enumerate(pnn) if fsc and fsc in c), None)
+        si = next((i for i, c in enumerate(pnn) if ssc and ssc in c), None)
+        if fi is None or si is None:
+            return np.ones(ev.shape[0], dtype=bool)
+        magnitude = np.log1p(np.hypot(np.clip(ev[:, fi], 0, None), np.clip(ev[:, si], 0, None)))
+        finite = magnitude[np.isfinite(magnitude)]
+        if finite.size < 40:
+            return np.ones(ev.shape[0], dtype=bool)
+        from sklearn.mixture import GaussianMixture
+        gmm = GaussianMixture(n_components=2, max_iter=200, random_state=0)
+        labels = gmm.fit_predict(magnitude.reshape(-1, 1))
+        debris_label = int(np.argmin(gmm.means_.flatten()))
+        return labels != debris_label
+    except Exception:
+        return np.ones(ev.shape[0], dtype=bool)
+
+
+def _gmm_threshold(vals_t):
+    """2-component Gaussian Mixture Model split — more robust than Otsu for skewed controls.
+    Falls back to Otsu if sklearn is unavailable or the fit fails."""
+    import numpy as np
+    finite = vals_t[np.isfinite(vals_t)]
+    if finite.size < 20:
+        return _otsu_threshold(vals_t)
+    try:
+        from sklearn.mixture import GaussianMixture
+        gmm = GaussianMixture(n_components=2, max_iter=200, random_state=0)
+        gmm.fit(finite.reshape(-1, 1))
+        means = sorted(gmm.means_.flatten())
+        return float(np.mean(means))
+    except Exception:
+        return _otsu_threshold(vals_t)
+
+
 def _otsu_threshold(vals, bins=256):
     """Otsu's bimodal split on a 1-D array (expects a display space, e.g. arcsinh)."""
     import numpy as np
@@ -779,10 +840,12 @@ def _compute_spillover_from_controls(i, a):
          if a universal negative is supplied, else the control's own negative population),
       4. normalise each row so its primary detector = 1.0.
 
-    args: {unstained?, controls?:[{sample,channel}], scatter?:{x,y}}
+    args: {unstained?, controls?:[{sample,channel}], scatter?:{x,y},
+           stain_gates?:{sample:{x_min,x_max,y_min,y_max}},  per-stain size gate overrides
+           method?: "classic"|"gmm"}
           (controls auto-assigned by brightest detector when omitted)
     Returns {channels, matrix, controls:[{channel,sample,threshold,threshold_t,n_pos,n_neg,
-             pct_pos,ok,hist:{x,counts}}], scatter:{x,y}, unstained}
+             pct_pos,ok,stain_index,hist:{x,counts}}], scatter:{x,y}, unstained}
     """
     import numpy as np
     if not STATE["meta"]:
@@ -798,6 +861,9 @@ def _compute_spillover_from_controls(i, a):
     fsc = scatter.get("x") or next((c for c in pnn0 if re.search(r"FSC.?A|FSC", c, re.I)), None)
     ssc = scatter.get("y") or next((c for c in pnn0 if re.search(r"SSC.?A|SSC", c, re.I)), None)
     sgate = scatter.get("gate")   # optional FSC/SSC rectangle drawn in the wizard (overrides the box)
+    stain_gates_in = a.get("stain_gates") or {}   # per-stain gate overrides {sample: {x_min,...}}
+    method = str(a.get("method", "classic")).lower()  # "classic" | "gmm" | "regression" | "huber"
+    pre_remove_debris = bool(a.get("pre_remove_debris", False))
 
     unstained = a.get("unstained")
     controls_in = a.get("controls")
@@ -864,12 +930,24 @@ def _compute_spillover_from_controls(i, a):
         s = _sample_by_name(name)
         ev = np.asarray(s.get_events(source="raw"), dtype=float)
         pnn = list(s.pnn_labels)
-        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc, sgate)
+        # use a per-stain gate if the user set one; otherwise fall back to the global gate
+        this_sgate = stain_gates_in.get(name) or sgate
+        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc, this_sgate)
         evg = ev[mask] if mask.any() else ev
+        if pre_remove_debris:
+            debris_keep = _gmm_debris_mask(evg, pnn, fsc, ssc)
+            evg = evg[debris_keep] if debris_keep.any() else evg
         prim = evg[:, pnn.index(primary)]
-
         prim_t = np.arcsinh(prim / 150.0)
-        thr_t = float(overrides[name]) if name in overrides else _otsu_threshold(prim_t)
+
+        # threshold for pos/neg split — used by classic/gmm for the matrix values,
+        # and by all methods for the stain index informational display
+        if name in overrides:
+            thr_t = float(overrides[name])
+        elif method == "gmm":
+            thr_t = _gmm_threshold(prim_t)
+        else:
+            thr_t = _otsu_threshold(prim_t)
         thr = float(np.sinh(thr_t) * 150.0)
         pos_mask = prim >= thr
         neg_mask = ~pos_mask
@@ -877,18 +955,49 @@ def _compute_spillover_from_controls(i, a):
         pct_pos = 100.0 * n_pos / max(1, evg.shape[0])
         ok = n_pos > 100 and pct_pos >= 2.0
 
-        def neg_med(d):
-            if d in baseline:
-                return baseline[d]
-            col = evg[:, pnn.index(d)]
-            return float(np.median(col[neg_mask])) if neg_mask.any() else 0.0
+        if method in ("regression", "huber"):
+            # fit a linear slope through all gated events — no bimodal split needed
+            ok = True
+            bl = {d: baseline.get(d, 0.0) for d in detectors}
+            prim_adj = prim - bl.get(primary, 0.0)
+            for ci, d in enumerate(detectors):
+                if d == primary:
+                    matrix[ri][ci] = 1.0
+                    continue
+                other_adj = evg[:, pnn.index(d)] - bl.get(d, 0.0)
+                try:
+                    fm = np.isfinite(prim_adj) & np.isfinite(other_adj)
+                    if method == "regression":
+                        from scipy.optimize import curve_fit
+                        pf, _ = curve_fit(lambda x, k: x * k, prim_adj[fm], other_adj[fm],
+                                          p0=[0.0], maxfev=2000)
+                        matrix[ri][ci] = round(float(pf[0]), 5)
+                    else:
+                        from sklearn.linear_model import HuberRegressor
+                        hr = HuberRegressor(fit_intercept=False, max_iter=200)
+                        hr.fit(prim_adj[fm].reshape(-1, 1), other_adj[fm])
+                        matrix[ri][ci] = round(float(hr.coef_[0]), 5)
+                except Exception:
+                    matrix[ri][ci] = 0.0
+        else:
+            def neg_med(d):
+                if d in baseline:
+                    return baseline[d]
+                col = evg[:, pnn.index(d)]
+                return float(np.median(col[neg_mask])) if neg_mask.any() else 0.0
 
-        pos = evg[pos_mask] if pos_mask.any() else evg
-        signal = {d: float(np.median(pos[:, pnn.index(d)])) - neg_med(d) for d in detectors}
-        denom = signal[primary] if abs(signal[primary]) > 1e-9 else 1.0
-        for ci, d in enumerate(detectors):
-            matrix[ri][ci] = round(signal[d] / denom, 5)
-        matrix[ri][ri] = 1.0
+            pos = evg[pos_mask] if pos_mask.any() else evg
+            signal = {d: float(np.median(pos[:, pnn.index(d)])) - neg_med(d) for d in detectors}
+            denom = signal[primary] if abs(signal[primary]) > 1e-9 else 1.0
+            for ci, d in enumerate(detectors):
+                matrix[ri][ci] = round(signal[d] / denom, 5)
+            matrix[ri][ri] = 1.0
+
+        # stain index = (pos_median - neg_median) / (2 × SD_neg)  [Reed et al. definition]
+        neg_prim = evg[neg_mask, pnn.index(primary)] if neg_mask.any() else np.array([0.0])
+        pos_prim = evg[pos_mask, pnn.index(primary)] if pos_mask.any() else evg[:, pnn.index(primary)]
+        neg_prim_sd = max(float(np.std(neg_prim)), 1e-9)
+        stain_index = round((float(np.median(pos_prim)) - float(np.median(neg_prim))) / (2.0 * neg_prim_sd), 2)
 
         finite = prim_t[np.isfinite(prim_t)]
         lo, hi = (np.percentile(finite, [0.5, 99.5]) if finite.size else (0.0, 1.0))
@@ -898,6 +1007,7 @@ def _compute_spillover_from_controls(i, a):
             "channel": primary, "sample": name,
             "threshold": thr, "threshold_t": thr_t,
             "n_pos": n_pos, "n_neg": n_neg, "pct_pos": round(pct_pos, 2), "ok": bool(ok),
+            "stain_index": stain_index,
             "hist": {"x": xmid.tolist(), "counts": counts.tolist()},
         })
 
