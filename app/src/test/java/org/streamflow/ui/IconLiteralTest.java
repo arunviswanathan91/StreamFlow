@@ -18,6 +18,9 @@ class IconLiteralTest {
         assertEquals("fas-chevron-left", FontAwesomeSolid.CHEVRON_LEFT.getDescription());
         assertEquals("fas-chevron-right", FontAwesomeSolid.CHEVRON_RIGHT.getDescription());
         assertEquals("fas-copy", FontAwesomeSolid.COPY.getDescription());
+        assertEquals("fas-cog", FontAwesomeSolid.COG.getDescription());
+        assertEquals("fas-undo", FontAwesomeSolid.UNDO.getDescription());
+        assertEquals("fas-redo", FontAwesomeSolid.REDO.getDescription());
         assertEquals("fas-tags", FontAwesomeSolid.TAGS.getDescription());
         assertEquals("mdi2c-cog", MaterialDesignC.COG.getDescription());
     }

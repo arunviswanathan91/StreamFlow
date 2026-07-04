@@ -1,0 +1,185 @@
+name: stage-r-portable
+
+# Builds a self-contained R-Portable (R 4.4 + CytoExploreR + FlowMagic) for
+# bundling into the StreamFLOW Windows installer. Uploads the result as a
+# GitHub Release asset so release.yml can download it in < 2 minutes instead
+# of re-running the 60-90 minute compile step on every app release.
+#
+# When to re-run: whenever engine/install_from_vendor.R changes, when a package
+# in engine/vendor/ is updated, or when FlowMagic deps change.
+# How: GitHub Actions → stage-r-portable → Run workflow → enter a date tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag for this R-Portable build (e.g. r-portable-2026-07-04)'
+        required: true
+        default: 'r-portable-2026-07-04'
+
+permissions:
+  contents: write   # needed to create the release + upload assets
+
+jobs:
+  stage:
+    runs-on: windows-latest
+    timeout-minutes: 120   # R + Bioconductor install takes 60-90 min cold
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # R 4.4 via r-lib/actions: configures Posit Public Package Manager (RSPM)
+      # which serves pre-built Windows binaries for most CRAN/Bioc packages —
+      # no Rtools / C++ compilation needed for the binary subset.
+      - name: Set up R 4.4 (RSPM binary packages)
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+          use-public-rspm: true
+
+      # Cache the R user library keyed on the installer script + vendor tree.
+      # A cache hit skips ALL package installs (~90 min saved).
+      - name: Cache R user library
+        id: cache-r
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: r-portable-${{ runner.os }}-4.4-${{ hashFiles('engine/install_from_vendor.R') }}-${{ hashFiles('engine/vendor/**') }}
+          restore-keys: |
+            r-portable-${{ runner.os }}-4.4-
+
+      # Rtools needed only for the vendored packages that must compile from source
+      # (EmbedSOM, robustbase, EBImage, etc.). Binary RSPM packages skip compilation.
+      - name: Install Rtools 4.4 (for vendored source packages)
+        if: steps.cache-r.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: choco install rtools --no-progress -y
+
+      - name: Install Bioconductor + CRAN binary packages (pak)
+        if: steps.cache-r.outputs.cache-hit != 'true'
+        shell: Rscript {0}
+        run: |
+          options(Ncpus = parallel::detectCores())
+          if (!requireNamespace("pak", quietly = TRUE))
+            install.packages("pak", repos = "https://packagemanager.posit.co/cran/latest")
+
+          # Bioconductor core: binary builds from RSPM (no compilation)
+          pak::pak(c(
+            "bioc::cytolib",
+            "bioc::flowCore",
+            "bioc::flowWorkspace",
+            "bioc::openCyto",
+            "bioc::FlowSOM"
+          ), ask = FALSE)
+
+          # CytoExploreR GitHub stack (RSPM resolves most deps as binaries)
+          pak::pak(c(
+            "rlbarter/superheat",
+            "DillonHammill/DataEditR",
+            "DillonHammill/HeatmapR",
+            "DillonHammill/CytoExploreRData",
+            "DillonHammill/CytoExploreR"
+          ), ask = FALSE)
+
+          # FlowMagic CRAN deps — all available as RSPM binaries on Windows
+          pak::pak(c(
+            "caret", "randomForest", "nnet", "sm", "pracma",
+            "concaveman", "sp", "sf", "doParallel",
+            "patchwork", "ggExtra", "RColorBrewer", "stringr",
+            "jsonlite", "remotes"
+          ), ask = FALSE)
+
+      # Vendored source packages (not on RSPM) + FlowMagic itself
+      - name: Install vendored source packages + FlowMagic
+        if: steps.cache-r.outputs.cache-hit != 'true'
+        shell: Rscript {0}
+        run: |
+          source("engine/install_from_vendor.R")
+
+      # Copy the R install + user library into a single self-contained tree.
+      # Mirrors what build-windows.yml does for the legacy Electron build.
+      - name: Build R-Portable tree (robocopy)
+        shell: pwsh
+        run: |
+          $rscript   = (Get-Command Rscript.exe).Source
+          $rBin      = Split-Path $rscript
+          $rHome     = if ($rBin -match '\\x64$') { Split-Path (Split-Path $rBin) } else { Split-Path $rBin }
+          $userLib   = (& Rscript.exe --vanilla -e "cat(.libPaths()[1])").Trim()
+          $dest      = "app\target\R-Portable"
+          $destLib   = Join-Path $dest "library"
+
+          Write-Host "R home    : $rHome"
+          Write-Host "User lib  : $userLib"
+          Write-Host "Dest      : $dest"
+
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          New-Item -ItemType Directory -Force $destLib | Out-Null
+
+          # Base R (without its library; we build a curated one below)
+          robocopy $rHome $dest /E /XD "library" /NFL /NDL /NJH /NJS | Out-Null; $LASTEXITCODE = 0
+          # Seed with the base + recommended packages that ship with R
+          robocopy (Join-Path $rHome "library") $destLib /E /NFL /NDL /NJH /NJS | Out-Null; $LASTEXITCODE = 0
+          # Overlay the user library (all the packages installed above)
+          if ((Test-Path $userLib) -and ($userLib -ne $destLib)) {
+            robocopy $userLib $destLib /E /XO /NFL /NDL /NJH /NJS | Out-Null; $LASTEXITCODE = 0
+          }
+
+          $mb = [math]::Round((Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host "R-Portable total: ${mb} MB"
+
+      - name: Verify R-Portable
+        shell: pwsh
+        run: |
+          # Support both flat (bin\Rscript.exe) and x64 (bin\x64\Rscript.exe) layouts
+          $exe = "app\target\R-Portable\bin\Rscript.exe"
+          if (-not (Test-Path $exe)) { $exe = "app\target\R-Portable\bin\x64\Rscript.exe" }
+          if (-not (Test-Path $exe)) { throw "Rscript.exe not found in R-Portable" }
+
+          $script = @'
+          pkgs <- c("flowCore","flowWorkspace","openCyto","FlowSOM",
+                    "CytoExploreR","flowMagic","jsonlite")
+          for (p in pkgs) cat(sprintf("%-18s %s\n", p,
+            if (requireNamespace(p, quietly=TRUE)) "OK" else "MISSING"))
+          miss <- pkgs[!sapply(pkgs, requireNamespace, quietly=TRUE)]
+          if (length(miss)) stop("Missing: ", paste(miss, collapse=", "))
+          cat("Verification passed.\n")
+          '@
+          $tmp = New-TemporaryFile; Set-Content $tmp $script
+          & $exe --vanilla $tmp
+          if ($LASTEXITCODE -ne 0) { throw "Verification failed (exit $LASTEXITCODE)" }
+          Remove-Item $tmp
+
+      - name: Compress R-Portable
+        shell: pwsh
+        run: |
+          Write-Host "Compressing R-Portable to r-portable-win64.tar.gz…"
+          tar -czf r-portable-win64.tar.gz -C app\target R-Portable
+          $mb = [math]::Round((Get-Item r-portable-win64.tar.gz).Length / 1MB)
+          Write-Host "Archive: r-portable-win64.tar.gz  (${mb} MB)"
+
+      - name: Upload as workflow artifact (always — for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-portable-win64
+          path: r-portable-win64.tar.gz
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Publish as GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          name: R-Portable ${{ github.event.inputs.tag_name }}
+          body: |
+            Pre-staged R 4.4 + CytoExploreR + FlowMagic for StreamFLOW Windows bundling.
+
+            **Contents:** R 4.4, cytolib, flowCore, flowWorkspace, openCyto, FlowSOM,
+            CytoExploreR, flowMagic, jsonlite, and all transitive dependencies.
+
+            **Used by:** `release.yml` — update the download URL in that workflow after
+            creating a new R-Portable build.
+          draft: false
+          prerelease: false
+          files: r-portable-win64.tar.gz

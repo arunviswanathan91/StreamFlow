@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.Slider?>
+<?import javafx.scene.layout.GridPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+<?import javafx.scene.layout.ColumnConstraints?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.CopySettingsController"
+      styleClass="content" spacing="12.0" prefWidth="460.0">
+    <children>
+        <Label text="Copy / Export Format" styleClass="title"/>
+        <Label text="These apply to every plot's Copy across the whole app — set the format once and every Copy follows it until you change it here again."
+               styleClass="subtitle" wrapText="true"/>
+
+        <GridPane hgap="12.0" vgap="12.0">
+            <columnConstraints>
+                <ColumnConstraints minWidth="150.0"/>
+                <ColumnConstraints minWidth="180.0" hgrow="ALWAYS"/>
+                <ColumnConstraints minWidth="60.0"/>
+            </columnConstraints>
+            <children>
+                <Label text="Point size (pseudocolor):" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+                <Slider fx:id="pointSlider" min="0" max="4" majorTickUnit="1" minorTickCount="0"
+                        snapToTicks="true" showTickMarks="true" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
+                <Label fx:id="pointVal" text="" GridPane.rowIndex="0" GridPane.columnIndex="2"/>
+
+                <Label text="Axis font:" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
+                <Slider fx:id="axisSlider" min="8" max="24" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
+                <Label fx:id="axisVal" text="" GridPane.rowIndex="1" GridPane.columnIndex="2"/>
+
+                <Label text="Gate-label font:" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
+                <Slider fx:id="labelSlider" min="8" max="24" GridPane.rowIndex="2" GridPane.columnIndex="1"/>
+                <Label fx:id="labelVal" text="" GridPane.rowIndex="2" GridPane.columnIndex="2"/>
+
+                <Label text="Chart title font:" GridPane.rowIndex="3" GridPane.columnIndex="0"/>
+                <Slider fx:id="chartTitleSlider" min="8" max="32" GridPane.rowIndex="3" GridPane.columnIndex="1"/>
+                <Label fx:id="chartTitleVal" text="" GridPane.rowIndex="3" GridPane.columnIndex="2"/>
+
+                <Label text="Legend / key font:" GridPane.rowIndex="4" GridPane.columnIndex="0"/>
+                <Slider fx:id="chartLegendSlider" min="6" max="24" GridPane.rowIndex="4" GridPane.columnIndex="1"/>
+                <Label fx:id="chartLegendVal" text="" GridPane.rowIndex="4" GridPane.columnIndex="2"/>
+
+                <Label text="Export DPI:" GridPane.rowIndex="5" GridPane.columnIndex="0"/>
+                <Slider fx:id="dpiSlider" min="72" max="1200" majorTickUnit="200" minorTickCount="0"
+                        GridPane.rowIndex="5" GridPane.columnIndex="1"/>
+                <Label fx:id="dpiVal" text="" GridPane.rowIndex="5" GridPane.columnIndex="2"/>
+
+                <CheckBox fx:id="gateLabelsCheck" text="Show gate labels &amp; statistics"
+                          GridPane.rowIndex="6" GridPane.columnIndex="0" GridPane.columnSpan="2"/>
+            </children>
+        </GridPane>
+
+        <HBox spacing="8.0" alignment="CENTER_RIGHT">
+            <children>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Button fx:id="closeButton" text="Close" onAction="#onClose" styleClass="primary"/>
+            </children>
+        </HBox>
+    </children>
+</VBox>

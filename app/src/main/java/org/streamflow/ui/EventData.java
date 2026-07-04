@@ -20,9 +20,11 @@ public final class EventData {
     private final int rows;
     private final int cols;
     private final List<String> channels;
+    private final double[][] cachedRanges;
 
     public EventData(float[] data, int rows, int cols, List<String> channels) {
         this.data = data; this.rows = rows; this.cols = cols; this.channels = channels;
+        this.cachedRanges = new double[cols][];
     }
 
     /** Read the engine blob: a flat float32 array of rows*cols, channels in order. */
@@ -56,6 +58,7 @@ public final class EventData {
 
     /** [min, max] over a column, ignoring non-finite values. */
     public double[] range(int col) {
+        if (cachedRanges[col] != null) return cachedRanges[col];
         double mn = Double.POSITIVE_INFINITY, mx = Double.NEGATIVE_INFINITY;
         for (int r = 0; r < rows; r++) {
             float v = data[r * cols + col];
@@ -63,6 +66,7 @@ public final class EventData {
         }
         if (mn > mx) { mn = 0; mx = 1; }
         if (mn == mx) { mn -= 1; mx += 1; }
-        return new double[]{mn, mx};
+        cachedRanges[col] = new double[]{mn, mx};
+        return cachedRanges[col];
     }
 }

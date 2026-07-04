@@ -39,6 +39,8 @@ public class StreamFlowApp extends Application {
         stage.setMinHeight(700);
         stage.setScene(scene);
         org.streamflow.ui.AppIcons.apply(stage);
+        // Intercept the window close so unsaved gating changes can be saved first.
+        stage.setOnCloseRequest(controller::confirmCloseAndExit);
         stage.show();
 
         startEngine();

@@ -245,6 +245,66 @@
     -fx-background-color: -fx-bg;
 }
 
+/* Check boxes — readable label text on the dark theme (modena defaults to near-black) */
+.check-box {
+    -fx-text-fill: -fx-text-c;
+}
+.check-box > .box {
+    -fx-background-color: -fx-panel-2;
+    -fx-border-color: -fx-panel-2;
+    -fx-background-radius: 3;
+}
+.check-box:selected > .box {
+    -fx-background-color: -fx-accent-c;
+}
+.check-box:selected > .box > .mark {
+    -fx-background-color: -fx-bg;
+}
+
+/* Toggle switch (ControlsFX) — the sliding Auto-save control in the status bar */
+.toggle-switch {
+    -fx-text-fill: -fx-text-mut;
+}
+.toggle-switch .text, .toggle-switch .label {
+    -fx-fill: -fx-text-mut;
+    -fx-text-fill: -fx-text-mut;
+}
+.toggle-switch .thumb-area {
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 1em;
+    -fx-border-color: -fx-panel-2;
+    -fx-border-radius: 1em;
+}
+.toggle-switch:selected .thumb-area {
+    -fx-background-color: -fx-accent-c;
+    -fx-border-color: -fx-accent-c;
+}
+.toggle-switch .thumb {
+    -fx-background-color: #EAEFF5;
+    -fx-background-radius: 1em;
+}
+
+/* Titled panes (e.g. the graph-window Options panel) */
+.titled-pane {
+    -fx-text-fill: -fx-text-c;
+}
+.titled-pane > .title {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-text-c;
+}
+.titled-pane > .title > .text {
+    -fx-fill: -fx-text-c;
+}
+.titled-pane > *.content {
+    -fx-background-color: -fx-panel;
+    -fx-border-color: -fx-panel-2;
+}
+
+/* Sliders */
+.slider .thumb { -fx-background-color: -fx-accent-c; }
+.slider .track { -fx-background-color: -fx-panel-2; }
+.slider .axis { -fx-tick-label-fill: -fx-text-mut; }
+
 /* Tab pane */
 .tab-pane > .tab-header-area > .tab-header-background {
     -fx-background-color: -fx-panel;
@@ -285,6 +345,25 @@
     -fx-background-color: -fx-panel-2;
     -fx-background-radius: 3;
 }
+
+/* Guided workflow checklist hints */
+.workflow-hints {
+    -fx-background-color: #162436;
+    -fx-background-radius: 6;
+    -fx-border-color: #243447;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+    -fx-padding: 10 14 10 14;
+    -fx-spacing: 6;
+}
+.hint-ok .ikonli-font-icon   { -fx-icon-color: #27AE60; -fx-fill: #27AE60; }
+.hint-missing .ikonli-font-icon { -fx-icon-color: #E74C3C; -fx-fill: #E74C3C; }
+.hint-info .ikonli-font-icon { -fx-icon-color: #F39C12; -fx-fill: #F39C12; }
+.hint-ok .label     { -fx-text-fill: #27AE60; }
+.hint-missing .label { -fx-text-fill: #E74C3C; }
+.hint-info .label   { -fx-text-fill: -fx-text-mut; }
+.hint-link { -fx-text-fill: -fx-accent-c; -fx-cursor: hand; -fx-padding: 0 0 0 4; }
+.hint-link:hover { -fx-underline: true; }
 
 /* Scrollbars */
 .scroll-bar:vertical, .scroll-bar:horizontal {

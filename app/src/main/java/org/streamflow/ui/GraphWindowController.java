@@ -3,6 +3,7 @@ package org.streamflow.ui;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import javafx.application.Platform;
 import javafx.animation.Interpolator;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
@@ -60,7 +61,7 @@ public class GraphWindowController {
     @FXML private ComboBox<String> plotTypeCombo, xAxisCombo, yAxisCombo, toolCombo;
     @FXML private ComboBox<String> xScaleCombo, yScaleCombo;
     @FXML private Button xAxisOptsButton, yAxisOptsButton;
-    @FXML private Button prevSampleButton, nextSampleButton, copyButton, channelsButton;
+    @FXML private Button prevSampleButton, nextSampleButton, copyButton, copySettingsButton, channelsButton;
     @FXML private Button fmoButton;
     @FXML private Button compareButton;
     @FXML private ComboBox<String> sampleJumpCombo;
@@ -121,6 +122,7 @@ public class GraphWindowController {
         w.controller().sampleFile = name;
         w.controller().loadFromEngine(true);
         w.stage().show();
+        ctx.workspace().registerWindow(name, w.stage());  // §14: track for focus-existing behaviour
     }
 
     /** Drill-down window: another view of the SAME sample/tree, initially focused on {@code focus}. */
@@ -148,6 +150,9 @@ public class GraphWindowController {
             ctx.workspace().addTreeChangeListener(c::onExternalTreeChange);   // live sync across windows
             c.sample = title;
             c.plot.setChannelLabeler(ch -> ctx.aliases().label(ch));
+            // App-wide Copy format: apply current settings to this plot and stay in sync as they change.
+            c.applyExportFormat();
+            ctx.settings().addChangeListener(c.exportFormatListener);
             Scene scene = new Scene(root, 1040, 720);
             scene.getStylesheets().add(GraphWindowController.class
                     .getResource("/org/streamflow/ui/streamflow-dark.css").toExternalForm());
@@ -180,6 +185,10 @@ public class GraphWindowController {
             stage.setTitle("StreamFLOW — " + title);
             stage.setScene(scene);
             AppIcons.apply(stage);
+            stage.setOnHidden(e -> {
+                ctx.settings().removeChangeListener(c.exportFormatListener);
+                ctx.workspace().unregisterWindow(c.sampleFile);  // §14: deregister so focus check works
+            });
             return new Win(stage, c);
         } catch (Exception e) {
             throw new RuntimeException("Could not open graph window: " + e.getMessage(), e);
@@ -213,6 +222,7 @@ public class GraphWindowController {
         });
         plot.setOnGateChanged(g -> {
             recomputeCounts(); refreshTreeLabels(); snapshotGate(g);
+            notifyTree();   // gate moved/resized → mark workspace dirty
             if (pendingEditGate == g && pendingEditXs != null) {
                 final double[] oldXs = pendingEditXs.clone();
                 final double[] oldYs = pendingEditYs == null ? null : pendingEditYs.clone();
@@ -236,9 +246,16 @@ public class GraphWindowController {
         plot.setOnOpenChild(this::openChildForGate);   // double-click gate body / "Open in new window"
         plot.setOnStatsConfig(this::configureStats);
         plot.setOnBusy(busy -> {                 // disable axis controls while a render runs
-            xAxisCombo.setDisable(busy); yAxisCombo.setDisable(busy);
-            xScaleCombo.setDisable(busy); yScaleCombo.setDisable(busy);
-            plotTypeCombo.setDisable(busy);
+            // Never disable the combos while the axis-options popover is visible: the popover
+            // itself triggers invalidate() (e.g. dragging the Logicle-W or zoom slider), and
+            // disabling the controls at that moment causes a permanent freeze if the render is
+            // cancelled before it can call setBusy(false).  The popover is lightweight enough
+            // that it runs correctly against a live background render.
+            if (!axisPopoverActive) {
+                xAxisCombo.setDisable(busy); yAxisCombo.setDisable(busy);
+                xScaleCombo.setDisable(busy); yScaleCombo.setDisable(busy);
+                plotTypeCombo.setDisable(busy);
+            }
         });
 
         plotTypeCombo.setOnAction(e -> { if (!suppressAxisEvents) applyAxes(); });
@@ -254,13 +271,24 @@ public class GraphWindowController {
         iconOnly(xAxisOptsButton, "mdi2c-cog", "⚙");
         iconOnly(yAxisOptsButton, "mdi2c-cog", "⚙");
         withIcon(copyButton, "fas-copy");
+        iconOnly(copySettingsButton, "fas-cog", "⚙");
         withIcon(channelsButton, "fas-tags");
 
-        histModeCombo.setItems(FXCollections.observableArrayList("Filled Smooth", "Raw Bars", "Line Only"));
+        histModeCombo.setItems(FXCollections.observableArrayList("Filled Smooth", "Raw Bars", "Line Only", "CDF"));
         histModeCombo.getSelectionModel().select("Filled Smooth");
         smoothCheck.setOnAction(e -> plot.setSmooth(smoothCheck.isSelected()));
-        snapCheck.setOnAction(e -> plot.setSnapEnabled(snapCheck.isSelected()));
-        confidenceCheck.setOnAction(e -> plot.setShowConfidence(confidenceCheck.isSelected()));
+        snapCheck.setOnAction(e -> {
+            plot.setSnapEnabled(snapCheck.isSelected());
+            statusLabel.setText(snapCheck.isSelected()
+                    ? "Snap on — while drawing a gate, its edges/vertices jump to the nearest density valley (pink guide)."
+                    : "Snap off.");
+        });
+        confidenceCheck.setOnAction(e -> {
+            plot.setShowConfidence(confidenceCheck.isSelected());
+            statusLabel.setText(confidenceCheck.isSelected()
+                    ? "Confidence on — gate fill turns green (boundary on a valley = clean) or yellow/red (boundary through dense region = overlap). Updates live as you move gates."
+                    : "Confidence off — gates show their normal colors.");
+        });
         backgateCheck.setOnAction(e -> {
             if (!backgateCheck.isSelected()) { plot.setHighlight(null); statusLabel.setText("Backgating off."); }
             else statusLabel.setText("Backgating on — select a descendant population in the tree to overlay it.");
@@ -280,7 +308,10 @@ public class GraphWindowController {
             }
         });
         histModeCombo.setOnAction(e -> plot.setHistMode(histModeCombo.getValue()));
-        bandwidthSlider.valueProperty().addListener((o, a, b) -> plot.setHistBandwidth(b.doubleValue()));
+        // Apply bandwidth only when the drag settles (or on a discrete step), not on every tick —
+        // per-tick re-renders during a drag were a source of the histogram render storm.
+        bandwidthSlider.valueProperty().addListener((o, a, b) -> { if (!bandwidthSlider.isValueChanging()) plot.setHistBandwidth(b.doubleValue()); });
+        bandwidthSlider.valueChangingProperty().addListener((o, was, changing) -> { if (!changing) plot.setHistBandwidth(bandwidthSlider.getValue()); });
 
         prevSampleButton.setOnAction(e -> gotoSample(sampleIndex - 1));
         nextSampleButton.setOnAction(e -> gotoSample(sampleIndex + 1));
@@ -798,6 +829,9 @@ public class GraphWindowController {
     // ---- axis adjustment popover (icon next to each axis) --------------------
 
     private PopOver axisPopOver;
+    /** True while an axis-options popover is showing — prevents setOnBusy from disabling
+     *  the axis combos and locking the user out of the popover during renders it triggered. */
+    private boolean axisPopoverActive = false;
 
     /** FlowJo-style axis customizer: a slider whose meaning adapts to the scale. */
     private void showAxisOptions(boolean xAxis, Node anchor) {
@@ -904,8 +938,37 @@ public class GraphWindowController {
         // so the graph stays visible while scaling.
         pop.setArrowLocation(xAxis ? PopOver.ArrowLocation.LEFT_CENTER : PopOver.ArrowLocation.RIGHT_CENTER);
         pop.setDetachable(false); pop.setAutoHide(true);
+        // Track popover visibility so setOnBusy doesn't disable controls during axis tweaks.
+        axisPopoverActive = true;
+        pop.showingProperty().addListener((obs, wasShowing, isShowing) -> {
+            if (!isShowing) {
+                axisPopoverActive = false;
+                // Re-enable any combos that got stuck disabled while the popover was open.
+                boolean busy = false;   // popover just closed — no render should have them disabled
+                xAxisCombo.setDisable(busy); yAxisCombo.setDisable(busy);
+                xScaleCombo.setDisable(busy); yScaleCombo.setDisable(busy);
+                plotTypeCombo.setDisable(busy);
+            }
+        });
         pop.show(anchor);
         axisPopOver = pop;
+        // ControlsFX PopOver applies a DropShadow in its skin's Java code (not CSS). When the
+        // popover is showing, every 60Hz pulse computes the shadow extent → reads the PopOver's
+        // VLineTo-based arrow path geometry → fires binding invalidations → marks layout dirty →
+        // next pulse: 28% FX thread CPU saturation. Clear all effects after the skin is created.
+        Platform.runLater(() -> clearPopOverEffects(pop));
+    }
+
+    private static void clearPopOverEffects(javafx.stage.PopupWindow pop) {
+        if (pop.getScene() == null || pop.getScene().getRoot() == null) return;
+        clearNodeEffects(pop.getScene().getRoot());
+    }
+
+    private static void clearNodeEffects(javafx.scene.Node node) {
+        node.setEffect(null);
+        if (node instanceof javafx.scene.Parent p) {
+            for (javafx.scene.Node child : p.getChildrenUnmodifiable()) clearNodeEffects(child);
+        }
     }
 
     // ---- channel aliases (Feature 4) ----------------------------------------
@@ -920,6 +983,13 @@ public class GraphWindowController {
         combo.setCellFactory(c -> new javafx.scene.control.ListCell<>() {
             @Override protected void updateItem(String s, boolean empty) { super.updateItem(s, empty); setText(empty ? null : lbl.apply(s)); }
         });
+    }
+
+    private void refreshCombo(ComboBox<String> combo) {
+        String sel = combo.getValue();
+        javafx.collections.ObservableList<String> items = javafx.collections.FXCollections.observableArrayList(combo.getItems());
+        combo.setItems(items);
+        combo.setValue(sel);
     }
 
     @FXML
@@ -945,65 +1015,41 @@ public class GraphWindowController {
         dlg.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         if (dlg.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         for (int i = 0; i < chans.size(); i++) ctx.aliases().set(chans.get(i), fields.get(i).getText());
-        aliasCombo(xAxisCombo); aliasCombo(yAxisCombo);
+        refreshCombo(xAxisCombo); refreshCombo(yAxisCombo);
         recomputeCounts(); refreshTreeLabels();
         applyAxes();   // redraw plot axis labels with new aliases
         statusLabel.setText("Channel target names updated.");
     }
 
-    @FXML
-    private void onCopy() {
-        showExportOptionsDialog();
+    /** Listener so this plot tracks the app-wide Copy format live (held for clean removal on close). */
+    private final Runnable exportFormatListener = this::applyExportFormat;
+
+    /** Push the current app-wide Copy/export format (point size, axis & label fonts) onto this plot. */
+    private void applyExportFormat() {
+        if (ctx == null) return;
+        plot.setPointRadius(ctx.settings().exportPointSize());
+        plot.setAxisFontSize(ctx.settings().exportAxisFontSize());
+        plot.setLabelFontSize(ctx.settings().exportFontSize());
     }
 
-    private void showExportOptionsDialog() {
-        // Font size
-        Slider fontSlider = new Slider(6, 36, ctx.settings().exportFontSize());
-        fontSlider.setMajorTickUnit(6); fontSlider.setMinorTickCount(5); fontSlider.setShowTickLabels(true);
-        Label fontLabel = new Label(String.format("%.1f pt", ctx.settings().exportFontSize()));
-        fontSlider.valueProperty().addListener((o, a, b) -> fontLabel.setText(String.format("%.1f pt", b.doubleValue())));
+    /** Copy button — copy the plot straight to the clipboard using the current app-wide format. */
+    @FXML
+    private void onCopy() {
+        boolean prevLabels = plot.labelsVisible();
+        plot.setLabelsVisible(ctx.settings().exportGateLabels());
+        javafx.scene.image.WritableImage img = plot.exportImage(ctx.settings().exportScale());
+        plot.setLabelsVisible(prevLabels);
+        javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
+        cc.putImage(img);
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(cc);
+        statusLabel.setText("Copied " + ctx.settings().exportDpi() + " DPI plot image — paste into PowerPoint."
+                + " (Adjust format with the gear button.)");
+    }
 
-        // DPI for scaling
-        Slider dpiSlider = new Slider(72, 1200, ctx.settings().exportDpi());
-        dpiSlider.setMajorTickUnit(200); dpiSlider.setMinorTickCount(4); dpiSlider.setShowTickLabels(true);
-        Label dpiLabel = new Label(ctx.settings().exportDpi() + " DPI");
-        dpiSlider.valueProperty().addListener((o, a, b) -> dpiLabel.setText((int)b.doubleValue() + " DPI"));
-
-        // Gate labels toggle
-        javafx.scene.control.CheckBox gateLabelsCheck = new javafx.scene.control.CheckBox("Show gate labels & statistics");
-        gateLabelsCheck.setSelected(ctx.settings().exportGateLabels());
-
-        GridPane gp = new GridPane(); gp.setHgap(12); gp.setVgap(10);
-        gp.add(new Label("Axis font size:"), 0, 0); gp.add(fontSlider, 1, 0); gp.add(fontLabel, 2, 0);
-        gp.add(new Label("Export DPI:"), 0, 1); gp.add(dpiSlider, 1, 1); gp.add(dpiLabel, 2, 1);
-        gp.add(gateLabelsCheck, 0, 2);
-
-        Dialog<ButtonType> dlg = new Dialog<>();
-        dlg.setTitle("Export options");
-        dlg.setHeaderText(null);
-        dlg.getDialogPane().setContent(gp);
-        dlg.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        dlg.setResultConverter(bt -> bt);
-
-        if (dlg.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-            // Save settings
-            ctx.settings().setExportFontSize(fontSlider.getValue());
-            ctx.settings().setExportDpi((int) Math.round(dpiSlider.getValue()));
-            ctx.settings().setExportGateLabels(gateLabelsCheck.isSelected());
-
-            // Export with temporary label visibility setting
-            boolean prevLabels = labelsVisibleCheck != null && labelsVisibleCheck.isSelected();
-            plot.setLabelsVisible(gateLabelsCheck.isSelected());
-            javafx.scene.image.WritableImage img = plot.exportImage(ctx.settings().exportScale());
-            plot.setLabelsVisible(prevLabels);   // restore
-
-            // Copy to clipboard
-            javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
-            cc.putImage(img);
-            javafx.scene.input.Clipboard.getSystemClipboard().setContent(cc);
-            statusLabel.setText("Copied " + ctx.settings().exportDpi() + " DPI plot image"
-                    + (gateLabelsCheck.isSelected() ? " with labels" : "") + " — paste into PowerPoint.");
-        }
+    /** Gear button beside Copy — open the app-wide Copy/Export format window. */
+    @FXML
+    private void onCopySettings() {
+        CopySettingsController.open(ctx.settings());
     }
 
     @FXML
@@ -1104,7 +1150,8 @@ public class GraphWindowController {
             CytoPlot.Gate subGate = new CytoPlot.Gate(
                     prefix + " " + qLabels[k].split(" ")[0],
                     qTypes[k], qg.xChan, qg.yChan,
-                    new double[]{qg.xs[0]}, new double[]{qg.ys[0]});
+                    java.util.Arrays.copyOf(qg.xs, qg.xs.length),
+                    java.util.Arrays.copyOf(qg.ys, qg.ys.length));
             subGate.border = qg.border;
             PopNode node = new PopNode(subGate, currentNode);
             currentNode.children.add(node);
@@ -1119,6 +1166,16 @@ public class GraphWindowController {
         statusLabel.setText("Quadrant gate '" + prefix + "' added (Q1–Q4).");
         ctx.auditLog().add(AuditLog.Type.GATE, sampleFile,
                 String.format("Quadrant '%s' (Q1–Q4 on %s / %s)", prefix, qg.xChan, qg.yChan));
+        // §13 undo: remove all 4 quadrant nodes; redo puts them all back
+        final PopNode addedParent = currentNode;
+        final List<PopNode> quadNodes = new ArrayList<>(addedParent.children.subList(
+                addedParent.children.size() - 4, addedParent.children.size()));
+        final List<Integer> quadIdxs = new ArrayList<>();
+        for (PopNode qn : quadNodes) quadIdxs.add(addedParent.children.indexOf(qn));
+        pushUndo(
+            () -> { suppressUndo = true; try { for (PopNode qn : quadNodes) removeNode(qn); } finally { suppressUndo = false; } },
+            () -> { suppressUndo = true; try { for (int i = 0; i < quadNodes.size(); i++) reAddNode(quadNodes.get(i), addedParent, quadIdxs.get(i)); } finally { suppressUndo = false; } }
+        );
     }
 
     // ---- elastic gate templates (#13): copy / paste-and-snap-to-peak / undo --
@@ -1446,13 +1503,22 @@ public class GraphWindowController {
         d.setTitle("Rename population"); d.setHeaderText(null); d.setContentText("Population name:");
         Optional<String> r = d.showAndWait();
         if (r.isEmpty() || r.get().isBlank()) return;
-        g.name = r.get().trim();
+        final String oldName = g.name;
+        final String newName = r.get().trim();
+        g.name = newName;
         plot.selectGate(g);
         refreshTreeLabels();
+        pushUndo(
+            () -> { g.name = oldName; plot.selectGate(g); refreshTreeLabels(); notifyTree(); },
+            () -> { g.name = newName; plot.selectGate(g); refreshTreeLabels(); notifyTree(); }
+        );
     }
 
     /** Per-gate border/fill colour + fill opacity (context menu → Color…). */
     private void pickGateColor(CytoPlot.Gate g) {
+        final Color oldBorder = g.border;
+        final Color oldFill   = g.fill;
+
         ColorPicker border = new ColorPicker(g.border);
         ColorPicker fill = new ColorPicker(opaque(g.fill));
         Slider opacity = new Slider(0, 1, g.fill.getOpacity());
@@ -1477,6 +1543,15 @@ public class GraphWindowController {
         dlg.getDialogPane().setContent(gp);
         dlg.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         dlg.showAndWait();
+
+        final Color newBorder = g.border;
+        final Color newFill   = g.fill;
+        if (!newBorder.equals(oldBorder) || !newFill.equals(oldFill)) {
+            pushUndo(
+                () -> { g.border = oldBorder; g.fill = oldFill; plot.selectGate(g); },
+                () -> { g.border = newBorder; g.fill = newFill; plot.selectGate(g); }
+            );
+        }
     }
 
     private static Color opaque(Color c) { return Color.color(c.getRed(), c.getGreen(), c.getBlue()); }

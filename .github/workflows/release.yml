@@ -1,0 +1,141 @@
+name: release
+
+# Builds the self-contained Windows StreamFLOW.exe installer (jpackage) and publishes it as a
+# GitHub Release asset. The installer bundles the JavaFX app, a private JRE, the engine scripts,
+# a portable Python (FlowKit) runtime, and the pre-staged R-Portable (FlowMagic plugins), so the
+# end user needs no Java, Python, or R installed.
+#
+# Triggers:
+#   * push a tag like v2.0.0      -> release named after the tag
+#   * manual "Run workflow"       -> provide the version; a v<version> tag is created
+#
+# R-Portable is NOT built here — it is downloaded from a GitHub Release asset produced by
+# the stage-r-portable workflow. Update R_PORTABLE_TAG below whenever a new R build is staged.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'App version to build and release (e.g. 2.0.1)'
+        required: true
+        default: '2.0.0'
+      r_portable_tag:
+        description: 'R-Portable release tag to bundle (leave blank to use the default below)'
+        required: false
+        default: ''
+
+env:
+  # Default R-Portable release tag — update this after running stage-r-portable
+  R_PORTABLE_TAG: r-portable-2026-07-04
+
+permissions:
+  contents: write          # required to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version + tag
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = ($env:GITHUB_REF -replace '^refs/tags/v', '')
+            $tag = ($env:GITHUB_REF -replace '^refs/tags/', '')
+          } else {
+            $v = '${{ github.event.inputs.version }}'
+            $tag = "v$v"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building StreamFLOW $v (tag $tag)"
+
+      - name: Set up JDK 25 (Microsoft, LTS — provides jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '25'
+          cache: maven
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Stage portable Python (FlowKit engine)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File engine\stage-python.ps1
+
+      - name: Download R-Portable from release assets
+        shell: pwsh
+        run: |
+          # Prefer the workflow-dispatch override, then fall back to the env default.
+          $tag = '${{ github.event.inputs.r_portable_tag }}'
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = '${{ env.R_PORTABLE_TAG }}' }
+          Write-Host "Downloading R-Portable from release: $tag"
+
+          # Download via gh CLI (uses the repo's GITHUB_TOKEN, no auth setup needed).
+          gh release download $tag --pattern "r-portable-win64.tar.gz" --output r-portable-win64.tar.gz
+          if (-not (Test-Path "r-portable-win64.tar.gz")) {
+            throw "r-portable-win64.tar.gz not found after download"
+          }
+          $mb = [math]::Round((Get-Item "r-portable-win64.tar.gz").Length / 1MB)
+          Write-Host "Downloaded: r-portable-win64.tar.gz  (${mb} MB)"
+
+          # Extract into app\target\ — the archive contains an R-Portable\ directory
+          New-Item -ItemType Directory -Force "app\target" | Out-Null
+          tar -xzf r-portable-win64.tar.gz -C app\target
+          if (-not (Test-Path "app\target\R-Portable")) {
+            throw "app\target\R-Portable not found after extraction"
+          }
+          Write-Host "R-Portable extracted to app\target\R-Portable"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Install WiX Toolset (jpackage .exe installer backend)
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          # Expose WiX bin dir to PATH for the jpackage step (choco's PATH change
+          # only takes effect in a new process; GITHUB_PATH persists across steps).
+          $wix = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          if ($wix) { Join-Path $wix.FullName "bin" | Out-File $env:GITHUB_PATH -Append }
+          else { Write-Warning "WiX install dir not found under 'Program Files (x86)'" }
+
+      - name: Build Windows installer (jpackage)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File app\package.ps1 -Installer -Version ${{ steps.ver.outputs.version }}
+
+      - name: Locate installer
+        id: exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem app\target\dist -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "No .exe produced by jpackage in app\target\dist." }
+          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host ("Installer: {0} ({1} MB)" -f $exe.FullName, [math]::Round($exe.Length / 1MB))
+
+      - name: Upload installer as a build artifact (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamFLOW-${{ steps.ver.outputs.version }}-win-x64
+          path: app/target/dist/*.exe
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: StreamFLOW ${{ steps.ver.outputs.version }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: app/target/dist/*.exe

@@ -110,6 +110,28 @@ public final class WorkspaceModel {
 
     public java.util.Set<String> samples() { return trees.keySet(); }
 
+    /** Wipe ALL experiment data (trees, events, event counts, channel names, dirty flag, sample list).
+     *  Called before loading a new FCS folder or opening a workspace over an existing session so that
+     *  no stale data from the previous session lingers in the UI. */
+    public void clearAll() {
+        trees.clear();
+        events.clear();
+        gateSeq.clear();
+        eventCounts.clear();
+        gateClipboard = null;
+        channelNames.clear();
+        dirty = false;
+        if (Platform.isFxApplicationThread()) {
+            allSamples.clear();
+            treeListeners.forEach(Runnable::run);
+        } else {
+            Platform.runLater(() -> {
+                allSamples.clear();
+                treeListeners.forEach(Runnable::run);
+            });
+        }
+    }
+
     // ---- tree-change notifications (for the Workstation) ----------------------
 
     /** Register a listener called (on the FX thread) when any gating tree changes. */
@@ -117,10 +139,33 @@ public final class WorkspaceModel {
 
     /** Notify all registered listeners that a gating tree has changed. */
     public void notifyTreeChanged() {
+        dirty = true;   // a gate was drawn/edited/removed → there are unsaved changes
         if (Platform.isFxApplicationThread()) {
             treeListeners.forEach(Runnable::run);
         } else {
             Platform.runLater(() -> treeListeners.forEach(Runnable::run));
         }
+    }
+
+    // ---- unsaved-changes tracking (autosave + close prompts) ------------------
+
+    private boolean dirty = false;
+
+    /** True if there are gating/analysis changes not yet written to a workspace file. */
+    public boolean isDirty() { return dirty; }
+    /** Mark unsaved changes (e.g. an analysis was run). */
+    public void markDirty() { dirty = true; }
+    /** Clear the dirty flag (after a save, or after loading a fresh experiment/workspace). */
+    public void markClean() { dirty = false; }
+
+    // ---- §14 open-window registry (focus-existing instead of opening duplicate) -
+    private final Map<String, javafx.stage.Stage> openWindows = new HashMap<>();
+
+    public void registerWindow(String sample, javafx.stage.Stage stage) { openWindows.put(sample, stage); }
+    public void unregisterWindow(String sample) { openWindows.remove(sample); }
+    /** Returns the open Stage for this sample, or null if none. */
+    public javafx.stage.Stage openWindowFor(String sample) {
+        javafx.stage.Stage s = openWindows.get(sample);
+        return (s != null && s.isShowing()) ? s : null;
     }
 }

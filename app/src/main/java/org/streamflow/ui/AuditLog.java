@@ -46,6 +46,38 @@ public final class AuditLog {
         else Platform.runLater(entries::clear);
     }
 
+    // ---- workspace persistence (#32b) ---------------------------------------
+
+    /** Serialise the log to a JSON array of {time,type,sample,detail} for the .sfw. */
+    public com.fasterxml.jackson.databind.node.ArrayNode toJson(com.fasterxml.jackson.databind.ObjectMapper mapper) {
+        com.fasterxml.jackson.databind.node.ArrayNode arr = mapper.createArrayNode();
+        for (Entry e : entries) {
+            com.fasterxml.jackson.databind.node.ObjectNode n = arr.addObject();
+            n.put("time", e.time());
+            n.put("type", e.type().name());
+            n.put("sample", e.sample());
+            n.put("detail", e.detail());
+        }
+        return arr;
+    }
+
+    /** Replace the log with entries restored from a loaded .sfw "audit_log" node (preserving timestamps). */
+    public void restore(com.fasterxml.jackson.databind.JsonNode arr) {
+        Runnable apply = () -> {
+            entries.clear();
+            if (arr != null && arr.isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode n : arr) {
+                    Type t;
+                    try { t = Type.valueOf(n.path("type").asText("OTHER")); }
+                    catch (IllegalArgumentException ex) { t = Type.OTHER; }
+                    entries.add(new Entry(n.path("time").asText(""), t,
+                            n.path("sample").asText(""), n.path("detail").asText("")));
+                }
+            }
+        };
+        if (Platform.isFxApplicationThread()) apply.run(); else Platform.runLater(apply);
+    }
+
     /**
      * Generate a journal-style methods paragraph from the logged operations.
      * Aggregates gate + analysis events into prose.

@@ -6,7 +6,6 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
-import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.layout.Pane;
 import javafx.scene.image.PixelFormat;
@@ -52,7 +51,8 @@ public class CytoPlot extends Region {
         }
     }
 
-    private static final double ML = 64, MR = 14, MT = 14, MB = 46; // plot margins
+    // plot margins — grow with the axis font so labels never clip or overlap the data area (best Copy)
+    private double ML = 64, MR = 14, MT = 14, MB = 46;
     private static final Color GATE_C = Color.web("#D7261E");
     private static final Color DRAW_C = Color.web("#0A7CFF");
     private static final Color[] LUT = buildLut();
@@ -60,7 +60,7 @@ public class CytoPlot extends Region {
     private final Canvas canvas = new Canvas();
     private final Pane overlay = new Pane();        // hosts interactive gate Labels above the canvas
     private final java.util.Map<Gate, Label> gateLabels = new java.util.IdentityHashMap<>();
-    private final ProgressIndicator spinner = new ProgressIndicator();
+    private final Region spinner = new Region(); // static busy indicator — ProgressIndicator caused VLineTo layout cascade (freeze)
     private EventData data;
     private String xChan, yChan, plotType = "pseudocolor";
     private double xmin, xmax, ymin, ymax;
@@ -138,6 +138,21 @@ public class CytoPlot extends Region {
     /** Notified with the new (x,y) data-space FMO levels when the user drags an FMO line. */
     public void setOnFmoChanged(java.util.function.BiConsumer<Double, Double> c) { this.onFmoChanged = c; }
     private boolean labelsVisible = true;
+    // app-wide export/format options (driven by the Copy-Settings window via AppSettings)
+    private int pointRadius = 0;          // pseudocolor/dot point radius in pixels (0 = single pixel)
+    private double axisFontSize = 12;     // axis title / tick label font
+    private double labelFontSize = 12;    // gate label font
+    public void setPointRadius(int r) { this.pointRadius = Math.max(0, Math.min(4, r)); invalidate(); }
+    public void setAxisFontSize(double s) {
+        this.axisFontSize = Math.max(6, s);
+        // size the margins to hold the Y-title + tick labels (left) and X-title + tick row (bottom),
+        // so larger fonts push the data area in rather than overprinting it.
+        double tick = Math.max(7, axisFontSize - 2);
+        ML = Math.max(64, 18 + axisFontSize + tick * 4.2);   // title col + ~5-char tick + padding
+        MB = Math.max(46, tick + axisFontSize * 1.7 + 12);   // tick row + X-title row (fits in crop)
+        invalidate();   // plot size depends on the margins
+    }
+    public void setLabelFontSize(double s) { this.labelFontSize = Math.max(6, s); syncLabels(); paint(); }
     private static final double HANDLE = 4.5; // node handle radius (px)
     private static final double ROT_HANDLE_OFF = 20.0; // extra px past semi-major axis for rotation knob
 
@@ -155,8 +170,8 @@ public class CytoPlot extends Region {
         canvas.setOnContextMenuRequested(this::onContextMenu);
         overlay.setPickOnBounds(false);          // only the Labels catch mouse events, not the Pane
         getChildren().add(overlay);
+        spinner.setStyle("-fx-background-color: rgba(30,100,220,0.65); -fx-background-radius: 5;");
         spinner.setVisible(false);
-        spinner.setMaxSize(28, 28);
         spinner.setMouseTransparent(true);
         getChildren().add(spinner);
         widthProperty().addListener((o, a, b) -> { canvas.setWidth(getWidth()); invalidate(); });
@@ -191,6 +206,7 @@ public class CytoPlot extends Region {
     public void setLightMode(boolean b) { this.lightExport = b; invalidate(); }
     /** Show/hide gate labels on the plot overlay. */
     public void setLabelsVisible(boolean b) { this.labelsVisible = b; paint(); }
+    public boolean labelsVisible() { return labelsVisible; }
     public void setTool(String t) { this.tool = t; selected = null; resetDrawing(); }
     public List<Gate> gates() { return gates; }
 
@@ -394,9 +410,16 @@ public class CytoPlot extends Region {
                     s.append(svgLine(a, plotTop(), a, plotTop() + ph, col)).append(svgLine(b, plotTop(), b, plotTop() + ph, col));
                 }
                 case "q1" -> {
-                    double cx = pxX(gt.xs[0]), cy = pxY(gt.ys[0]);
-                    s.append(svgLine(cx, plotTop(), cx, plotTop() + ph, col));
-                    s.append(svgLine(px, cy, px + pw, cy, col));
+                    double cxp = pxX(gt.xs[0]), cyp = pxY(gt.ys[0]);
+                    if (gt.xs.length >= 5) {
+                        double[] s1 = linePlotClip(cxp, cyp, pxX(gt.xs[1]) - cxp, pxY(gt.ys[1]) - cyp);
+                        double[] s2 = linePlotClip(cxp, cyp, pxX(gt.xs[3]) - cxp, pxY(gt.ys[3]) - cyp);
+                        s.append(svgLine(s1[0], s1[1], s1[2], s1[3], col));
+                        s.append(svgLine(s2[0], s2[1], s2[2], s2[3], col));
+                    } else {
+                        s.append(svgLine(cxp, plotTop(), cxp, plotTop() + ph, col));
+                        s.append(svgLine(px, cyp, px + pw, cyp, col));
+                    }
                 }
             }
             double[] a = labelAnchorPx(gt);
@@ -424,13 +447,28 @@ public class CytoPlot extends Region {
         } catch (Exception e) { return null; }
     }
 
-    /** Publication snapshot: white background + dark axes, rendered at {@code scale}× (for DPI). */
+    /** Publication snapshot: white background + dark axes, rendered at {@code scale}× (for DPI).
+     *  Cropped to the used plot box (margins + square data area) so a maximised window doesn't
+     *  paste with a large empty margin. */
     public WritableImage exportImage(double scale) {
         boolean prev = lightExport;
         lightExport = true; paint();
         javafx.scene.SnapshotParameters sp = new javafx.scene.SnapshotParameters();
         sp.setFill(Color.WHITE);
         sp.setTransform(javafx.scene.transform.Transform.scale(scale, scale));
+        // viewport is in post-transform (scaled) space — crop to the actually-drawn region,
+        // extended to include any gate label that sticks out past the plot box.
+        double usedW = plotLeft() + plotW() + MR;
+        double usedH = plotTop() + plotH() + MB;
+        for (javafx.scene.Node n : overlay.getChildren()) {
+            if (!n.isVisible()) continue;
+            javafx.geometry.Bounds b = n.getBoundsInParent();
+            usedW = Math.max(usedW, b.getMaxX() + 4);
+            usedH = Math.max(usedH, b.getMaxY() + 4);
+        }
+        usedW = Math.min(usedW, getWidth());
+        usedH = Math.min(usedH, getHeight());
+        sp.setViewport(new javafx.geometry.Rectangle2D(0, 0, usedW * scale, usedH * scale));
         WritableImage img = snapshot(sp, null);
         lightExport = prev; paint();
         return img;
@@ -456,12 +494,16 @@ public class CytoPlot extends Region {
     public double yCof() { return yCof; }
 
     /** Axis display range overrides (zoom / extend); NaN restores the data range. */
-    public void setXMax(double m) { xMaxOv = m; invalidate(); }
-    public void setYMax(double m) { yMaxOv = m; invalidate(); }
-    public void setXMin(double m) { xMinOv = m; invalidate(); }
-    public void setYMin(double m) { yMinOv = m; invalidate(); }
-    public void resetXRange() { xMaxOv = Double.NaN; xMinOv = Double.NaN; invalidate(); }
-    public void resetYRange() { yMaxOv = Double.NaN; yMinOv = Double.NaN; invalidate(); }
+    private static final double AXIS_LIMIT = 1e9;   // clamp so repeated "Extend" can't explode the range
+    private static double clampAxis(double v) {
+        return Double.isNaN(v) ? v : Math.max(-AXIS_LIMIT, Math.min(AXIS_LIMIT, v));
+    }
+    public void setXMax(double m) { xMaxOv = clampAxis(m); invalidate(); }
+    public void setYMax(double m) { yMaxOv = clampAxis(m); invalidate(); }
+    public void setXMin(double m) { xMinOv = clampAxis(m); invalidate(); }
+    public void setYMin(double m) { yMinOv = clampAxis(m); invalidate(); }
+    public void resetXRange() { xMaxOv = Double.NaN; xMinOv = Double.NaN; recomputeRanges(); invalidate(); }
+    public void resetYRange() { yMaxOv = Double.NaN; yMinOv = Double.NaN; recomputeRanges(); invalidate(); }
     public double xMin() { return xmin; }
     public double yMin() { return ymin; }
     public double xMax() { return xmax; }
@@ -558,46 +600,90 @@ public class CytoPlot extends Region {
     private static final int[] LUT_ARGB = buildLutArgb();
     private static final Color HIST_FG = Color.web("#1F6FEB");
 
-    /** Recompute ranges (cheap) then kick a background raster/histogram build. */
+    /** Kick a debounced background raster/histogram build. Does NOT do any FX-thread computation.
+     *  Rapid calls (slider drags 60-120Hz) coalesce into ONE render 50ms after the last change.
+     *  Range computations only happen inside scheduleCompute() so the FX thread is never blocked. */
+    private javafx.animation.PauseTransition renderDebounce;
     private void invalidate() {
-        recomputeRanges();
-        scheduleCompute();
+        // Do NOT call recomputeRanges() here — this method is called at 60-120Hz during slider drags
+        // and doing any work here causes the FX event queue to fill up and the JVM to crash.
+        // Ranges are recomputed once inside scheduleCompute() after the debounce settles.
+        if (renderDebounce == null) {
+            renderDebounce = new javafx.animation.PauseTransition(javafx.util.Duration.millis(50));
+            renderDebounce.setOnFinished(e -> scheduleCompute());
+        }
+        renderDebounce.playFromStart();
     }
 
     /** Cancel any in-flight render and start a fresh one; FX thread stays free. */
     private void scheduleCompute() {
+        recomputeRanges();   // done once here after the debounce, not on every invalidate() call
         if (renderTask != null) renderTask.cancel(true);
         final long gen = ++renderGen;
-        if (data == null || xChan == null) { plotImg = null; histHeights = null; paint(); return; }
+        if (data == null || xChan == null) { plotImg = null; histHeights = null; setBusy(false); paint(); return; }
         int w = (int) plotW(), h = (int) plotH();
-        if (w < 2 || h < 2) { paint(); return; }
+        if (w < 2 || h < 2) { setBusy(false); paint(); return; }
         final boolean hist = isHistogram();
         final int fw = w, fh = h;
         setBusy(true);
         renderTask = renderExec.submit(() -> {
             try {
                 double[][] valleys = computeValleys();   // marginal density minima for snapping
-                if (Thread.currentThread().isInterrupted()) return;
+                if (Thread.currentThread().isInterrupted()) {
+                    // Task was cancelled — always release busy so controls don't stay frozen.
+                    Platform.runLater(() -> { if (gen == renderGen) setBusy(false); });
+                    return;
+                }
                 if (hist) {
                     double[] heights = computeHistogram(256);
-                    if (heights == null || Thread.currentThread().isInterrupted()) return;
-                    Platform.runLater(() -> { if (gen == renderGen) {
-                        histHeights = heights; plotImg = null; applyValleys(valleys); setBusy(false); paint(); } });
+                    if (heights == null || Thread.currentThread().isInterrupted()) {
+                        Platform.runLater(() -> { if (gen == renderGen) setBusy(false); });
+                        return;
+                    }
+                    Platform.runLater(() -> {
+                        // Always clear busy, even for stale renders — the controls must never
+                        // stay permanently disabled because a prior task was cancelled.
+                        setBusy(false);
+                        if (gen == renderGen) { histHeights = heights; plotImg = null; applyValleys(valleys); paint(); }
+                    });
                 } else {
                     int[] argb = computeScatter(fw, fh);
-                    if (argb == null || Thread.currentThread().isInterrupted()) return;
+                    if (argb == null || Thread.currentThread().isInterrupted()) {
+                        Platform.runLater(() -> { if (gen == renderGen) setBusy(false); });
+                        return;
+                    }
                     Platform.runLater(() -> {
+                        setBusy(false);
                         if (gen != renderGen) return;
                         WritableImage img = new WritableImage(fw, fh);
                         img.getPixelWriter().setPixels(0, 0, fw, fh, PixelFormat.getIntArgbInstance(), argb, 0, fw);
-                        plotImg = img; histHeights = null; applyValleys(valleys); setBusy(false); paint();
+                        plotImg = img; histHeights = null; applyValleys(valleys); paint();
                     });
                 }
-            } catch (Exception ignored) { }
+            } catch (Throwable ex) {
+                // Never leave the UI frozen: release busy on any unexpected render failure.
+                Platform.runLater(() -> setBusy(false));
+            }
         });
     }
 
-    private void setBusy(boolean b) { spinner.setVisible(b); if (onBusy != null) onBusy.accept(b); }
+    // Show a static busy indicator only if a render is genuinely slow. A ProgressIndicator (animated)
+    // caused a VLineTo→DoubleBinding cascade that saturated the FX thread at 92% CPU (hard freeze).
+    // The plain Region has no internal animation bindings and never triggers a layout cascade.
+    private javafx.animation.PauseTransition busyDelay;
+    private void setBusy(boolean b) {
+        if (b) {
+            if (busyDelay == null) {
+                busyDelay = new javafx.animation.PauseTransition(javafx.util.Duration.millis(450));
+                busyDelay.setOnFinished(e -> spinner.setVisible(true));
+            }
+            busyDelay.playFromStart();
+        } else {
+            if (busyDelay != null) busyDelay.stop();
+            spinner.setVisible(false);
+        }
+        if (onBusy != null) onBusy.accept(b);
+    }
 
     /** Cheap FX-thread paint from cached raster/histogram + gate overlay. */
     private void paint() {
@@ -679,13 +765,25 @@ public class CytoPlot extends Region {
         double sMinX = sxMin, sRangeX = sxMax - sxMin, sMaxY = syMax, sRangeY = syMax - syMin;
         int[] grid = new int[w * h];
         int max = 0, rows = d.rows();
+        int pr = pointRadius;   // stamp a (2pr+1)² block per event so points can be enlarged
         for (int r = 0; r < rows; r++) {
             if ((r & 0x3FFF) == 0 && Thread.currentThread().isInterrupted()) return null;
             int px = (int) ((sxv(d.get(r, xc)) - sMinX) / sRangeX * (w - 1));
             int py = (int) ((sMaxY - syv(d.get(r, yc))) / sRangeY * (h - 1));
             if (px < 0 || px >= w || py < 0 || py >= h) continue;
-            int c = ++grid[py * w + px];
-            if (c > max) max = c;
+            if (pr == 0) {
+                int c = ++grid[py * w + px];
+                if (c > max) max = c;
+            } else {
+                for (int dy = -pr; dy <= pr; dy++) {
+                    int yy = py + dy; if (yy < 0 || yy >= h) continue;
+                    for (int dx = -pr; dx <= pr; dx++) {
+                        int xx = px + dx; if (xx < 0 || xx >= w) continue;
+                        int c = ++grid[yy * w + xx];
+                        if (c > max) max = c;
+                    }
+                }
+            }
         }
         String type = plotType;
         int[] argb = new int[w * h];
@@ -751,6 +849,13 @@ public class CytoPlot extends Region {
             if ((r & 0x3FFF) == 0 && Thread.currentThread().isInterrupted()) return null;
             int b = (int) ((sxv(d.get(r, xc)) - sMin) / sRange * (bins - 1));
             if (b >= 0 && b < bins) h[b]++;
+        }
+        if ("CDF".equals(histMode)) {
+            // Cumulative distribution function: prefix sum normalised to [0,1] over in-range events.
+            double total = 0; for (double v : h) total += v;
+            if (total > 0) { double cum = 0; for (int i = 0; i < h.length; i++) { cum += h[i]; h[i] = cum / total; } }
+            histMaxCount = 0;   // CDF axis uses 0–100% labels, not raw counts
+            return h;
         }
         if (!"Raw Bars".equals(histMode)) {
             int radius = Math.max(1, (int) (histBandwidth * 24)); // bandwidth slider -> blur radius
@@ -897,6 +1002,115 @@ public class CytoPlot extends Region {
         return Color.web("#E74C3C");
     }
 
+    // ---- Directional-Density-Gradient confidence (per-segment) --------------
+
+    /** Bilinear interpolation into the CG×CG confidence grid. */
+    private double confGridAt(double gcx, double gcy) {
+        if (confGrid == null) return 0;
+        double cx = Math.max(0, Math.min(CG - 1.001, gcx));
+        double cy = Math.max(0, Math.min(CG - 1.001, gcy));
+        int x0 = (int) cx, y0 = (int) cy;
+        double fx = cx - x0, fy = cy - y0;
+        int x1 = Math.min(x0 + 1, CG - 1), y1 = Math.min(y0 + 1, CG - 1);
+        return confGrid[y0 * CG + x0] * (1 - fx) * (1 - fy)
+             + confGrid[y0 * CG + x1] * fx       * (1 - fy)
+             + confGrid[y1 * CG + x0] * (1 - fx) * fy
+             + confGrid[y1 * CG + x1] * fx       * fy;
+    }
+
+    /**
+     * Directional-gradient confidence colour for a single boundary segment A→B
+     * (coordinates in scaled space) vs the gate centroid (also scaled space).
+     * Positive inward gradient (ρ_inside > ρ_boundary) → green; flat/negative → yellow/red.
+     * Returns null if the grid is not available.
+     */
+    private Color edgeConfidenceColor(double sax, double say, double sbx, double sby,
+                                      double centSx, double centSy) {
+        if (confGrid == null || confMax <= 0) return null;
+        double smx = (sax + sbx) / 2, smy = (say + sby) / 2;
+        double gmx = (smx - sxMin) / (sxMax - sxMin) * (CG - 1);
+        double gmy = (smy - syMin) / (syMax - syMin) * (CG - 1);
+        // Edge direction in grid space (normalised)
+        double dgx = (sbx - sax) / (sxMax - sxMin) * (CG - 1);
+        double dgy = (sby - say) / (syMax - syMin) * (CG - 1);
+        double len = Math.hypot(dgx, dgy);
+        if (len < 1e-6) return Color.web("#F1C40F");
+        dgx /= len; dgy /= len;
+        // Normal perpendicular to edge; flip so it points toward the centroid
+        double nx = -dgy, ny = dgx;
+        double centGx = (centSx - sxMin) / (sxMax - sxMin) * (CG - 1);
+        double centGy = (centSy - syMin) / (syMax - syMin) * (CG - 1);
+        if (nx * (centGx - gmx) + ny * (centGy - gmy) < 0) { nx = -nx; ny = -ny; }
+        // Sample density at the boundary midpoint and δ grid cells inward
+        final double DELTA = 4.0;
+        double rho_b  = confGridAt(gmx, gmy);
+        double rho_in = confGridAt(gmx + DELTA * nx, gmy + DELTA * ny);
+        double gradient = (rho_in - rho_b) / confMax;
+        if (gradient > 0.08)  return Color.web("#2ECC71");  // boundary on density valley/edge
+        if (gradient > -0.04) return Color.web("#F1C40F");  // flat plateau (marginal)
+        return Color.web("#E74C3C");                         // boundary cuts through dense region
+    }
+
+    private static final int SEG_ELLIPSE = 20;
+
+    private Color[] polySegColors(Gate g) {
+        int n = g.xs.length;
+        double csX = 0, csY = 0;
+        for (int i = 0; i < n; i++) { csX += sxv(g.xs[i]); csY += syv(g.ys[i]); }
+        csX /= n; csY /= n;
+        Color[] out = new Color[n];
+        for (int i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            Color c = edgeConfidenceColor(sxv(g.xs[i]), syv(g.ys[i]), sxv(g.xs[j]), syv(g.ys[j]), csX, csY);
+            out[i] = c != null ? c : g.border;
+        }
+        return out;
+    }
+
+    private Color[] rectSegColors(Gate g) {
+        double xlo = min(g.xs), xhi = max(g.xs), ylo = min(g.ys), yhi = max(g.ys);
+        double csX = (sxv(xlo) + sxv(xhi)) / 2, csY = (syv(ylo) + syv(yhi)) / 2;
+        Color[] raw = {
+            edgeConfidenceColor(sxv(xlo), syv(ylo), sxv(xhi), syv(ylo), csX, csY), // bottom
+            edgeConfidenceColor(sxv(xhi), syv(ylo), sxv(xhi), syv(yhi), csX, csY), // right
+            edgeConfidenceColor(sxv(xhi), syv(yhi), sxv(xlo), syv(yhi), csX, csY), // top
+            edgeConfidenceColor(sxv(xlo), syv(yhi), sxv(xlo), syv(ylo), csX, csY)  // left
+        };
+        Color[] out = new Color[4];
+        for (int i = 0; i < 4; i++) out[i] = raw[i] != null ? raw[i] : g.border;
+        return out;
+    }
+
+    private Color[] ellipseSegColors(Gate g) {
+        double cxD = (min(g.xs) + max(g.xs)) / 2, cyD = (min(g.ys) + max(g.ys)) / 2;
+        double rxD = (max(g.xs) - min(g.xs)) / 2, ryD = (max(g.ys) - min(g.ys)) / 2;
+        double cosA = Math.cos(g.angle), sinA = Math.sin(g.angle);
+        double csX = sxv(cxD), csY = syv(cyD);
+        Color[] out = new Color[SEG_ELLIPSE];
+        for (int i = 0; i < SEG_ELLIPSE; i++) {
+            double a0 = 2 * Math.PI * i / SEG_ELLIPSE;
+            double a1 = 2 * Math.PI * (i + 1) / SEG_ELLIPSE;
+            double lx0 = rxD * Math.cos(a0), ly0 = ryD * Math.sin(a0);
+            double x0D = cxD + lx0 * cosA - ly0 * sinA, y0D = cyD + lx0 * sinA + ly0 * cosA;
+            double lx1 = rxD * Math.cos(a1), ly1 = ryD * Math.sin(a1);
+            double x1D = cxD + lx1 * cosA - ly1 * sinA, y1D = cyD + lx1 * sinA + ly1 * cosA;
+            Color c = edgeConfidenceColor(sxv(x0D), syv(y0D), sxv(x1D), syv(y1D), csX, csY);
+            out[i] = c != null ? c : g.border;
+        }
+        return out;
+    }
+
+    /** Returns per-segment confidence colors for polygon/rectangle/ellipse, null for others. */
+    private Color[] segmentConfidenceColors(Gate g) {
+        if (confGrid == null || confMax <= 0) return null;
+        return switch (g.type) {
+            case "polygon"   -> polySegColors(g);
+            case "rectangle" -> rectSegColors(g);
+            case "ellipse"   -> ellipseSegColors(g);
+            default          -> null;
+        };
+    }
+
     // ---- snap helpers (pixel <-> scaled-valley) -----------------------------
     private double pxFromScaledX(double t) { return plotLeft() + (t - sxMin) / (sxMax - sxMin) * plotW(); }
     private double pxFromScaledY(double t) { return plotTop() + (syMax - t) / (syMax - syMin) * plotH(); }
@@ -921,6 +1135,24 @@ public class CytoPlot extends Region {
         if (h == null) return;
         int bins = h.length;
         double bw = pw / bins;
+        if ("CDF".equals(histMode)) {
+            // Filled S-curve from (x0, 0%) to (xmax, 100%).
+            g.setFill(Color.color(HIST_FG.getRed(), HIST_FG.getGreen(), HIST_FG.getBlue(), 0.18));
+            g.beginPath();
+            g.moveTo(px, py + ph);
+            for (int b = 0; b < bins; b++) g.lineTo(px + b * bw + bw / 2, py + ph - h[b] * ph);
+            g.lineTo(px + pw, py + ph - h[bins - 1] * ph);
+            g.lineTo(px + pw, py + ph);
+            g.closePath(); g.fill();
+            g.setStroke(HIST_FG); g.setLineWidth(2);
+            g.beginPath();
+            for (int b = 0; b < bins; b++) {
+                double xx = px + b * bw + bw / 2, yy = py + ph - h[b] * ph;
+                if (b == 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
+            }
+            g.stroke();
+            return;
+        }
         if ("Raw Bars".equals(histMode)) {
             g.setFill(Color.color(HIST_FG.getRed(), HIST_FG.getGreen(), HIST_FG.getBlue(), 0.35));
             g.setStroke(HIST_FG); g.setLineWidth(1);
@@ -1061,41 +1293,69 @@ public class CytoPlot extends Region {
         Color tickC = lightExport ? Color.web("#555555") : Color.web("#90A4B8");
         g.setStroke(frame); g.setLineWidth(1);
         g.strokeRect(px, py, pw, ph);
-        g.setFill(labelC); g.setFont(Font.font(12));
-        g.fillText(chLabel(xChan), px + pw / 2 - 30, py + ph + 34);
+        double tickFont = Math.max(7, axisFontSize - 2);
+        // axis titles, placed within the (font-scaled) margins so they never overlap the data area
+        g.setFill(labelC); g.setFont(Font.font(axisFontSize));
+        g.setTextAlign(javafx.scene.text.TextAlignment.CENTER);
+        g.setTextBaseline(javafx.geometry.VPos.CENTER);
+        g.fillText(chLabel(xChan), px + pw / 2, py + ph + tickFont + axisFontSize + 8);   // bottom title row
         g.save();
-        g.translate(16, py + ph / 2 + 30); g.rotate(-90);
-        g.fillText(isHistogram() ? "Count" : chLabel(yChan), 0, 0);
+        g.translate(axisFontSize, py + ph / 2); g.rotate(-90);
+        g.fillText("CDF".equals(histMode) ? "Cumulative %" : isHistogram() ? "Count" : chLabel(yChan), 0, 0);
         g.restore();
+
         // scale-aware ticks (decades for log/arcsinh, even for linear). On logicle/log the decades
-        // pile up near zero, so drop any label closer than a min pixel gap to the previous one.
-        g.setFill(tickC); g.setFont(Font.font(10));
+        // can crowd near the extremes; drop any label whose centre is within minGap of the prior one.
+        g.setFont(Font.font(tickFont));
+        // X-axis ticks: short vertical notch + centred label below the plot
+        g.setStroke(tickC); g.setLineWidth(1);
+        g.setFill(tickC);
+        g.setTextAlign(javafx.scene.text.TextAlignment.CENTER);
+        g.setTextBaseline(javafx.geometry.VPos.TOP);
         java.util.List<Double> xt = new ArrayList<>(axisTicks(xmin, xmax, xScale));
         xt.sort(java.util.Comparator.comparingDouble(this::pxX));
-        double lastXp = -1e9;
+        double lastXp = -1e9, minGapX = tickFont * 3.5;
         for (double tv : xt) {
             double xp = pxX(tv);
-            if (xp - lastXp < 30) continue;          // labels are wide horizontally
+            if (xp - lastXp < minGapX) continue;
             lastXp = xp;
-            g.fillText(fmt(tv), xp - 14, py + ph + 16);
+            g.strokeLine(xp, py + ph, xp, py + ph + 3);
+            g.fillText(fmt(tv), xp, py + ph + 5);
         }
+        // Y-axis ticks: short horizontal notch + right-aligned label left of the axis.
+        // minGapY is generous (2× font height) so logicle decade labels near zero never collide.
+        g.setTextAlign(javafx.scene.text.TextAlignment.RIGHT);
+        g.setTextBaseline(javafx.geometry.VPos.CENTER);
         if (!isHistogram()) {
             java.util.List<Double> yt = new ArrayList<>(axisTicks(ymin, ymax, yScale));
             yt.sort(java.util.Comparator.comparingDouble(this::pxY));
-            double lastYp = -1e9;
+            double lastYp = -1e9, minGapY = tickFont * 2.0;
             for (double tv : yt) {
                 double yp = pxY(tv);
-                if (yp - lastYp < 14) continue;      // ~one line height vertically
+                if (yp - lastYp < minGapY) continue;
                 lastYp = yp;
-                g.fillText(fmt(tv), 24, yp + 3);
+                g.strokeLine(px - 3, yp, px, yp);
+                g.fillText(fmt(tv), px - 6, yp);
+            }
+        } else if ("CDF".equals(histMode)) {
+            // CDF Y axis: 0% → 100% in four equal steps.
+            for (int k = 0; k <= 4; k++) {
+                double frac = k / 4.0;
+                double yp = py + ph - frac * ph;
+                g.strokeLine(px - 3, yp, px, yp);
+                g.fillText((k * 25) + "%", px - 6, yp);
             }
         } else {
             // Histogram Y axis: label counts from 0 to the peak count.
             for (int k = 0; k <= 4; k++) {
                 double frac = k / 4.0;
-                g.fillText(fmt(histMaxCount * frac), 24, py + ph - frac * ph + 3);
+                double yp = py + ph - frac * ph;
+                g.strokeLine(px - 3, yp, px, yp);
+                g.fillText(fmt(histMaxCount * frac), px - 6, yp);
             }
         }
+        g.setTextAlign(javafx.scene.text.TextAlignment.LEFT);
+        g.setTextBaseline(javafx.geometry.VPos.BASELINE);
     }
 
     private List<Double> axisTicks(double lo, double hi, Scale s) {
@@ -1118,20 +1378,63 @@ public class CytoPlot extends Region {
         for (Gate gt : gates) {
             if (!visible(gt)) continue;
             boolean sel = gt == selected;
-            g.setStroke(gt.border); g.setFill(gt.fill); g.setLineWidth(sel ? 2.4 : 1.6);
+
+            // Per-segment directional-gradient confidence (polygon / rectangle / ellipse).
+            // Each edge is independently coloured green/yellow/red based on whether the density
+            // increases inward from that boundary — a true valley test rather than a mean density.
+            Color[] segColors = showConfidence ? segmentConfidenceColors(gt) : null;
+
+            // Interval and quadrant have no 2-D segmented boundary; fall back to single-colour.
+            Color singleConf = null;
+            if (showConfidence && segColors == null) {
+                double ratio = gateBoundaryConfidence(gt);
+                if (!Double.isNaN(ratio)) singleConf = confidenceColor(ratio);
+            }
+
+            // Gate fill: confidence-coloured for single-colour fallback, otherwise normal fill.
+            g.setFill(singleConf != null
+                    ? Color.color(singleConf.getRed(), singleConf.getGreen(), singleConf.getBlue(), 0.22)
+                    : gt.fill);
+            g.setStroke(singleConf != null ? singleConf : gt.border);
+            double lw = (singleConf != null || segColors != null) ? (sel ? 3.0 : 2.4) : (sel ? 2.4 : 1.6);
+            g.setLineWidth(lw);
+
             switch (gt.type) {
                 case "rectangle" -> {
                     double x1 = pxX(min(gt.xs)), x2 = pxX(max(gt.xs));
                     double y1 = pxY(max(gt.ys)), y2 = pxY(min(gt.ys));
                     double rx = Math.min(x1, x2), ry = Math.min(y1, y2), rw = Math.abs(x2 - x1), rh = Math.abs(y2 - y1);
-                    g.fillRect(rx, ry, rw, rh); g.strokeRect(rx, ry, rw, rh);
+                    g.fillRect(rx, ry, rw, rh);
+                    if (segColors != null) {
+                        // segColors: [0]=bottom (low data-y), [1]=right, [2]=top, [3]=left
+                        double lft = rx, rgt = rx + rw, top = ry, bot = ry + rh;
+                        g.setStroke(segColors[0]); g.strokeLine(lft, bot, rgt, bot);
+                        g.setStroke(segColors[1]); g.strokeLine(rgt, bot, rgt, top);
+                        g.setStroke(segColors[2]); g.strokeLine(rgt, top, lft, top);
+                        g.setStroke(segColors[3]); g.strokeLine(lft, top, lft, bot);
+                    } else {
+                        g.strokeRect(rx, ry, rw, rh);
+                    }
                 }
                 case "ellipse" -> {
                     double cxPx = (pxX(min(gt.xs)) + pxX(max(gt.xs))) / 2;
                     double cyPx = (pxY(min(gt.ys)) + pxY(max(gt.ys))) / 2;
                     double rxPx = Math.abs(pxX(max(gt.xs)) - pxX(min(gt.xs))) / 2;
                     double ryPx = Math.abs(pxY(max(gt.ys)) - pxY(min(gt.ys))) / 2;
-                    if (gt.angle != 0) {
+                    if (segColors != null) {
+                        g.save();
+                        g.translate(cxPx, cyPx);
+                        if (gt.angle != 0) g.rotate(-Math.toDegrees(gt.angle));
+                        g.fillOval(-rxPx, -ryPx, 2 * rxPx, 2 * ryPx);
+                        for (int i = 0; i < SEG_ELLIPSE; i++) {
+                            double a0 = 2 * Math.PI * i / SEG_ELLIPSE;
+                            double a1 = 2 * Math.PI * (i + 1) / SEG_ELLIPSE;
+                            g.setStroke(segColors[i]);
+                            g.strokeLine(rxPx * Math.cos(a0), ryPx * Math.sin(a0),
+                                         rxPx * Math.cos(a1), ryPx * Math.sin(a1));
+                        }
+                        g.restore();
+                    } else if (gt.angle != 0) {
                         g.save();
                         g.translate(cxPx, cyPx);
                         g.rotate(-Math.toDegrees(gt.angle));
@@ -1146,7 +1449,15 @@ public class CytoPlot extends Region {
                 case "polygon" -> {
                     int n = gt.xs.length; double[] xp = new double[n], yp = new double[n];
                     for (int k = 0; k < n; k++) { xp[k] = pxX(gt.xs[k]); yp[k] = pxY(gt.ys[k]); }
-                    g.fillPolygon(xp, yp, n); g.strokePolygon(xp, yp, n);
+                    g.fillPolygon(xp, yp, n);
+                    if (segColors != null) {
+                        for (int k = 0; k < n; k++) {
+                            int j = (k + 1) % n;
+                            g.setStroke(segColors[k]); g.strokeLine(xp[k], yp[k], xp[j], yp[j]);
+                        }
+                    } else {
+                        g.strokePolygon(xp, yp, n);
+                    }
                 }
                 case "interval" -> {
                     double a = pxX(min(gt.xs)), b = pxX(max(gt.xs));
@@ -1162,31 +1473,27 @@ public class CytoPlot extends Region {
                     g.strokeLine(b, plotTop(), b, plotTop() + plotH());
                 }
                 case "q1" -> {
-                    // Draw the full quadrant crosshair once for the q1 gate; q2/q3/q4 are silent.
-                    double cx = pxX(gt.xs[0]), cy = pxY(gt.ys[0]);
-                    g.strokeLine(cx, plotTop(), cx, plotTop() + plotH());
-                    g.strokeLine(plotLeft(), cy, plotLeft() + plotW(), cy);
+                    // Draw the full spider crosshair once for q1; q2/q3/q4 are silent.
+                    double cxp = pxX(gt.xs[0]), cyp = pxY(gt.ys[0]);
+                    if (gt.xs.length >= 5) {
+                        // Spider gate: 2 independent dividing lines
+                        double[] s1 = linePlotClip(cxp, cyp, pxX(gt.xs[1]) - cxp, pxY(gt.ys[1]) - cyp);
+                        double[] s2 = linePlotClip(cxp, cyp, pxX(gt.xs[3]) - cxp, pxY(gt.ys[3]) - cyp);
+                        g.strokeLine(s1[0], s1[1], s1[2], s1[3]);
+                        g.strokeLine(s2[0], s2[1], s2[2], s2[3]);
+                    } else {
+                        // Legacy axis-aligned crosshair
+                        g.strokeLine(cxp, plotTop(), cxp, plotTop() + plotH());
+                        g.strokeLine(plotLeft(), cyp, plotLeft() + plotW(), cyp);
+                    }
                 }
             }
-            if (showConfidence) drawConfidenceDot(g, gt);
             if (sel) drawHandles(g, gt);
         }
         syncLabels();
     }
 
-    /** Small green/yellow/red dot at the gate's label anchor signalling boundary confidence. */
-    private void drawConfidenceDot(GraphicsContext g, Gate gt) {
-        double ratio = gateBoundaryConfidence(gt);
-        if (Double.isNaN(ratio)) return;
-        double[] a = labelAnchorPx(gt);
-        double cx = a[0] - 6, cy = a[1] - 2, rr = 3.5;
-        g.setFill(confidenceColor(ratio));
-        g.fillOval(cx - rr, cy - rr, rr * 2, rr * 2);
-        g.setStroke(Color.WHITE); g.setLineWidth(1.0);
-        g.strokeOval(cx - rr, cy - rr, rr * 2, rr * 2);
-    }
-
-    public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
+public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
     public boolean showConfidence() { return showConfidence; }
 
     /** Repaint request from an external animation (e.g. elastic paste). */
@@ -1246,6 +1553,7 @@ public class CytoPlot extends Region {
         for (Gate gt : gates) {
             if (!visible(gt)) continue;
             Label lbl = gateLabels.computeIfAbsent(gt, this::makeGateLabel);
+            lbl.setStyle("-fx-font-size:" + (int) labelFontSize + "; -fx-font-weight:bold; -fx-cursor:hand;");
             lbl.setText(labelText(gt));
             lbl.setTextFill(gt.border);
             lbl.setVisible(labelsVisible);
@@ -1267,7 +1575,7 @@ public class CytoPlot extends Region {
 
     private Label makeGateLabel(Gate gt) {
         Label lbl = new Label();
-        lbl.setStyle("-fx-font-size:12; -fx-font-weight:bold; -fx-cursor:hand;");
+        lbl.setStyle("-fx-font-size:" + (int) labelFontSize + "; -fx-font-weight:bold; -fx-cursor:hand;");
         final double[] press = new double[4]; // sceneX, sceneY, origDx, origDy
         lbl.setOnMousePressed(e -> {
             selected = gt; paint();
@@ -1295,6 +1603,13 @@ public class CytoPlot extends Region {
     }
 
     private double[][] handlesPx(Gate gt) {
+        if (isQuadrant(gt) && gt.xs.length >= 5) {
+            // Spider gate: centre + 4 handles at the plot-boundary endpoints of the two arms
+            double cxp = pxX(gt.xs[0]), cyp = pxY(gt.ys[0]);
+            double[] s1 = linePlotClip(cxp, cyp, pxX(gt.xs[1]) - cxp, pxY(gt.ys[1]) - cyp);
+            double[] s2 = linePlotClip(cxp, cyp, pxX(gt.xs[3]) - cxp, pxY(gt.ys[3]) - cyp);
+            return new double[][]{{cxp, cyp}, {s1[0], s1[1]}, {s1[2], s1[3]}, {s2[0], s2[1]}, {s2[2], s2[3]}};
+        }
         int n = gt.xs.length;
         double[][] h = new double[n][2];
         double midY = plotTop() + plotH() / 2;
@@ -1303,6 +1618,25 @@ public class CytoPlot extends Region {
             h[k][1] = ("interval".equals(gt.type) || "line".equals(gt.type)) ? midY : pxY(gt.ys[k]);
         }
         return h;
+    }
+
+    /** Clip an infinite line through (cx,cy) with direction (dx,dy) to the plot rectangle.
+     *  Returns [x1,y1, x2,y2] — the two endpoints at the plot boundary. */
+    private double[] linePlotClip(double cx, double cy, double dx, double dy) {
+        double L = plotLeft(), R = L + plotW(), T = plotTop(), B = T + plotH();
+        double tFwd = 1e9, tBwd = 1e9;
+        if (dx > 1e-6)  tFwd = Math.min(tFwd, (R - cx) / dx);
+        if (dx < -1e-6) tFwd = Math.min(tFwd, (L - cx) / dx);
+        if (dy > 1e-6)  tFwd = Math.min(tFwd, (B - cy) / dy);
+        if (dy < -1e-6) tFwd = Math.min(tFwd, (T - cy) / dy);
+        double ndx = -dx, ndy = -dy;
+        if (ndx > 1e-6)  tBwd = Math.min(tBwd, (R - cx) / ndx);
+        if (ndx < -1e-6) tBwd = Math.min(tBwd, (L - cx) / ndx);
+        if (ndy > 1e-6)  tBwd = Math.min(tBwd, (B - cy) / ndy);
+        if (ndy < -1e-6) tBwd = Math.min(tBwd, (T - cy) / ndy);
+        if (tFwd >= 1e9) tFwd = 0;
+        if (tBwd >= 1e9) tBwd = 0;
+        return new double[]{cx + tFwd * dx, cy + tFwd * dy, cx - tBwd * dx, cy - tBwd * dy};
     }
 
     private void drawHandles(GraphicsContext g, Gate gt) {
@@ -1343,7 +1677,13 @@ public class CytoPlot extends Region {
             for (int k = 1; k < polyPx.size(); k++)
                 g.strokeLine(polyPx.get(k - 1)[0], polyPx.get(k - 1)[1], polyPx.get(k)[0], polyPx.get(k)[1]);
             double[] last = polyPx.get(polyPx.size() - 1);
-            if (dragCur != null) g.strokeLine(last[0], last[1], dragCur[0], dragCur[1]);
+            if (dragCur != null) {
+                // Snap the rubber-band endpoint so the guide shows where the next vertex will land.
+                double sx = snapPxX(dragCur[0]), sy = snapPxY(dragCur[1]);
+                g.strokeLine(last[0], last[1], sx, sy);
+                drawSnapGuide(g, sx, dragCur[0], true);
+                drawSnapGuide(g, sy, dragCur[1], false);
+            }
         } else if ("Quadrant".equals(tool) && dragCur != null && inPlot(dragCur[0], dragCur[1])) {
             g.setLineDashes(5, 5);
             g.strokeLine(dragCur[0], plotTop(), dragCur[0], plotTop() + plotH());
@@ -1412,7 +1752,12 @@ public class CytoPlot extends Region {
         double mx = e.getX(), my = e.getY();
         if (isDrawingTool()) {
             if ("Quadrant".equals(tool) && inPlot(mx, my)) {
-                finish("quadrant", new double[]{dataX(mx)}, new double[]{dataY(my)});
+                double cx = dataX(mx), cy = dataY(my);
+                double dw = (dataX(plotLeft() + plotW()) - dataX(plotLeft())) * 0.3;
+                double dh = Math.abs(dataY(plotTop()) - dataY(plotTop() + plotH())) * 0.3;
+                finish("quadrant",
+                    new double[]{cx, cx + dw, cx - dw, cx,       cx      },
+                    new double[]{cy, cy,       cy,       cy + dh, cy - dh });
                 return;
             }
             if (inPlot(mx, my) && !"Polygon".equals(tool)) { dragStart = new double[]{mx, my}; dragCur = dragStart; }
@@ -1425,12 +1770,23 @@ public class CytoPlot extends Region {
             if (!Double.isNaN(fmoX) && Math.abs(mx - pxX(fmoX)) <= 4) { dragMode = Drag.MOVE_FMO_X; return; }
             if (!isHistogram() && !Double.isNaN(fmoY) && Math.abs(my - pxY(fmoY)) <= 4) { dragMode = Drag.MOVE_FMO_Y; return; }
         }
-        // 0b. grab a quadrant crosshair centre to move all four quadrants together
+        // 0b. grab the quadrant crosshair centre (moves all four gates) or an arm endpoint
         Gate q = quadrantGate();
-        if (q != null && inPlot(mx, my)
-                && Math.hypot(mx - pxX(q.xs[0]), my - pxY(q.ys[0])) <= HANDLE + 4) {
-            if (onGateEditStart != null) onGateEditStart.accept(q);
-            selected = q; dragMode = Drag.MOVE_QUADRANT; return;
+        if (q != null && inPlot(mx, my)) {
+            if (Math.hypot(mx - pxX(q.xs[0]), my - pxY(q.ys[0])) <= HANDLE + 4) {
+                if (onGateEditStart != null) onGateEditStart.accept(q);
+                selected = q; dragMode = Drag.MOVE_QUADRANT; return;
+            }
+            if (q.xs.length >= 5) {
+                // Spider gate — check the 4 arm-endpoint handles even without pre-selection
+                double[][] hs = handlesPx(q);
+                for (int k = 1; k < hs.length; k++) {
+                    if (Math.hypot(mx - hs[k][0], my - hs[k][1]) <= HANDLE + 3) {
+                        if (onGateEditStart != null) onGateEditStart.accept(q);
+                        selected = q; dragMode = Drag.MOVE_VERTEX; dragVertex = k; return;
+                    }
+                }
+            }
         }
 
         // 1. grab a handle of the already-selected gate (labels are overlay Nodes now)
@@ -1489,7 +1845,15 @@ public class CytoPlot extends Region {
             case MOVE_FMO_Y -> { fmoY = dataY(clampY(my)); paint(); }
             case MOVE_QUADRANT -> {
                 double nx = dataX(clampX(mx)), ny = dataY(clampY(my));
-                for (Gate g : gates) if (isQuadrant(g)) { g.xs[0] = nx; g.ys[0] = ny; }
+                for (Gate g : gates) if (isQuadrant(g)) {
+                    if (g.xs.length >= 5) {
+                        double dcx = nx - g.xs[0], dcy = ny - g.ys[0];
+                        g.xs[0] = nx; g.ys[0] = ny;
+                        for (int i = 1; i < 5; i++) { g.xs[i] += dcx; g.ys[i] += dcy; }
+                    } else {
+                        g.xs[0] = nx; g.ys[0] = ny;
+                    }
+                }
                 paint();
             }
             default -> { }
@@ -1629,6 +1993,31 @@ public class CytoPlot extends Region {
     private void applyVertexMove(double mx, double my) {
         mx = Math.max(plotLeft(), Math.min(plotLeft() + plotW(), mx));
         my = Math.max(plotTop(), Math.min(plotTop() + plotH(), my));
+        if (isQuadrant(selected) && selected.xs.length >= 5 && dragVertex > 0) {
+            // Spider gate arm drag: update direction vector + mirror, sync all quadrant gates
+            double cx = selected.xs[0], cy = selected.ys[0];
+            double ddx = dataX(mx) - cx, ddy = dataY(my) - cy;
+            // Which arm? vertices 1&2 = arm1, vertices 3&4 = arm2
+            int fwd = (dragVertex <= 2) ? 1 : 3;  // forward-direction stored index
+            int bwd = fwd + 1;                      // backward (mirror) stored index
+            if (dragVertex == fwd) {
+                // Dragging the forward handle → update arm direction
+                selected.xs[fwd] = cx + ddx; selected.ys[fwd] = cy + ddy;
+                selected.xs[bwd] = cx - ddx; selected.ys[bwd] = cy - ddy;
+            } else {
+                // Dragging the mirror handle → flip direction
+                selected.xs[bwd] = cx + ddx; selected.ys[bwd] = cy + ddy;
+                selected.xs[fwd] = cx - ddx; selected.ys[fwd] = cy - ddy;
+            }
+            // Sync arm directions to all other quadrant gates (they share centre & arms)
+            for (Gate g : gates) {
+                if (isQuadrant(g) && g != selected && g.xs.length >= 5) {
+                    System.arraycopy(selected.xs, 1, g.xs, 1, 4);
+                    System.arraycopy(selected.ys, 1, g.ys, 1, 4);
+                }
+            }
+            return;
+        }
         selected.xs[dragVertex] = dataX(mx);
         if (selected.ys != null) selected.ys[dragVertex] = dataY(my);
     }
@@ -1716,10 +2105,7 @@ public class CytoPlot extends Region {
                 return (dx / rx) * (dx / rx) + (dy / ry) * (dy / ry) <= 1.0;
             }
             case "polygon": return pointInPoly(g.xs, g.ys, x, y);
-            case "q1": return x >= g.xs[0] && y >= g.ys[0];
-            case "q2": return x <  g.xs[0] && y >= g.ys[0];
-            case "q3": return x <  g.xs[0] && y <  g.ys[0];
-            case "q4": return x >= g.xs[0] && y <  g.ys[0];
+            case "q1": case "q2": case "q3": case "q4": return inQuadrantSector(g.type, g.xs, g.ys, x, y);
             default: return false;
         }
     }
@@ -1730,6 +2116,43 @@ public class CytoPlot extends Region {
                     && (x < (xs[j] - xs[i]) * (y - ys[i]) / (ys[j] - ys[i]) + xs[i])) in = !in;
         }
         return in;
+    }
+
+    /**
+     * Spider quadrant sector membership using cross-product of dividing arms.
+     * xs/ys = [cx, arm1_x, arm1_mirror_x, arm2_x, arm2_mirror_x] (5-point spider gate).
+     * Falls back to axis-aligned quadrant if xs.length < 5 (legacy workspace).
+     *
+     * Initial state (arm1=right, arm2=up) maps to the original q1–q4 convention:
+     *   q1 = top-right (x≥cx, y≥cy), q2 = top-left, q3 = bottom-left, q4 = bottom-right.
+     */
+    private static boolean inQuadrantSector(String type, double[] xs, double[] ys, double x, double y) {
+        double cx = xs[0], cy = ys[0];
+        if (xs.length < 5) {
+            return switch (type) {
+                case "q1" -> x >= cx && y >= cy;
+                case "q2" -> x <  cx && y >= cy;
+                case "q3" -> x <  cx && y <  cy;
+                case "q4" -> x >= cx && y <  cy;
+                default   -> false;
+            };
+        }
+        // arm1 and arm2 direction vectors from centre
+        double a1x = xs[1] - cx, a1y = ys[1] - cy;
+        double a2x = xs[3] - cx, a2y = ys[3] - cy;
+        double px = x - cx, py = y - cy;
+        // Cross products: > 0 means the point is to the LEFT of the arm direction
+        boolean s1 = (a1x * py - a1y * px) > 0;
+        boolean s2 = (a2x * py - a2y * px) > 0;
+        // Mapping verified for initial state arm1=(1,0), arm2=(0,1):
+        //   s1 = py>0 (above), s2 = -px>0 (left of centre)
+        return switch (type) {
+            case "q1" ->  s1 && !s2;   // top-right
+            case "q2" ->  s1 &&  s2;   // top-left
+            case "q3" -> !s1 &&  s2;   // bottom-left
+            case "q4" -> !s1 && !s2;   // bottom-right
+            default   -> false;
+        };
     }
 
     private static double min(double[] a) { double m = a[0]; for (double v : a) m = Math.min(m, v); return m; }
