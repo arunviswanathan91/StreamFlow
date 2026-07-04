@@ -126,19 +126,24 @@ public class GraphWindowController {
         ctx.workspace().registerWindow(name, w.stage());  // §14: track for focus-existing behaviour
     }
 
-    /** Drill-down window: another view of the SAME sample/tree, initially focused on {@code focus}. */
-    public static void openChild(AppContext ctx, String sampleFile, PopNode focus) {
+    /** Drill-down window: another view of the SAME sample/tree, initially focused on {@code focus}.
+     *  @param stealFocus true when the user explicitly navigated here (double-click); false for
+     *                    background auto-opens (gate draw) so the parent window keeps focus. */
+    public static void openChild(AppContext ctx, String sampleFile, PopNode focus, boolean stealFocus) {
         Win w = build(ctx, sampleFile);
         GraphWindowController c = w.controller();
         c.sampleFile = sampleFile;
-        // Enable ◀/▶ navigation so you can scroll the SAME population across all samples.
         c.sampleNames = new ArrayList<>(ctx.workspace().sampleNames());
         c.sampleIndex = c.sampleNames.indexOf(sampleFile);
         c.initialFocus = focus;
-        c.loadFromEngine(true);   // hits the workspace cache → shares tree + events, then focuses 'focus'
+        c.loadFromEngine(true);
         w.stage().show();
-        w.stage().toFront();
-        w.stage().requestFocus();
+        if (stealFocus) { w.stage().toFront(); w.stage().requestFocus(); }
+    }
+
+    /** Convenience overload — explicit navigation always steals focus. */
+    public static void openChild(AppContext ctx, String sampleFile, PopNode focus) {
+        openChild(ctx, sampleFile, focus, true);
     }
 
     private record Win(Stage stage, GraphWindowController controller) {}
@@ -751,12 +756,14 @@ public class GraphWindowController {
 
     private void openChildForGate(CytoPlot.Gate g) {
         PopNode n = nodeForGate(g);
-        if (n != null) openChildForNode(n);
+        if (n != null) openChildForNode(n, true);
     }
 
-    private void openChildForNode(PopNode node) {
+    private void openChildForNode(PopNode node) { openChildForNode(node, true); }
+
+    private void openChildForNode(PopNode node, boolean stealFocus) {
         if (node == null || node.isRoot()) return;
-        openChild(ctx, sampleFile, node);   // shares the workspace tree + cached events
+        openChild(ctx, sampleFile, node, stealFocus);
     }
 
     /** Population path from just below root down to (and including) the node. */
@@ -1131,7 +1138,7 @@ public class GraphWindowController {
             () -> { removeNode(addedNode); },
             () -> { reAddNode(addedNode, addedParent, addedIdx); }
         );
-        openChildForNode(node);   // auto-open the new population in its own graphing window
+        openChildForNode(node, false);   // auto-open without stealing focus from the drawing window
     }
 
     private void onQuadrantDrawn(CytoPlot.Gate qg) {
@@ -1180,7 +1187,7 @@ public class GraphWindowController {
             () -> { suppressUndo = true; try { for (PopNode qn : quadNodes) removeNode(qn); } finally { suppressUndo = false; } },
             () -> { suppressUndo = true; try { for (int i = 0; i < quadNodes.size(); i++) reAddNode(quadNodes.get(i), addedParent, quadIdxs.get(i)); } finally { suppressUndo = false; } }
         );
-        for (PopNode qn : quadNodes) openChildForNode(qn);   // auto-open each quadrant population
+        for (PopNode qn : quadNodes) openChildForNode(qn, false);   // auto-open without stealing focus
     }
 
     // ---- elastic gate templates (#13): copy / paste-and-snap-to-peak / undo --

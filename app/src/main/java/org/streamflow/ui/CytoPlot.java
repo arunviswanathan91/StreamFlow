@@ -237,6 +237,7 @@ public class CytoPlot extends Region {
         boolean[] keep = new boolean[d.rows()];
         int xc = d.indexOf(g.xChan);
         int yc = g.yChan == null ? -1 : d.indexOf(g.yChan);
+        if (xc < 0) return keep;   // channel not present in this EventData → no events pass
         for (int r = 0; r < d.rows(); r++) {
             double x = d.get(r, xc);
             double y = yc < 0 ? 0 : d.get(r, yc);
