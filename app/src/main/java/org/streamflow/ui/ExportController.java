@@ -173,12 +173,19 @@ public class ExportController implements ContextAware, Refreshable {
         gsStrip.getChildren().clear();
         if (steps.isEmpty()) { info("No gates", "This sample has no gates to show."); return; }
         boolean first = true;
+        int built = 0;
         for (PopNode p : steps) {
-            if (!first) gsStrip.getChildren().add(arrowNode());
-            first = false;
-            gsStrip.getChildren().add(stepCell(root, p));
+            try {
+                if (!first) gsStrip.getChildren().add(arrowNode());
+                first = false;
+                gsStrip.getChildren().add(stepCell(root, p));
+                built++;
+            } catch (Exception ex) {
+                gsStatusLabel.setText("Error at step '" + p.name() + "': " + ex.getMessage());
+                return;
+            }
         }
-        gsStatusLabel.setText(steps.size() + " gating step(s) for " + shortName(sample) + ". Copy (PPT) or Save PNG.");
+        gsStatusLabel.setText(built + " gating step(s) for " + shortName(sample) + ". Copy (PPT) or Save PNG.");
     }
 
     private void collectSteps(PopNode n, List<PopNode> out) {
@@ -189,11 +196,15 @@ public class ExportController implements ContextAware, Refreshable {
     /** One figure panel: a population's events (light/publication style) with its child gates drawn. */
     private javafx.scene.Node stepCell(EventData root, PopNode p) {
         EventData ev = p.isRoot() ? root : subsetFor(root, p);
-        String ax = p.viewX, ay = p.viewY, axs = p.viewXScale, ays = p.viewYScale;
-        if (ax == null && !p.children.isEmpty()) {     // fall back to the first child's gate axes
+        // Use the axes where the child gates were drawn — that is always the correct view for a
+        // gating-strategy panel.  Fall back to the stored view config, then to the node's own gate.
+        String ax = null, ay = null, axs = p.viewXScale, ays = p.viewYScale;
+        if (!p.children.isEmpty()) {
             CytoPlot.Gate g0 = p.children.get(0).gate;
-            if (g0 != null) { ax = g0.xChan; ay = g0.yChan; }
+            if (g0 != null && g0.xChan != null) { ax = g0.xChan; ay = g0.yChan; }
         }
+        if (ax == null) { ax = p.viewX; ay = p.viewY; }
+        if (ax == null && !p.isRoot() && p.gate != null) { ax = p.gate.xChan; ay = p.gate.yChan; }
         boolean hist = ay == null;
         CytoPlot plot = new CytoPlot();
         plot.setMinSize(220, 220); plot.setPrefSize(220, 220); plot.setMaxSize(220, 220);
