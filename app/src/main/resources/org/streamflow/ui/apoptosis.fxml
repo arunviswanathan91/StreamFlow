@@ -54,7 +54,7 @@
         <HBox spacing="12.0" VBox.vgrow="ALWAYS">
             <children>
                 <CytoPlot fx:id="plot" HBox.hgrow="ALWAYS" VBox.vgrow="ALWAYS"/>
-                <VBox spacing="6.0" prefWidth="260.0">
+                <VBox spacing="6.0" prefWidth="260.0" minWidth="220.0" HBox.hgrow="NEVER">
                     <children>
                         <Label text="Quadrant Results" styleClass="title"/>
                         <TableView fx:id="quadTable" VBox.vgrow="ALWAYS">

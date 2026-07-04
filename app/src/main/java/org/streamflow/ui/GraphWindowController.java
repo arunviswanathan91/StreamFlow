@@ -122,6 +122,7 @@ public class GraphWindowController {
         w.controller().sampleFile = name;
         w.controller().loadFromEngine(true);
         w.stage().show();
+        w.stage().toFront();
         ctx.workspace().registerWindow(name, w.stage());  // §14: track for focus-existing behaviour
     }
 
@@ -136,6 +137,8 @@ public class GraphWindowController {
         c.initialFocus = focus;
         c.loadFromEngine(true);   // hits the workspace cache → shares tree + events, then focuses 'focus'
         w.stage().show();
+        w.stage().toFront();
+        w.stage().requestFocus();
     }
 
     private record Win(Stage stage, GraphWindowController controller) {}
@@ -1128,6 +1131,7 @@ public class GraphWindowController {
             () -> { removeNode(addedNode); },
             () -> { reAddNode(addedNode, addedParent, addedIdx); }
         );
+        openChildForNode(node);   // auto-open the new population in its own graphing window
     }
 
     private void onQuadrantDrawn(CytoPlot.Gate qg) {
@@ -1176,6 +1180,7 @@ public class GraphWindowController {
             () -> { suppressUndo = true; try { for (PopNode qn : quadNodes) removeNode(qn); } finally { suppressUndo = false; } },
             () -> { suppressUndo = true; try { for (int i = 0; i < quadNodes.size(); i++) reAddNode(quadNodes.get(i), addedParent, quadIdxs.get(i)); } finally { suppressUndo = false; } }
         );
+        for (PopNode qn : quadNodes) openChildForNode(qn);   // auto-open each quadrant population
     }
 
     // ---- elastic gate templates (#13): copy / paste-and-snap-to-peak / undo --
