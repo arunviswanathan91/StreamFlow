@@ -12,6 +12,7 @@ import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
@@ -57,6 +58,14 @@ public class WorkstationController implements ContextAware {
     @FXML private Button panelCheckButton;
     @FXML private Button exportGatingMlButton;
     @FXML private TreeView<Object> tree;
+
+    // §9 overview tab
+    @FXML private javafx.scene.control.TabPane mainTabs;
+    @FXML private javafx.scene.control.Tab overviewTab;
+    @FXML private ComboBox<String> overviewXCombo;
+    @FXML private ComboBox<String> overviewYCombo;
+    @FXML private javafx.scene.layout.FlowPane overviewGrid;
+    @FXML private Label overviewStatusLabel;
 
     private AppContext ctx;
     private final Set<String> expandedSamples = new HashSet<>();   // remember expansion across rebuilds
@@ -107,6 +116,12 @@ public class WorkstationController implements ContextAware {
                 (javafx.collections.ListChangeListener<String>) c -> rebuild());
         ctx.workspace().addTreeChangeListener(this::rebuild);
         ctx.workspace().addDataChangeListener(s -> rebuild());
+        // §9: refresh overview when the Overview tab is selected
+        if (mainTabs != null) {
+            mainTabs.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> {
+                if (b == overviewTab) refreshOverview();
+            });
+        }
         rebuild();
     }
 
@@ -161,13 +176,25 @@ public class WorkstationController implements ContextAware {
         return sb.toString();
     }
 
-    /** QC indicator (restored from the old Setup view): event-count deviation from the median. */
+    /** QC indicator (restored from the old Setup view): event-count deviation from the median.
+     *  Clickable — opens the per-FCS diagnostics window (keywords + parameters + summary). */
     private Circle qcDot(String sample) {
         int ev = ctx.workspace().eventCount(sample);
         Circle dot = new Circle(5);
-        if (ev < 0 || medianEvents <= 0) { dot.setFill(Color.web("#3A4A5E")); return dot; }
-        double dev = Math.abs(ev - medianEvents) / medianEvents;
-        dot.setFill(dev < 0.20 ? Color.web("#4CAF50") : dev < 0.50 ? Color.web("#FFC107") : Color.web("#F44336"));
+        String verdict;
+        if (ev < 0 || medianEvents <= 0) {
+            dot.setFill(Color.web("#3A4A5E"));
+            verdict = "QC: not yet computed" + (ev >= 0 ? String.format("  (%,d events)", ev) : "");
+        } else {
+            double dev = Math.abs(ev - medianEvents) / medianEvents;
+            dot.setFill(dev < 0.20 ? Color.web("#4CAF50") : dev < 0.50 ? Color.web("#FFC107") : Color.web("#F44336"));
+            String status = dev < 0.20 ? "PASS" : dev < 0.50 ? "WARN" : "FAIL";
+            verdict = String.format("QC: %s — %.0f%% from median (%,d events)", status, dev * 100, ev);
+        }
+        dot.setStyle("-fx-cursor:hand;");
+        javafx.scene.control.Tooltip.install(dot,
+                new javafx.scene.control.Tooltip(verdict + "\nClick for full FCS diagnostics."));
+        dot.setOnMouseClicked(e -> { FcsDiagnosticsController.open(ctx, sample, verdict); e.consume(); });
         return dot;
     }
 
@@ -241,6 +268,9 @@ public class WorkstationController implements ContextAware {
 
     private void openSample(String sample, PopNode focus) {
         if (sample == null || ctx == null) return;
+        // §14: focus an already-open graph window instead of spawning a duplicate
+        javafx.stage.Stage existing = ctx.workspace().openWindowFor(sample);
+        if (existing != null && focus == null) { existing.toFront(); return; }
         List<String> all = List.copyOf(ctx.workspace().sampleNames());
         int idx = Math.max(0, all.indexOf(sample));
         if (focus == null || focus.isRoot()) {
@@ -248,6 +278,92 @@ public class WorkstationController implements ContextAware {
         } else {
             GraphWindowController.openChild(ctx, sample, focus);
         }
+    }
+
+    // ---- §9 overview thumbnail grid -----------------------------------------
+
+    @FXML
+    private void onOverviewRefresh() { refreshOverview(); }
+
+    private void refreshOverview() {
+        if (ctx == null || overviewGrid == null) return;
+        List<String> channels = ctx.workspace().channelNames();
+        // Populate axis combos on first use (or after channels change).
+        if (overviewXCombo != null && (overviewXCombo.getItems().isEmpty()
+                || overviewXCombo.getItems().size() != channels.size())) {
+            List<String> yOpts = new ArrayList<>(); yOpts.add("(Histogram)"); yOpts.addAll(channels);
+            overviewXCombo.setItems(FXCollections.observableArrayList(channels));
+            overviewYCombo.setItems(FXCollections.observableArrayList(yOpts));
+            selectPreferred(overviewXCombo, channels, "FSC-A");
+            selectPreferred(overviewYCombo, yOpts, "SSC-A");
+        }
+        overviewGrid.getChildren().clear();
+        String xch = overviewXCombo != null && overviewXCombo.getValue() != null
+                ? overviewXCombo.getValue() : (channels.isEmpty() ? null : channels.get(0));
+        String ych = overviewYCombo != null && overviewYCombo.getValue() != null
+                ? overviewYCombo.getValue() : (channels.size() > 1 ? channels.get(1) : "(Histogram)");
+        if (xch == null) { if (overviewStatusLabel != null) overviewStatusLabel.setText("Load FCS first."); return; }
+        boolean hist = "(Histogram)".equals(ych);
+        CytoPlot.Scale xs = scaleFor(xch), ys = hist ? CytoPlot.Scale.LINEAR : scaleFor(ych);
+        final String finalX = xch, finalY = ych;
+        final CytoPlot.Scale finalXs = xs, finalYs = ys;
+
+        List<String> all = new ArrayList<>(ctx.workspace().sampleNames());
+        if (overviewStatusLabel != null) overviewStatusLabel.setText("Loading " + all.size() + " sample(s)…");
+
+        // Add a placeholder card for every sample immediately, then fill data as it arrives.
+        for (String sample : all) {
+            CytoPlot mini = new CytoPlot();
+            mini.setMinSize(180, 140); mini.setPrefSize(180, 140); mini.setMaxSize(180, 140);
+            mini.setChannelLabeler(ch -> ctx.aliases().label(ch));
+            if (ctx.workspace().hasTree(sample))
+                for (PopNode ch : ctx.workspace().treeFor(sample).children) mini.addGate(ch.gate);
+
+            Label cap = new Label(shortName(sample));
+            cap.setStyle("-fx-font-size:10; -fx-text-fill:#8AABB5;");
+            javafx.scene.layout.VBox card = new javafx.scene.layout.VBox(2, cap, mini);
+            card.setStyle("-fx-border-color:#1E3350; -fx-border-radius:3; -fx-padding:4; -fx-background-color:#0D1B2A; -fx-background-radius:3;");
+            card.setOnMouseClicked(e -> { if (e.getClickCount() == 2) openSample(sample, null); });
+            overviewGrid.getChildren().add(card);
+
+            // Set data immediately if cached; otherwise fetch in background.
+            EventData cached = ctx.workspace().data(sample);
+            if (cached != null) {
+                mini.setData(cached);
+                mini.setView(finalX, hist ? null : finalY, finalXs, finalYs, "pseudocolor");
+            } else {
+                ensureData(sample, () -> {
+                    EventData d = ctx.workspace().data(sample);
+                    if (d != null) {
+                        mini.setData(d);
+                        mini.setView(finalX, hist ? null : finalY, finalXs, finalYs, "pseudocolor");
+                    }
+                });
+            }
+        }
+        if (overviewStatusLabel != null)
+            overviewStatusLabel.setText(all.isEmpty()
+                    ? "Load FCS first." : all.size() + " sample(s) — double-click to open");
+    }
+
+    /** Scatter/Time/Width → Linear; everything else → Logicle (matches GraphWindowController). */
+    private static CytoPlot.Scale scaleFor(String channel) {
+        if (channel == null) return CytoPlot.Scale.LINEAR;
+        return channel.matches("(?i).*(FSC|SSC|Time|Width).*")
+                ? CytoPlot.Scale.LINEAR : CytoPlot.Scale.LOGICLE;
+    }
+
+    private static String shortName(String s) {
+        if (s == null) return "";
+        int slash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+        String base = slash >= 0 ? s.substring(slash + 1) : s;
+        return base.length() > 22 ? base.substring(0, 20) + "…" : base;
+    }
+
+    private static void selectPreferred(ComboBox<String> combo, List<String> opts, String pref) {
+        opts.stream().filter(c -> c.equalsIgnoreCase(pref)).findFirst()
+                .or(() -> opts.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(opts.get(0)))
+                .ifPresent(v -> combo.getSelectionModel().select(v));
     }
 
     private void applyAll(String sample) {

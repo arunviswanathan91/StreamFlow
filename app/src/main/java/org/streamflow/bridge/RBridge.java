@@ -93,7 +93,15 @@ public final class RBridge implements AutoCloseable {
             if (rhome != null) {
                 pb.environment().put("R_HOME", rhome.toString());
                 Path lib = RPaths.bundledRLibrary();
-                if (lib != null) pb.environment().put("R_LIBS_USER", lib.toString());
+                if (lib != null) {
+                    String libStr = lib.toString();
+                    // Lock R to the bundled library exclusively so it cannot load
+                    // packages from the user's global install or the system site-library,
+                    // which could be incompatible versions of openCyto / flowCore etc.
+                    pb.environment().put("R_LIBS_USER", libStr);
+                    pb.environment().put("R_LIBS_SITE", libStr);
+                    pb.environment().put("R_LIBS",      libStr);
+                }
             }
         }
 

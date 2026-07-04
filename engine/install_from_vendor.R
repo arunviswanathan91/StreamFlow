@@ -72,9 +72,37 @@ EXTRAS <- c(
 )
 for (p in EXTRAS) install_vendor(p, deps = TRUE)
 
+# ── FlowMagic R plugin ───────────────────────────────────────────────────────
+# FlowMagic: automated bivariate gating (Montante, Apache-2.0).
+# Source lives in either engine/vendor/flowMagic-main/ or python-migration/flowMagic-main/
+# (both are checked; CI checkout has the full repo, so the latter always works).
+flowmagic_dir <- function() {
+  candidates <- c(
+    file.path(engine_dir, "vendor", "flowMagic-main"),
+    file.path(dirname(engine_dir), "python-migration", "flowMagic-main")
+  )
+  for (p in candidates) if (dir.exists(p)) return(p)
+  NA_character_
+}
+
+if (!have("flowMagic")) {
+  fm <- flowmagic_dir()
+  if (!is.na(fm)) {
+    note("build flowMagic  <- %s", basename(fm))
+    tryCatch(
+      remotes::install_local(fm, dependencies = TRUE, upgrade = "never", quiet = FALSE),
+      error = function(e) note("FAIL  flowMagic: %s", conditionMessage(e))
+    )
+  } else {
+    note("SKIP  flowMagic (not found in vendor/ or python-migration/)")
+  }
+} else {
+  note("skip  flowMagic (already installed)")
+}
+
 # ── Report ───────────────────────────────────────────────────────────────────
 note("\n=== Install report ===")
-report <- c("CytoExploreR", PIPE_DEPS, EXTRAS)
+report <- c("CytoExploreR", PIPE_DEPS, EXTRAS, "flowMagic")
 for (p in unique(report)) note("%-18s %s", p, if (have(p)) "OK" else "MISSING")
 note("\nCytoExploreR loadable: %s",
      tryCatch({loadNamespace("CytoExploreR"); "YES"},

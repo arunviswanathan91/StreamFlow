@@ -23,7 +23,7 @@ import java.nio.file.Paths;
  * so plots are crisp on high-DPI screens (the same render path the gating canvas
  * will reuse).
  */
-public class VisualizationController implements ContextAware {
+public class VisualizationController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -57,9 +57,8 @@ public class VisualizationController implements ContextAware {
     }
 
     @FXML
-    private void onRefresh() {
-        refreshChannels();
-    }
+    private void onRefresh() { refreshChannels(); }
+    @Override public void refreshFromWorkspace() { refreshChannels(); }
 
     private void refreshChannels() {
         if (ctx == null) return;

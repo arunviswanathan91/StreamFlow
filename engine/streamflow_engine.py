@@ -407,16 +407,10 @@ def _run_dimredux(i, a):
         except ImportError:
             raise ValueError("umap-learn is not installed. Run: pip install umap-learn")
 
-    send_progress(i, 0.85, "Rendering embedding…")
-    fig, ax = plt.subplots(figsize=(7, 6), facecolor="white")
-    ax.set_facecolor("white")
-    ax.scatter(coords[:, 0], coords[:, 1], s=2, c="#08306B", alpha=0.5, edgecolors="none")
-    ax.set_xlabel(method.upper() + " 1"); ax.set_ylabel(method.upper() + " 2")
-    ax.set_title("%s · %s · %d events" % (method.upper(), s.id, len(idx)))
-    png_path = os.path.join(CONTROL_DIR, "sfdr_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
-    return {"png": png_path, "method": method, "n": int(len(idx)), "n_features": len(fluor)}
+    send_progress(i, 0.85, "Done.")
+    coords_out = [[round(float(coords[r, 0]), 4), round(float(coords[r, 1]), 4)]
+                  for r in range(len(coords))]
+    return {"coords": coords_out, "method": method, "n": int(len(idx)), "n_features": len(fluor)}
 
 
 # ---- clustering: FlowSOM / PhenoGraph -------------------------------------
@@ -484,23 +478,13 @@ def _run_clustering(i, a):
         if mask.sum() > 0:
             cluster_medians[c] = np.median(X[mask], axis=0)
 
-    fig, ax = plt.subplots(figsize=(max(6, len(fluor) * 0.7), max(4, n_clusters * 0.4 + 1)),
-                            facecolor="white")
-    im = ax.imshow(cluster_medians, aspect="auto", cmap="RdBu_r", interpolation="nearest")
-    ax.set_xticks(range(len(fluor))); ax.set_xticklabels(fluor, rotation=45, ha="right", fontsize=7)
-    ax.set_yticks(range(n_clusters)); ax.set_yticklabels(["C%d" % c for c in range(n_clusters)], fontsize=7)
-    ax.set_title("%s  k=%d  n=%d" % (actual, n_clusters, len(idx)))
-    plt.colorbar(im, ax=ax, shrink=0.6, label="arcsinh median")
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR, "sfcl_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
-
     clusters_out = [{"cluster": int(c), "count": int(cluster_counts[c]),
                      "percent": float(100.0 * cluster_counts[c] / max(1, len(idx)))}
                     for c in range(n_clusters)]
-    return {"png": png_path, "method": actual, "k": n_clusters, "n": int(len(idx)),
-            "clusters": clusters_out}
+    medians_out = [[round(float(cluster_medians[c, f]), 4) for f in range(len(fluor))]
+                   for c in range(n_clusters)]
+    return {"method": actual, "k": n_clusters, "n": int(len(idx)),
+            "clusters": clusters_out, "channels": list(fluor), "medians": medians_out}
 
 
 # ---- workspace: FlowJo WSP import / export (FlowKit Session) ---------------
@@ -761,11 +745,18 @@ def _otsu_threshold(vals, bins=256):
     return float(mids[int(np.argmax(between))])
 
 
-def _scatter_cleanup_mask(ev, pnn, fsc, ssc):
-    """FlowJo-style size cleanup: keep the central scatter population (debris/saturation
-    removed) via a percentile box on FSC/SSC. Returns a boolean mask over rows."""
+def _scatter_cleanup_mask(ev, pnn, fsc, ssc, gate=None):
+    """FlowJo-style size cleanup: keep the central scatter population (debris/saturation removed).
+    Uses an explicit FSC/SSC rectangle {x_min,x_max,y_min,y_max} when the user has drawn one in the
+    wizard; otherwise falls back to a central percentile box. Returns a boolean mask over rows."""
     import numpy as np
     mask = np.ones(ev.shape[0], dtype=bool)
+    if gate:
+        if fsc and fsc in pnn and "x_min" in gate:
+            v = ev[:, pnn.index(fsc)]; mask &= (v >= gate["x_min"]) & (v <= gate["x_max"])
+        if ssc and ssc in pnn and "y_min" in gate:
+            v = ev[:, pnn.index(ssc)]; mask &= (v >= gate["y_min"]) & (v <= gate["y_max"])
+        return mask
     for ch in (fsc, ssc):
         if ch and ch in pnn:
             v = ev[:, pnn.index(ch)]
@@ -806,6 +797,7 @@ def _compute_spillover_from_controls(i, a):
     scatter = a.get("scatter") or {}
     fsc = scatter.get("x") or next((c for c in pnn0 if re.search(r"FSC.?A|FSC", c, re.I)), None)
     ssc = scatter.get("y") or next((c for c in pnn0 if re.search(r"SSC.?A|SSC", c, re.I)), None)
+    sgate = scatter.get("gate")   # optional FSC/SSC rectangle drawn in the wizard (overrides the box)
 
     unstained = a.get("unstained")
     controls_in = a.get("controls")
@@ -816,7 +808,7 @@ def _compute_spillover_from_controls(i, a):
         s = _sample_by_name(name)
         ev = np.asarray(s.get_events(source="raw"), dtype=float)
         pnn = list(s.pnn_labels)
-        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc)
+        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc, sgate)
         evg = ev[mask] if mask.any() else ev
         best, best_med = None, -np.inf
         for c in fluor:
@@ -851,7 +843,7 @@ def _compute_spillover_from_controls(i, a):
         su = _sample_by_name(unstained)
         evu = np.asarray(su.get_events(source="raw"), dtype=float)
         pnnu = list(su.pnn_labels)
-        mu = _scatter_cleanup_mask(evu, pnnu, fsc, ssc)
+        mu = _scatter_cleanup_mask(evu, pnnu, fsc, ssc, sgate)
         evug = evu[mu] if mu.any() else evu
         for d in detectors:
             baseline[d] = float(np.median(evug[:, pnnu.index(d)]))
@@ -872,7 +864,7 @@ def _compute_spillover_from_controls(i, a):
         s = _sample_by_name(name)
         ev = np.asarray(s.get_events(source="raw"), dtype=float)
         pnn = list(s.pnn_labels)
-        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc)
+        mask = _scatter_cleanup_mask(ev, pnn, fsc, ssc, sgate)
         evg = ev[mask] if mask.any() else ev
         prim = evg[:, pnn.index(primary)]
 
@@ -1002,6 +994,7 @@ def _save_workspace(i, a):
         "transforms": {k: {"method": v.get("method"), "cofactor": v.get("cofactor")}
                        for k, v in STATE.get("transforms", {}).items()},
         "gates": a.get("gates", {}) or {},
+        "audit_log": a.get("audit_log", []) or [],   # session analysis log (owned by the Java side)
     }
     with open(file, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=2, default=str)
@@ -1045,6 +1038,7 @@ def _load_workspace(i, a):
 
     out = _summary(skipped=missing)
     out["gates"] = doc.get("gates", {}) or {}
+    out["audit_log"] = doc.get("audit_log", []) or []
     return out
 
 @command("suggest_transform")
@@ -1077,6 +1071,33 @@ def _suggest_transform(i, a):
     return {"suggestions": suggestions,
             "summary": {"logicle_count": logicle_count,
                         "arcsinh_count": len(suggestions) - logicle_count}}
+
+
+def _apply_gate_mask(ev, pnn, gate):
+    """Return a boolean mask for events that pass one gate definition dict."""
+    import numpy as np
+    g_type = str(gate.get("type", "polygon")).lower()
+    xc = gate.get("x_channel") or ""
+    yc = gate.get("y_channel") or ""
+    xs_g = [float(v) for v in gate.get("xs", [])]
+    ys_g = [float(v) for v in gate.get("ys", [])]
+    if not xc or xc not in pnn:
+        return np.ones(len(ev), dtype=bool)
+    xi = pnn.index(xc)
+    ex = ev[:, xi]
+    if g_type in ("range", "h_range"):
+        if len(xs_g) < 2:
+            return np.ones(len(ev), dtype=bool)
+        return (ex >= xs_g[0]) & (ex <= xs_g[-1])
+    if not yc or yc not in pnn:
+        return np.ones(len(ev), dtype=bool)
+    yi = pnn.index(yc)
+    ey = ev[:, yi]
+    if len(xs_g) < 3:
+        return np.ones(len(ev), dtype=bool)
+    from matplotlib.path import Path
+    poly = np.array(list(zip(xs_g, ys_g)), dtype=float)
+    return Path(poly).contains_points(np.column_stack([ex, ey]))
 
 
 def _phase_boundaries(mu1, sig1, mu2, sig2, lo, hi):
@@ -1113,24 +1134,29 @@ def _run_cell_cycle(i, a):
 
     Models:
       watson  — G0/G1 + G2/M are Gaussians with mean_G2M = 2*mean_G0G1 and
-                EQUAL CV (sigma_G2M = 2*sigma_G0G1). S phase = broadened rectangle
-                (constant DNA-synthesis rate, Dean-Jett style, broadened by the G1 sigma).
+                EQUAL CV (sigma_G2M = 2*sigma_G0G1). S phase = broadened rectangle.
       djf     — Dean-Jett-Fox: same structure but sigma_G2M is a free parameter.
 
-    Returns {phases:{G0G1,S,G2M}, cvs:{G0G1,G2M}, fit:{mu_g1,mu_g2,r2,rmse}, png, n}.
+    Optional args:
+      gate_polygons  — [{type, x_channel, y_channel, xs, ys}] chain to filter events.
+      mu_g1_hint     — float; seed the G1 peak mean from a user-dragged anchor.
+      mu_g2_hint     — float; seed via G2/2 when the user dragged the G2 anchor.
+
+    Returns {phases, cvs, fit, curves, boundaries, n} — no PNG; Java renders natively.
     """
     import numpy as np
     from scipy.optimize import curve_fit
     from scipy.signal import find_peaks
     from scipy.special import erf
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     a = a or {}
     model = str(a.get("model", "watson")).lower()
-    # The UI can fit a GATED population by passing its DNA-channel values directly (so the model
-    # runs on exactly the right-clicked sub-population); otherwise fit the whole named sample.
+    mu_g1_hint = a.get("mu_g1_hint")
+    mu_g2_hint = a.get("mu_g2_hint")
+    gate_polygons = a.get("gate_polygons")  # list of gate dicts to apply sequentially
+
+    # The UI can fit a GATED population by passing raw values directly, or let the engine
+    # load the sample and optionally filter through gate_polygons.
     raw_values = a.get("values")
     if raw_values is not None:
         channel = a.get("channel", "DNA")
@@ -1147,6 +1173,12 @@ def _run_cell_cycle(i, a):
             if channel is None:
                 raise ValueError("Specify a DNA-content channel (PI / DAPI / 7-AAD / Hoechst).")
         ev = np.asarray(s.get_events(source="raw"))
+        # Apply gate chain to select the correct sub-population
+        if gate_polygons:
+            mask = np.ones(len(ev), dtype=bool)
+            for gate in gate_polygons:
+                mask &= _apply_gate_mask(ev, pnn, gate)
+            ev = ev[mask]
         vals = ev[:, pnn.index(channel)]
 
     vals = np.asarray(vals, dtype=float)
@@ -1164,12 +1196,17 @@ def _run_cell_cycle(i, a):
     dx = float(x[1] - x[0])
 
     # --- seed peak detection on a lightly-smoothed histogram ---
-    ys = np.convolve(y, np.ones(5) / 5, mode="same")
-    peaks, props = find_peaks(ys, prominence=ys.max() * 0.05, distance=max(1, nbins // 40))
+    ys_sm = np.convolve(y, np.ones(5) / 5, mode="same")
+    peaks, props = find_peaks(ys_sm, prominence=ys_sm.max() * 0.05, distance=max(1, nbins // 40))
     if len(peaks) == 0:
         raise ValueError("No clear peak found in the %s histogram." % channel)
     g1_idx = peaks[int(np.argmax(props["prominences"]))]      # G1 = most prominent
     mu1_seed = float(x[g1_idx])
+    # If the user dragged a peak anchor, use that as the seed instead of auto-detection
+    if mu_g1_hint is not None:
+        mu1_seed = float(mu_g1_hint)
+    elif mu_g2_hint is not None:
+        mu1_seed = float(mu_g2_hint) / 2.0
     g2_idx = None
     if len(peaks) > 1:
         cand = peaks[int(np.argmin(np.abs(x[peaks] - 2 * mu1_seed)))]
@@ -1180,12 +1217,15 @@ def _run_cell_cycle(i, a):
     s1_seed = max(mu1_seed * 0.05, dx)
     as_seed = max(a1_seed * 0.05, 1.0)
     sqrt2 = np.sqrt(2.0)
+    # When peak hints are provided, tighten the mu1 bounds to stay near the user's annotation
+    hint_given = (mu_g1_hint is not None or mu_g2_hint is not None)
+    mu1_lo_frac = 0.90 if hint_given else 0.6
+    mu1_hi_frac = 1.10 if hint_given else 1.4
 
     def gauss(xx, amp, mu, sig):
         return amp * np.exp(-0.5 * ((xx - mu) / sig) ** 2)
 
     def sbox(xx, amp, m1, m2, sig):
-        # broadened rectangle: constant DNA-synthesis rate between G1 and G2, blurred by sig
         return 0.5 * amp * (erf((m2 - xx) / (sig * sqrt2)) - erf((m1 - xx) / (sig * sqrt2)))
 
     if model == "watson":
@@ -1193,19 +1233,16 @@ def _run_cell_cycle(i, a):
             return (gauss(xx, a1, mu1, sig1) + gauss(xx, a2, 2 * mu1, 2 * sig1)
                     + sbox(xx, a_s, mu1, 2 * mu1, sig1))
         p0 = [a1_seed, mu1_seed, s1_seed, a2_seed, as_seed]
-        lb = [0, mu1_seed * 0.6, dx, 0, 0]
-        ub = [a1_seed * 3, mu1_seed * 1.4, mu1_seed * 0.2, a1_seed * 3, a1_seed]
+        lb = [0, mu1_seed * mu1_lo_frac, dx, 0, 0]
+        ub = [a1_seed * 3, mu1_seed * mu1_hi_frac, mu1_seed * 0.2, a1_seed * 3, a1_seed]
     else:  # dean-jett-fox: free G2 sigma
         def f(xx, a1, mu1, sig1, a2, sig2, a_s):
             return (gauss(xx, a1, mu1, sig1) + gauss(xx, a2, 2 * mu1, sig2)
                     + sbox(xx, a_s, mu1, 2 * mu1, sig1))
         p0 = [a1_seed, mu1_seed, s1_seed, a2_seed, s1_seed * 1.2, as_seed]
-        lb = [0, mu1_seed * 0.6, dx, 0, dx, 0]
-        ub = [a1_seed * 3, mu1_seed * 1.4, mu1_seed * 0.2, a1_seed * 3, mu1_seed * 0.3, a1_seed]
+        lb = [0, mu1_seed * mu1_lo_frac, dx, 0, dx, 0]
+        ub = [a1_seed * 3, mu1_seed * mu1_hi_frac, mu1_seed * 0.2, a1_seed * 3, mu1_seed * 0.3, a1_seed]
 
-    # Guard against degenerate bounds (e.g. a non-DNA channel, or a low/flat G1 peak): keep every
-    # lower bound strictly below its upper bound and clamp the seed p0 into range, so curve_fit runs
-    # instead of raising "Each lower bound must be strictly less than each upper bound".
     lb, ub, p0 = _sanitize_bounds(lb, ub, p0)
 
     send_progress(i, 0.4, "Fitting %s model…" % model.upper())
@@ -1243,34 +1280,14 @@ def _run_cell_cycle(i, a):
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rmse = float(np.sqrt(np.mean((y - fit_c) ** 2)))
 
-    send_progress(i, 0.85, "Rendering…")
-    fig, ax = plt.subplots(figsize=(7, 5), facecolor="white")
-    ax.set_facecolor("white")
-    ax.bar(x, y, width=dx, color="#C9D6E5", edgecolor="none")
-    ax.fill_between(x, 0, s_c, color="#FDB863", alpha=0.55, label="S  %.1f%%" % pct_s)
-    ax.plot(x, g1_c, color="#2C7FB8", lw=1.6, label="G0/G1  %.1f%%" % pct_g1)
-    ax.plot(x, g2_c, color="#D7301F", lw=1.6, label="G2/M  %.1f%%" % pct_g2)
-    ax.plot(x, fit_c, color="#111111", lw=1.2, ls="--", label="Model  R²=%.3f" % r2)
-    ax.set_xlabel(channel + " (DNA content)")
-    ax.set_ylabel("Count")
-    ax.set_title("Cell cycle · %s · %s" % (model.upper(), a.get("sample") or channel))
-    ax.legend(fontsize=8, framealpha=0.9)
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR, "sfcc_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
-
-    return {"png": png_path, "model": model, "channel": channel,
+    send_progress(i, 0.95, "Done.")
+    return {"model": model, "channel": channel,
             "phases": {"G0G1": round(pct_g1, 2), "S": round(pct_s, 2), "G2M": round(pct_g2, 2)},
             "cvs": {"G0G1": round(cv_g1, 2), "G2M": round(cv_g2, 2)},
             "fit": {"mu_g1": round(float(mu1), 1), "mu_g2": round(float(mu2), 1),
                     "r2": round(r2, 4), "rmse": round(rmse, 2)},
-            # Phase boundaries (data space) so the UI can lay down adjustable INTERVAL gates
-            # G0/G1 = [lo, g1_hi], S = [g1_hi, g2_lo], G2/M = [g2_lo, hi].
             "boundaries": _phase_boundaries(float(mu1), float(sig1), float(mu2), float(sig2),
                                             float(vals.min()), float(vals.max())),
-            # Raw histogram + fitted component curves so the UI can render an INTERACTIVE,
-            # restylable, exportable plot natively (instead of only the static PNG).
             "curves": {"x":     [round(float(v), 3) for v in x],
                        "hist":  [round(float(v), 2) for v in y],
                        "g1":    [round(float(v), 2) for v in g1_c],
@@ -1308,8 +1325,14 @@ def _run_proliferation(i, a):
     if not channel or channel not in pnn:
         raise ValueError("Specify a dye-dilution channel (CFSE / CTV / Ki-67 …).")
     n_peaks = int(a.get("n_peaks", 8))
+    gate_polygons = a.get("gate_polygons")
 
     ev = np.asarray(s.get_events(source="raw"))
+    if gate_polygons:
+        mask = np.ones(len(ev), dtype=bool)
+        for gate in gate_polygons:
+            mask &= _apply_gate_mask(ev, pnn, gate)
+        ev = ev[mask]
     col = pnn.index(channel)
     vals = ev[:, col]
     vals = vals[np.isfinite(vals) & (vals > 0)]     # log space → strictly positive
@@ -1502,51 +1525,11 @@ def _run_stats_comparison(i, a):
         if p < 0.05:
             posthoc = _dunn_posthoc(groups)
 
-    # boxplot with significance annotation
-    fig, ax = plt.subplots(figsize=(max(5, len(names) * 1.3), 5), facecolor="white")
-    ax.set_facecolor("white")
-    bp = ax.boxplot(data, labels=names, patch_artist=True, widths=0.5, showmeans=False)
-    palette = plt.cm.Set2(np.linspace(0, 1, len(names)))
-    for patch, c in zip(bp["boxes"], palette):
-        patch.set_facecolor(c); patch.set_alpha(0.75)
-    for med in bp["medians"]:
-        med.set_color("#222222")
-    # jittered points
-    rng = np.random.default_rng(0)
-    for idx, d in enumerate(data):
-        xs = rng.normal(idx + 1, 0.05, d.size)
-        ax.scatter(xs, d, s=14, c="#333333", alpha=0.6, zorder=3, edgecolors="none")
-    ymax = max(d.max() for d in data)
-    ymin = min(d.min() for d in data)
-    span = (ymax - ymin) or 1.0
-
-    if len(groups) == 2:
-        yb = ymax + span * 0.08
-        ax.plot([1, 1, 2, 2], [yb, yb + span * 0.02, yb + span * 0.02, yb], c="#222", lw=1.1)
-        ax.text(1.5, yb + span * 0.03, _stars(p), ha="center", va="bottom", fontsize=12)
-    else:
-        # bracket significant pairs, stacked
-        level = 0
-        for ph in posthoc:
-            if ph["stars"] == "ns":
-                continue
-            a_name, b_name = ph["pair"].split(" vs ")
-            ia, ib = names.index(a_name) + 1, names.index(b_name) + 1
-            yb = ymax + span * (0.08 + level * 0.10)
-            ax.plot([ia, ia, ib, ib], [yb, yb + span * 0.02, yb + span * 0.02, yb], c="#222", lw=1.0)
-            ax.text((ia + ib) / 2, yb + span * 0.025, ph["stars"], ha="center", va="bottom", fontsize=11)
-            level += 1
-
-    ax.set_ylabel("%s frequency / metric" % gate)
-    ax.set_title("%s  ·  p=%.4g (%s)" % (test, p, _stars(p)))
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR, "sfst_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
-
-    group_summ = [{"name": names[k], "n": int(data[k].size), "median": round(float(np.median(data[k])), 4)}
+    group_summ = [{"name": names[k], "n": int(data[k].size),
+                   "median": round(float(np.median(data[k])), 4),
+                   "values": [round(float(v), 4) for v in data[k].tolist()]}
                   for k in range(len(names))]
-    return {"png": png_path, "test": test, "p_value": round(float(p), 6),
+    return {"test": test, "p_value": round(float(p), 6),
             "stars": _stars(p), "posthoc": posthoc, "groups": group_summ, "gate": gate}
 
 
@@ -1577,6 +1560,7 @@ def _run_apoptosis(i, a):
     pi_ch = a.get("pi_channel")
     if not annexin_ch or not pi_ch:
         raise ValueError("annexin_channel and pi_channel are required.")
+    gate_polygons = a.get("gate_polygons")
 
     s = _sample_by_name(sample)
     events = s.as_dataframe(
@@ -1586,6 +1570,14 @@ def _run_apoptosis(i, a):
         raise ValueError("Channel '%s' not found in sample '%s'." % (annexin_ch, sample))
     if pi_ch not in events.columns:
         raise ValueError("Channel '%s' not found in sample '%s'." % (pi_ch, sample))
+
+    if gate_polygons:
+        pnn = list(events.columns)
+        ev_np = events.values
+        mask = np.ones(len(ev_np), dtype=bool)
+        for gate in gate_polygons:
+            mask &= _apply_gate_mask(ev_np, pnn, gate)
+        events = events[mask]
 
     ann_vals = events[annexin_ch].values.astype(float)
     pi_vals  = events[pi_ch].values.astype(float)
@@ -1695,10 +1687,11 @@ def _run_kinetic(i, a):
 
     a = a or {}
     sample_names = a.get("samples") or [m["name"] for m in STATE["meta"]]
-    channel  = a.get("channel")
-    time_ch  = a.get("time_channel", "Time")
-    bins_n   = int(a.get("bins", 100))
-    grp_map  = a.get("groups") or {}
+    channel       = a.get("channel")
+    time_ch       = a.get("time_channel", "Time")
+    bins_n        = int(a.get("bins", 100))
+    grp_map       = a.get("groups") or {}
+    gate_polygons = a.get("gate_polygons")
 
     if not channel:
         raise ValueError("channel is required.")
@@ -1716,6 +1709,13 @@ def _run_kinetic(i, a):
             continue
         if time_ch not in ev.columns or channel not in ev.columns:
             continue
+        if gate_polygons:
+            pnn = list(ev.columns)
+            ev_np = ev.values
+            mask = np.ones(len(ev_np), dtype=bool)
+            for gate in gate_polygons:
+                mask &= _apply_gate_mask(ev_np, pnn, gate)
+            ev = ev[mask]
         t = ev[time_ch].values.astype(float)
         v = ev[channel].values.astype(float)
         t_min = min(t_min, float(np.nanmin(t)))
@@ -1749,27 +1749,7 @@ def _run_kinetic(i, a):
             "sd":    [round(float(x), 4) for x in sd],
         })
 
-    fig, ax = plt.subplots(figsize=(8, 4.5), facecolor="white")
-    ax.set_facecolor("white")
-    palette = plt.cm.Set2(np.linspace(0, 1, max(len(group_results), 1)))
-    for gr, c in zip(group_results, palette):
-        ts = np.asarray(gr["times"])
-        m  = np.asarray(gr["mfi"])
-        sd = np.asarray(gr["sd"])
-        ok = np.isfinite(m)
-        ax.plot(ts[ok], m[ok], label=gr["name"], color=c, lw=1.8)
-        ax.fill_between(ts[ok], (m - sd)[ok], (m + sd)[ok], color=c, alpha=0.22)
-    ax.set_xlabel(time_ch)
-    ax.set_ylabel("Median %s" % channel)
-    ax.set_title("Kinetic — %s" % channel)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR,
-                            "sfki_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
-    return {"groups": group_results, "png": png_path,
+    return {"groups": group_results,
             "channel": channel, "time_channel": time_ch,
             "bins": bins_n, "n_samples": len(per_sample)}
 
@@ -1781,7 +1761,7 @@ def _run_classifier(i, a):
 
     args: {features:{sample:{feat:value}}, group_labels:{sample:group}}
     Returns {method, components:[{x,y,label,group}], loadings:[{feat,pc1,pc2}],
-             importance:[{feat,value}], png, n_samples, n_features, var_explained}
+             importance:[{feat,value}], top_loading_indices, n_samples, n_features, var_explained}
     """
     import numpy as np
     import matplotlib
@@ -1824,62 +1804,9 @@ def _run_classifier(i, a):
         importance = [{"feat": f, "value": round(float(v), 4)} for f, v in top]
         method = "PCA + Random Forest"
 
-    has_imp = bool(importance)
-    fig = plt.figure(figsize=(12 if has_imp else 7, 5.5), facecolor="white")
-    ax  = fig.add_subplot(1, 2, 1) if has_imp else fig.add_subplot(1, 1, 1)
-    ax.set_facecolor("white")
-
-    groups_present = sorted(set(grp_lbl.get(s, s) for s in sample_names))
-    pal = dict(zip(groups_present,
-                   plt.cm.Set1(np.linspace(0, 0.9, max(len(groups_present), 1)))))
-
-    for j, sname in enumerate(sample_names):
-        g = grp_lbl.get(sname, sname)
-        c = pal.get(g, "#888888")
-        x0 = float(Z[j, 0])
-        y0 = float(Z[j, 1]) if n_comp > 1 else 0.0
-        ax.scatter(x0, y0, color=c, s=60, zorder=3)
-        ax.annotate(sname, (x0, y0), fontsize=7, ha="center", va="bottom",
-                    xytext=(0, 5), textcoords="offset points")
-
-    mag  = np.sqrt(np.sum(L[:, :n_comp] ** 2, axis=1))
-    top8 = np.argsort(mag)[-8:]
-    sc   = (np.abs(Z).max() or 1.0) * 0.85 / max(float(mag.max()), 1e-8)
-    for j in top8:
-        lx = float(L[j, 0]) * sc
-        ly = float(L[j, 1]) * sc if n_comp > 1 else 0.0
-        ax.annotate("", xy=(lx, ly), xytext=(0, 0),
-                    arrowprops=dict(arrowstyle="->", color="#bbb", lw=1.0))
-        ax.text(lx * 1.1, ly * 1.1, feat_names[j], fontsize=6.5, color="#555")
-
     ve = pca.explained_variance_ratio_
-    ax.set_xlabel("PC1 (%.1f%%)" % (ve[0] * 100))
-    ax.set_ylabel("PC2 (%.1f%%)" % ((ve[1] * 100) if n_comp > 1 else 0.0))
-    ax.set_title("Sample PCA Biplot")
-    ax.axhline(0, color="#ddd", lw=0.7)
-    ax.axvline(0, color="#ddd", lw=0.7)
-    for g, c in pal.items():
-        ax.scatter([], [], color=c, label=g, s=40)
-    if len(groups_present) > 1:
-        ax.legend(fontsize=8)
-
-    if has_imp:
-        ax2 = fig.add_subplot(1, 2, 2)
-        ax2.set_facecolor("white")
-        fp = [x["feat"] for x in importance]
-        vp = [x["value"] for x in importance]
-        ax2.barh(range(len(fp)), vp, color="#4C72B0", alpha=0.85)
-        ax2.set_yticks(range(len(fp)))
-        ax2.set_yticklabels(fp, fontsize=7)
-        ax2.set_xlabel("Feature Importance")
-        ax2.set_title("Top Gate Features (RF)")
-        ax2.invert_yaxis()
-
-    fig.tight_layout()
-    png_path = os.path.join(CONTROL_DIR,
-                            "sfcl_%s_%d.png" % (i, int(time.time() * 1000)))
-    fig.savefig(png_path, dpi=120, facecolor="white")
-    plt.close(fig)
+    mag  = np.sqrt(np.sum(L[:, :n_comp] ** 2, axis=1))
+    top8 = np.argsort(mag)[-8:].tolist()
 
     comps_out = [{"x": round(float(Z[j, 0]), 4),
                   "y": round(float(Z[j, 1]) if n_comp > 1 else 0.0, 4),
@@ -1892,7 +1819,7 @@ def _run_classifier(i, a):
                  for j in range(len(feat_names))]
 
     return {"method": method, "components": comps_out, "loadings": loads_out,
-            "importance": importance, "png": png_path,
+            "importance": importance, "top_loading_indices": top8,
             "n_samples": len(sample_names), "n_features": len(feat_names),
             "var_explained": [round(float(v), 4) for v in ve]}
 

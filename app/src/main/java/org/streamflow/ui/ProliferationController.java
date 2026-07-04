@@ -2,6 +2,7 @@ package org.streamflow.ui;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.collections.FXCollections;
@@ -32,7 +33,7 @@ import java.util.regex.Pattern;
  * The engine now returns curve data; this controller renders them in an interactive
  * {@link AnalysisChart} with per-generation toggles, X-zoom, and publication export.
  */
-public class ProliferationController implements ContextAware {
+public class ProliferationController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern DYE = Pattern.compile("CFSE|CTV|CellTrace|Ki.?67|BrdU|VPD|Prolif",
@@ -45,6 +46,8 @@ public class ProliferationController implements ContextAware {
     };
 
     @FXML private ComboBox<String> sampleCombo;
+    @FXML private ComboBox<String> gateCombo;
+    @FXML private Label            gateWarningLabel;
     @FXML private ComboBox<String> channelCombo;
     @FXML private Spinner<Integer> peaksSpinner;
     @FXML private Button refreshButton, runButton, copyButton, exportPngButton, exportSvgButton;
@@ -75,6 +78,7 @@ public class ProliferationController implements ContextAware {
         showHist.setOnAction(e -> chart.setVisible("Histogram", showHist.isSelected()));
         showTotal.setOnAction(e -> chart.setVisible("Model fit", showTotal.isSelected()));
         xZoom.valueProperty().addListener((o, a, b) -> chart.setXMaxFraction(b.doubleValue()));
+        sampleCombo.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> refreshGates(b));
         setDisabled(true);
     }
 
@@ -82,10 +86,12 @@ public class ProliferationController implements ContextAware {
     public void init(AppContext context) {
         this.ctx = context;
         setDisabled(false);
+        ctx.workspace().addTreeChangeListener(() -> refreshGates(sampleCombo.getValue()));
         refreshSamples();
     }
 
     @FXML private void onRefresh() { refreshSamples(); }
+    @Override public void refreshFromWorkspace() { refreshSamples(); }
 
     private void refreshSamples() {
         if (ctx == null) return;
@@ -102,7 +108,38 @@ public class ProliferationController implements ContextAware {
             }
             if (dyeGuess != null) channelCombo.getSelectionModel().select(dyeGuess);
             else if (!channelCombo.getItems().isEmpty()) channelCombo.getSelectionModel().selectFirst();
+            refreshGates(sampleCombo.getValue());
         });
+    }
+
+    // ---- Gate combo ---------------------------------------------------------
+
+    private void refreshGates(String sample) {
+        if (ctx == null || sample == null) return;
+        gateCombo.getItems().clear();
+        gateCombo.getItems().add("Ungated (All Events)");
+        PopNode root = ctx.workspace().treeFor(sample);
+        for (PopNode n : root.selfAndDescendants())
+            if (!n.isRoot()) gateCombo.getItems().add(n.name());
+        gateCombo.getSelectionModel().selectFirst();
+        updateGateWarning();
+    }
+
+    private void updateGateWarning() {
+        boolean noGates = gateCombo.getItems().size() <= 1;
+        gateWarningLabel.setVisible(noGates);
+        gateWarningLabel.setManaged(noGates);
+    }
+
+    private PopNode selectedGateNode() {
+        String sel = gateCombo.getValue();
+        if (sel == null || sel.startsWith("Ungated")) return null;
+        String sample = sampleCombo.getValue();
+        if (sample == null) return null;
+        PopNode root = ctx.workspace().treeFor(sample);
+        for (PopNode n : root.selfAndDescendants())
+            if (!n.isRoot() && n.name().equals(sel)) return n;
+        return null;
     }
 
     @FXML
@@ -112,7 +149,22 @@ public class ProliferationController implements ContextAware {
         a.put("sample", sampleCombo.getValue());
         a.put("channel", channelCombo.getValue());
         a.put("n_peaks", peaksSpinner.getValue());
-        statusLabel.setText("Fitting generations on " + channelCombo.getValue() + "…");
+        PopNode target = selectedGateNode();
+        if (target != null) {
+            ArrayNode polygons = JSON.createArrayNode();
+            for (CytoPlot.Gate g : target.chain()) {
+                ObjectNode gn = JSON.createObjectNode();
+                gn.put("type", g.type); gn.put("x_channel", g.xChan);
+                gn.put("y_channel", g.yChan != null ? g.yChan : "");
+                ArrayNode xs = JSON.createArrayNode(); for (double v : g.xs) xs.add(v);
+                ArrayNode ys = JSON.createArrayNode(); for (double v : g.ys) ys.add(v);
+                gn.set("xs", xs); gn.set("ys", ys);
+                polygons.add(gn);
+            }
+            a.set("gate_polygons", polygons);
+        }
+        String pop = target != null ? target.name() : "All Events";
+        statusLabel.setText("Fitting generations on " + channelCombo.getValue() + " (" + pop + ")…");
         ctx.jobs().run(ctx.bridge().command("run_proliferation", a), this::showResult);
     }
 
@@ -174,20 +226,19 @@ public class ProliferationController implements ContextAware {
 
     @FXML
     private void onCopy() {
-        if (chart.getWidth() <= 0) { statusLabel.setText("Run a fit first."); return; }
-        int dpi = ctx != null ? ctx.settings().exportDpi() : 300;
-        javafx.scene.image.WritableImage img = chart.snapshotAtDpi(dpi);
+        if (ctx == null || chart.getWidth() <= 0) { statusLabel.setText("Run a fit first."); return; }
+        javafx.scene.image.WritableImage img = chart.exportImage(ctx.settings());
         if (img == null) { statusLabel.setText("Nothing to copy — run a fit first."); return; }
         javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
         cc.putImage(img);
         javafx.scene.input.Clipboard.getSystemClipboard().setContent(cc);
-        statusLabel.setText("Copied " + dpi + " DPI proliferation plot — paste into PowerPoint.");
+        statusLabel.setText("Copied " + ctx.settings().exportDpi() + " DPI proliferation plot — paste into PowerPoint.");
     }
 
     @FXML
     private void onExportPng() {
-        int dpi = ctx != null ? ctx.settings().exportDpi() : 300;
-        javafx.scene.image.WritableImage img = chart.snapshotAtDpi(dpi);
+        if (ctx == null) return;
+        javafx.scene.image.WritableImage img = chart.exportImage(ctx.settings());
         if (img == null) { statusLabel.setText("Nothing to export — run a fit first."); return; }
         FileChooser fc = new FileChooser();
         fc.setTitle("Export proliferation plot (PNG)");
@@ -197,7 +248,7 @@ public class ProliferationController implements ContextAware {
         if (f == null) return;
         try {
             ImageIO.write(javafx.embed.swing.SwingFXUtils.fromFXImage(img, null), "png", f);
-            statusLabel.setText("Exported PNG at " + dpi + " DPI → " + f.getName());
+            statusLabel.setText("Exported PNG at " + ctx.settings().exportDpi() + " DPI → " + f.getName());
         } catch (Exception e) {
             statusLabel.setText("PNG export failed: " + e.getMessage());
         }
@@ -227,7 +278,7 @@ public class ProliferationController implements ContextAware {
     }
 
     private void setDisabled(boolean d) {
-        sampleCombo.setDisable(d); channelCombo.setDisable(d);
+        sampleCombo.setDisable(d); gateCombo.setDisable(d); channelCombo.setDisable(d);
         peaksSpinner.setDisable(d); refreshButton.setDisable(d); runButton.setDisable(d);
         copyButton.setDisable(d); exportPngButton.setDisable(d); exportSvgButton.setDisable(d);
     }

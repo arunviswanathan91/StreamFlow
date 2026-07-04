@@ -30,7 +30,7 @@ import java.util.Random;
  * orbitable point cloud via a JavaFX {@link SubScene} + {@link PerspectiveCamera}. Points are
  * subsampled to 50k and coloured by Z (depth) using the shared pseudocolour ramp.
  */
-public class Scatter3DController implements ContextAware {
+public class Scatter3DController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int CAP = 50000;
@@ -62,6 +62,7 @@ public class Scatter3DController implements ContextAware {
     }
 
     @FXML private void onRefresh() { refresh(); }
+    @Override public void refreshFromWorkspace() { refresh(); }
 
     private void refresh() {
         if (ctx == null) return;

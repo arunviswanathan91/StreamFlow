@@ -15,6 +15,7 @@
 <?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
 
 <BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
             fx:controller="org.streamflow.ui.GraphWindowController" styleClass="app-root">
@@ -42,16 +43,21 @@
                             <tooltip><Tooltip text="Name detector channels with their target (CD4 …)"/></tooltip>
                         </Button>
                         <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
-                            <tooltip><Tooltip text="Copy plot image to clipboard (paste into PowerPoint)"/></tooltip>
+                            <tooltip><Tooltip text="Copy plot image to clipboard using the current Copy format"/></tooltip>
+                        </Button>
+                        <Button fx:id="copySettingsButton" onAction="#onCopySettings">
+                            <tooltip><Tooltip text="Copy format — set font, axis, point size &amp; DPI for every Copy (app-wide)"/></tooltip>
                         </Button>
                         <Button fx:id="svgButton" text="SVG" onAction="#onSaveSvg">
                             <tooltip><Tooltip text="Save the plot as an editable SVG vector file"/></tooltip>
                         </Button>
                         <Separator orientation="VERTICAL"/>
-                        <Button fx:id="undoButton" text="↶ Undo" onAction="#onUndo">
+                        <Button fx:id="undoButton" text="Undo" onAction="#onUndo">
+                            <graphic><FontIcon iconLiteral="fas-undo"/></graphic>
                             <tooltip><Tooltip text="Undo the last gate change (Ctrl+Z)"/></tooltip>
                         </Button>
-                        <Button fx:id="redoButton" text="↷ Redo" onAction="#onRedo">
+                        <Button fx:id="redoButton" text="Redo" onAction="#onRedo">
+                            <graphic><FontIcon iconLiteral="fas-redo"/></graphic>
                             <tooltip><Tooltip text="Redo (Ctrl+Y / Ctrl+Shift+Z)"/></tooltip>
                         </Button>
                         <Separator orientation="VERTICAL"/>
@@ -59,7 +65,7 @@
                             <tooltip><Tooltip text="Magnetically snap gate edges to density valleys while gating (off by default)"/></tooltip>
                         </CheckBox>
                         <CheckBox fx:id="confidenceCheck" text="Confidence" selected="false" style="-fx-text-fill:#EAEFF5;">
-                            <tooltip><Tooltip text="Show a green/yellow/red dot per gate by how cleanly its border separates populations (off by default)"/></tooltip>
+                            <tooltip><Tooltip text="Gate fill turns green/yellow/red to show how cleanly the boundary separates populations. Updates live as you move gates (off by default)"/></tooltip>
                         </CheckBox>
                         <CheckBox fx:id="backgateCheck" text="Backgate" selected="false" style="-fx-text-fill:#EAEFF5;">
                             <tooltip><Tooltip text="When on, selecting a descendant population overlays its events (orange) on the current plot instead of drilling in (off by default)"/></tooltip>

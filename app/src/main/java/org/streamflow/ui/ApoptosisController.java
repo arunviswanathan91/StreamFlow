@@ -2,6 +2,7 @@ package org.streamflow.ui;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.beans.property.ReadOnlyStringWrapper;
@@ -25,7 +26,7 @@ import java.util.regex.Pattern;
  * the scatter in a live {@link CytoPlot} with a draggable quadrant crosshair —
  * the four population percentages update instantly as you drag.
  */
-public class ApoptosisController implements ContextAware {
+public class ApoptosisController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern ANNEXIN =
@@ -34,6 +35,8 @@ public class ApoptosisController implements ContextAware {
             Pattern.compile("PI|Propidium|7.?AAD|7AAD|PerCP|EtBr", Pattern.CASE_INSENSITIVE);
 
     @FXML private ComboBox<String> sampleCombo;
+    @FXML private ComboBox<String> gateCombo;
+    @FXML private Label            gateWarningLabel;
     @FXML private ComboBox<String> annexinCombo;
     @FXML private ComboBox<String> piCombo;
     @FXML private Button refreshButton, runButton, copyButton, exportPngButton;
@@ -66,6 +69,7 @@ public class ApoptosisController implements ContextAware {
 
         setAliasDisplay(annexinCombo);
         setAliasDisplay(piCombo);
+        sampleCombo.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> refreshGates(b));
         setDisabled(true);
 
         // Wire the CytoPlot: when user drags the quadrant crosshair, recompute counts live
@@ -86,10 +90,12 @@ public class ApoptosisController implements ContextAware {
         this.ctx = context;
         plot.setChannelLabeler(ch -> ctx.aliases().label(ch));
         setDisabled(false);
+        ctx.workspace().addTreeChangeListener(() -> refreshGates(sampleCombo.getValue()));
         refreshChannels();
     }
 
     @FXML private void onRefresh() { refreshChannels(); }
+    @Override public void refreshFromWorkspace() { refreshChannels(); }
 
     private void refreshChannels() {
         if (ctx == null) return;
@@ -113,7 +119,38 @@ public class ApoptosisController implements ContextAware {
             if (piGuess != null) piCombo.getSelectionModel().select(piGuess);
             else if (channels.size() > 1) piCombo.getSelectionModel().select(1);
             else if (!channels.isEmpty()) piCombo.getSelectionModel().selectFirst();
+            refreshGates(sampleCombo.getValue());
         });
+    }
+
+    // ---- Gate combo ---------------------------------------------------------
+
+    private void refreshGates(String sample) {
+        if (ctx == null || sample == null) return;
+        gateCombo.getItems().clear();
+        gateCombo.getItems().add("Ungated (All Events)");
+        PopNode root = ctx.workspace().treeFor(sample);
+        for (PopNode n : root.selfAndDescendants())
+            if (!n.isRoot()) gateCombo.getItems().add(n.name());
+        gateCombo.getSelectionModel().selectFirst();
+        updateGateWarning();
+    }
+
+    private void updateGateWarning() {
+        boolean noGates = gateCombo.getItems().size() <= 1;
+        gateWarningLabel.setVisible(noGates);
+        gateWarningLabel.setManaged(noGates);
+    }
+
+    private PopNode selectedGateNode() {
+        String sel = gateCombo.getValue();
+        if (sel == null || sel.startsWith("Ungated")) return null;
+        String sample = sampleCombo.getValue();
+        if (sample == null) return null;
+        PopNode root = ctx.workspace().treeFor(sample);
+        for (PopNode n : root.selfAndDescendants())
+            if (!n.isRoot() && n.name().equals(sel)) return n;
+        return null;
     }
 
     @FXML
@@ -128,7 +165,22 @@ public class ApoptosisController implements ContextAware {
         a.put("sample",           sampleCombo.getValue());
         a.put("annexin_channel",  annexinCombo.getValue());
         a.put("pi_channel",       piCombo.getValue());
-        statusLabel.setText("Detecting thresholds and counting quadrants…");
+        PopNode target = selectedGateNode();
+        if (target != null) {
+            ArrayNode polygons = JSON.createArrayNode();
+            for (CytoPlot.Gate g : target.chain()) {
+                ObjectNode gn = JSON.createObjectNode();
+                gn.put("type", g.type); gn.put("x_channel", g.xChan);
+                gn.put("y_channel", g.yChan != null ? g.yChan : "");
+                ArrayNode xs = JSON.createArrayNode(); for (double v : g.xs) xs.add(v);
+                ArrayNode ys = JSON.createArrayNode(); for (double v : g.ys) ys.add(v);
+                gn.set("xs", xs); gn.set("ys", ys);
+                polygons.add(gn);
+            }
+            a.set("gate_polygons", polygons);
+        }
+        String pop = target != null ? target.name() : "All Events";
+        statusLabel.setText("Detecting thresholds on " + pop + "…");
         ctx.jobs().run(ctx.bridge().command("run_apoptosis", a), this::showResult);
     }
 
@@ -252,7 +304,8 @@ public class ApoptosisController implements ContextAware {
     }
 
     private void setDisabled(boolean d) {
-        sampleCombo.setDisable(d); annexinCombo.setDisable(d); piCombo.setDisable(d);
+        sampleCombo.setDisable(d); gateCombo.setDisable(d);
+        annexinCombo.setDisable(d); piCombo.setDisable(d);
         refreshButton.setDisable(d); runButton.setDisable(d);
         copyButton.setDisable(d); exportPngButton.setDisable(d);
     }

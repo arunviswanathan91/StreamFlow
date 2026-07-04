@@ -6,6 +6,7 @@
 <?import javafx.scene.control.Separator?>
 <?import javafx.scene.control.TableColumn?>
 <?import javafx.scene.control.TableView?>
+<?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.VBox?>
 <?import org.kordamp.ikonli.javafx.FontIcon?>
@@ -21,7 +22,15 @@
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Label text="Sample:"/>
-                <ComboBox fx:id="sampleCombo" prefWidth="200.0"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="160.0"/>
+                <Label text="Gate:"/>
+                <ComboBox fx:id="gateCombo" prefWidth="150.0">
+                    <tooltip><Tooltip text="Sub-population to analyse. Gate on Singlets first."/></tooltip>
+                </ComboBox>
+                <Label fx:id="gateWarningLabel" styleClass="subtitle" managed="false" visible="false">
+                    <graphic><FontIcon iconLiteral="fas-exclamation-triangle" iconSize="13" iconColor="#F59E0B"/></graphic>
+                    <tooltip><Tooltip text="No gates found for this sample."/></tooltip>
+                </Label>
                 <Label text="Annexin V channel:"/>
                 <ComboBox fx:id="annexinCombo" prefWidth="160.0"/>
                 <Label text="PI / viability channel:"/>

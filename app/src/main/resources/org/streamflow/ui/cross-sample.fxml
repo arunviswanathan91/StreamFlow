@@ -21,6 +21,7 @@
         <Label text="Cross-Sample Analysis" styleClass="title"/>
         <Label text="Compare gated population frequencies across selected samples: a gate×sample matrix, a per-gate consistency (CV) check, a population radar, and an MFI drift heatmap. Tick the samples to include — events load on demand."
                styleClass="subtitle" wrapText="true"/>
+        <VBox fx:id="hintPane" styleClass="workflow-hints" managed="false" visible="false" spacing="6.0"/>
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Button fx:id="refreshButton" text="Compute" onAction="#onRefresh" styleClass="primary">

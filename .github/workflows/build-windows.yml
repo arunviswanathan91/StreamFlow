@@ -1,16 +1,10 @@
-name: Build Windows Installer
+name: Build Windows Installer (legacy Electron — manual only)
 
-# Triggers:
-#   - Push to the dev branch     → builds + uploads artifact
-#   - Push a tag like v1.0.0     → builds + creates a GitHub Release
-#   - Manual trigger             → builds + uploads artifact
+# ⚠ LEGACY pipeline. This builds the OLD Electron + R/Shiny app and is SUPERSEDED by the JavaFX
+# release pipeline in release.yml. It is now manual-only (workflow_dispatch) so it no longer
+# auto-runs on every push/tag, no longer fails on the JavaFX branch, and no longer collides with
+# the JavaFX release on version tags. Run it by hand only if you still need the Electron build.
 on:
-  push:
-    branches:
-      - 'claude/magical-fermat-6iUmi'
-      - 'main'
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       create_release:

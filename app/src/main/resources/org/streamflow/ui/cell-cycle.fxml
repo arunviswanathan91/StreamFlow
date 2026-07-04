@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
+<?import javafx.geometry.Insets?>
 <?import javafx.scene.control.Button?>
 <?import javafx.scene.control.CheckBox?>
 <?import javafx.scene.control.ComboBox?>
@@ -8,7 +9,6 @@
 <?import javafx.scene.control.Spinner?>
 <?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.layout.HBox?>
-<?import javafx.scene.layout.Priority?>
 <?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
@@ -19,6 +19,8 @@
       fx:controller="org.streamflow.ui.CellCycleController"
       styleClass="content" spacing="8.0">
     <children>
+
+        <!-- Title row -->
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Label text="Cell Cycle Analysis" styleClass="title"/>
@@ -28,66 +30,102 @@
             </children>
         </HBox>
 
+        <!-- Primary inputs row: Sample → Gate → DNA channel  |  Model → Bins → Refresh → Fit -->
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Label text="Sample:"/>
-                <ComboBox fx:id="sampleCombo" prefWidth="180.0"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="160.0">
+                    <tooltip><Tooltip text="FCS file to analyse"/></tooltip>
+                </ComboBox>
+
+                <Label text="Gate:"/>
+                <ComboBox fx:id="gateCombo" prefWidth="170.0">
+                    <tooltip><Tooltip text="Sub-population to fit. Gate on Live, Single Cells before running cell cycle."/></tooltip>
+                </ComboBox>
+                <!-- Warning icon shown when no gates exist for the selected sample -->
+                <Label fx:id="gateWarningLabel" styleClass="subtitle" managed="false" visible="false">
+                    <graphic><FontIcon iconLiteral="fas-exclamation-triangle" iconSize="13" iconColor="#F59E0B"/></graphic>
+                    <tooltip><Tooltip text="No gates found for this sample. For best results, gate on Singlets and Live cells first."/></tooltip>
+                </Label>
+
                 <Label text="DNA channel:"/>
-                <ComboBox fx:id="channelCombo" prefWidth="150.0"/>
+                <ComboBox fx:id="channelCombo" prefWidth="140.0">
+                    <tooltip><Tooltip text="PI / DAPI / 7-AAD / Hoechst / FxCycle channel"/></tooltip>
+                </ComboBox>
+
+                <Region HBox.hgrow="ALWAYS"/>
+
                 <Label text="Model:"/>
-                <ComboBox fx:id="modelCombo"/>
+                <ComboBox fx:id="modelCombo" prefWidth="90.0"/>
                 <Label text="Bins:"/>
-                <Spinner fx:id="binsSpinner" editable="true" prefWidth="100.0"/>
-                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                <Spinner fx:id="binsSpinner" editable="true" prefWidth="88.0"/>
+                <Button fx:id="refreshButton" onAction="#onRefresh">
                     <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                    <tooltip><Tooltip text="Refresh sample and channel lists"/></tooltip>
                 </Button>
                 <Button fx:id="runButton" text="Fit" onAction="#onRun" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-wave-square"/></graphic>
+                    <tooltip><Tooltip text="Fit the selected model to the DNA histogram"/></tooltip>
                 </Button>
             </children>
         </HBox>
 
-        <HBox spacing="10.0" alignment="CENTER_LEFT">
-            <children>
-                <Label text="Show:" styleClass="subtitle"/>
-                <CheckBox fx:id="showHist" text="Histogram" selected="true"/>
-                <CheckBox fx:id="showG1" text="G0/G1" selected="true"/>
-                <CheckBox fx:id="showS" text="S" selected="true"/>
-                <CheckBox fx:id="showG2" text="G2/M" selected="true"/>
-                <CheckBox fx:id="showModel" text="Model" selected="true"/>
-                <Label text="  X-zoom:" styleClass="subtitle"/>
-                <Slider fx:id="xZoom" min="0.1" max="1.0" value="1.0" prefWidth="140.0">
-                    <tooltip><Tooltip text="Shrink the X axis to zoom into the G0/G1 + S region"/></tooltip>
-                </Slider>
-                <Region HBox.hgrow="ALWAYS"/>
-                <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
-                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
-                </Button>
-                <Button fx:id="exportPngButton" text="PNG" onAction="#onExportPng"/>
-                <Button fx:id="exportSvgButton" text="SVG" onAction="#onExportSvg"/>
-            </children>
-        </HBox>
+        <!-- Status line (coloured on poor fit) -->
+        <Label fx:id="statusLabel" text="" styleClass="subtitle" wrapText="true"/>
 
-        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
-
+        <!-- Main content: chart (left, grows) + results panel (right, fixed) -->
         <HBox spacing="12.0" VBox.vgrow="ALWAYS">
             <children>
-                <StackPane HBox.hgrow="ALWAYS" styleClass="plot-pane">
+                <VBox spacing="4.0" HBox.hgrow="ALWAYS">
                     <children>
-                        <AnalysisChart fx:id="chart"/>
+                        <!-- Chart canvas -->
+                        <StackPane VBox.vgrow="ALWAYS" styleClass="plot-pane">
+                            <children>
+                                <AnalysisChart fx:id="chart"/>
+                            </children>
+                        </StackPane>
+
+                        <!-- Visual toggles row — below the chart, not mixed with model params -->
+                        <HBox spacing="10.0" alignment="CENTER_LEFT">
+                            <padding><Insets top="2.0"/></padding>
+                            <children>
+                                <Label text="Show:" styleClass="subtitle"/>
+                                <CheckBox fx:id="showHist"  text="Histogram" selected="true"/>
+                                <CheckBox fx:id="showG1"   text="G0/G1"     selected="true"/>
+                                <CheckBox fx:id="showS"    text="S"          selected="true"/>
+                                <CheckBox fx:id="showG2"   text="G2/M"       selected="true"/>
+                                <CheckBox fx:id="showModel" text="Model"     selected="true"/>
+                                <Label text="  Zoom:" styleClass="subtitle"/>
+                                <Slider fx:id="xZoom" min="0.1" max="1.0" value="1.0" prefWidth="120.0">
+                                    <tooltip><Tooltip text="Drag to zoom in on the G0/G1 + S region. Double-click the chart to reset."/></tooltip>
+                                </Slider>
+                                <Region HBox.hgrow="ALWAYS"/>
+                                <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
+                                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                                </Button>
+                                <Button fx:id="exportPngButton" text="PNG" onAction="#onExportPng"/>
+                                <Button fx:id="exportSvgButton" text="SVG" onAction="#onExportSvg"/>
+                            </children>
+                        </HBox>
                     </children>
-                </StackPane>
+                </VBox>
+
+                <!-- Results panel -->
                 <VBox fx:id="resultsBox" spacing="6.0" prefWidth="230.0">
                     <children>
                         <Label text="Results" styleClass="title"/>
-                        <Label fx:id="g1Label" text="G0/G1: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
-                        <Label fx:id="sLabel" text="S: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
-                        <Label fx:id="g2Label" text="G2/M: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
-                        <Label fx:id="cvLabel" text="CV: —" style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
-                        <Label fx:id="fitLabel" text="" style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
+                        <Label fx:id="g1Label"  text="G0/G1: —" style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="sLabel"   text="S: —"     style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="g2Label"  text="G2/M: —"  style="-fx-text-fill:#EAEFF5; -fx-font-size:14;"/>
+                        <Label fx:id="cvLabel"  text="CV: —"    style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
+                        <Label fx:id="fitLabel" text=""          style="-fx-text-fill:#C7D6E8;" wrapText="true"/>
+                        <Label text="Peak anchors" styleClass="subtitle" style="-fx-padding: 8 0 0 0;"/>
+                        <Label text="Drag the blue (G1) or red (G2) line on the chart to nudge the fit if the auto-detection missed a peak."
+                               styleClass="subtitle" wrapText="true"/>
                     </children>
                 </VBox>
             </children>
         </HBox>
+
     </children>
 </VBox>

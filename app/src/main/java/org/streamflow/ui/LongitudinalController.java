@@ -29,7 +29,7 @@ import java.util.TreeSet;
  * numeric timepoints, one line per subject. Pure-JavaFX over the shared {@link WorkspaceModel}
  * (samples with cached events). Frequencies recompute live from the gating tree.
  */
-public class LongitudinalController implements ContextAware {
+public class LongitudinalController implements ContextAware, Refreshable {
 
     @FXML private ComboBox<String> gateCombo;
     @FXML private Button refreshButton, plotButton;
@@ -71,6 +71,7 @@ public class LongitudinalController implements ContextAware {
     }
 
     @FXML private void onRefresh() { refresh(); }
+    @Override public void refreshFromWorkspace() { refresh(); }
 
     private void refresh() {
         if (ctx == null) return;
