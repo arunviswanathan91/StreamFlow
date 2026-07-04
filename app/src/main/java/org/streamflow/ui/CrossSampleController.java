@@ -6,6 +6,7 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXML;
+import javafx.geometry.Pos;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
@@ -16,9 +17,12 @@ import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
+import org.kordamp.ikonli.javafx.FontIcon;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -33,8 +37,9 @@ import java.util.TreeSet;
  * trees), computes each gate's frequency per sample, and presents four views. Only samples that
  * have been opened (events cached) contribute.
  */
-public class CrossSampleController implements ContextAware {
+public class CrossSampleController implements ContextAware, Refreshable {
 
+    @FXML private VBox hintPane;
     @FXML private Button refreshButton;
     @FXML private Button selectAllButton;
     @FXML private Button selectNoneButton;
@@ -122,9 +127,19 @@ public class CrossSampleController implements ContextAware {
         setDisabled(false);
         syncSampleSelList();
         clearViews("Tick samples on the left, then click Compute.");
+        refreshHints();
+        ctx.workspace().sampleNames().addListener(
+                (javafx.collections.ListChangeListener<String>) c -> refreshHints());
+        ctx.workspace().addTreeChangeListener(this::refreshHints);
     }
 
     @FXML private void onRefresh() { compute(); }
+
+    @Override
+    public void refreshFromWorkspace() {
+        syncSampleSelList();
+        refreshHints();
+    }
     @FXML private void onSelectAll()  { for (SampleSel s : sampleSel) s.use.set(true);  sampleSelectTable.refresh(); }
     @FXML private void onSelectNone() { for (SampleSel s : sampleSel) s.use.set(false); sampleSelectTable.refresh(); }
 
@@ -469,5 +484,74 @@ public class CrossSampleController implements ContextAware {
         driftGateCombo.setDisable(d);
         selectAllButton.setDisable(d);
         selectNoneButton.setDisable(d);
+    }
+
+    // ---- guided UX hints ----------------------------------------------------
+
+    private void refreshHints() {
+        if (hintPane == null || ctx == null) return;
+        hintPane.getChildren().clear();
+        WorkspaceModel ws = ctx.workspace();
+        boolean hasFcs   = !ws.sampleNames().isEmpty();
+        boolean hasGates = hasFcs && anyGatesInWorkspace(ws);
+
+        if (hasFcs && hasGates) {
+            hintPane.setVisible(false);
+            hintPane.setManaged(false);
+            return;
+        }
+
+        if (!hasFcs) {
+            hintPane.getChildren().add(hintRow(false,
+                    "No FCS files loaded — use File ▸ Load FCS… to load your data.",
+                    "Workstation"));
+        } else {
+            hintPane.getChildren().add(hintRow(true,
+                    ws.sampleNames().size() + " sample(s) loaded.", null));
+            hintPane.getChildren().add(hintRow(false,
+                    "No gates drawn — open a sample in a Graph Window (Workstation → double-click) and draw your gating strategy.",
+                    "Workstation"));
+            hintPane.getChildren().add(hintInfoRow(
+                    "Tip: draw gates on one sample, then right-click in the Workstation → Apply to all samples."));
+        }
+
+        hintPane.setVisible(true);
+        hintPane.setManaged(true);
+    }
+
+    private boolean anyGatesInWorkspace(WorkspaceModel ws) {
+        for (String s : ws.sampleNames()) {
+            if (!ws.hasTree(s)) continue;
+            for (PopNode n : ws.treeFor(s).selfAndDescendants()) if (!n.isRoot()) return true;
+        }
+        return false;
+    }
+
+    private HBox hintRow(boolean ok, String text, String navTarget) {
+        HBox row = new HBox(8);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add(ok ? "hint-ok" : "hint-missing");
+        FontIcon icon = new FontIcon(ok ? "fas-check-circle" : "fas-times-circle");
+        icon.setIconSize(14);
+        row.getChildren().addAll(icon, new Label(text));
+        if (!ok && navTarget != null) {
+            Label link = new Label("Go to " + navTarget + " →");
+            link.getStyleClass().add("hint-link");
+            link.setOnMouseClicked(e -> ctx.navigator().accept(navTarget));
+            row.getChildren().add(link);
+        }
+        return row;
+    }
+
+    private HBox hintInfoRow(String text) {
+        HBox row = new HBox(8);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("hint-info");
+        FontIcon icon = new FontIcon("fas-info-circle");
+        icon.setIconSize(14);
+        Label lbl = new Label(text);
+        lbl.setWrapText(true);
+        row.getChildren().addAll(icon, lbl);
+        return row;
     }
 }

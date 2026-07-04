@@ -11,20 +11,41 @@
 #       [-Installer]   also build an .exe/.msi installer (needs WiX on PATH)
 #
 # NOTE: first run needs validation (jpackage classpath + runtime path resolution).
-param([switch]$Installer)
+#
+#   -Installer        build a Windows .exe installer (needs WiX 3.x on PATH) instead of an app-image
+#   -SkipR            build a Python-only fat binary (omit the bundled R runtime / R plugins)
+#   -Version <x.y.z>  app version stamped into the package (default 2.0.0)
+#
+# CI-friendly: if the repo-bundled JDK/Maven are absent it falls back to JAVA_HOME / the `mvn`
+# on PATH, and R is skipped automatically when R-Portable has not been staged.
+param([switch]$Installer, [switch]$SkipR, [string]$Version = "2.0.0")
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path     # app\
 $repo = Split-Path -Parent $here
-$jdk  = Join-Path $repo "jdk-25.0.3+9"
-$mvn  = Join-Path $repo "apache-maven-3.9.16\bin\mvn.cmd"
+
+# Prefer the repo-bundled JDK (local dev); fall back to JAVA_HOME (CI). Either must carry jpackage.
+$jdk = Join-Path $repo "jdk-25.0.3+9"
+if (-not (Test-Path (Join-Path $jdk "bin\jpackage.exe"))) {
+    if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\jpackage.exe"))) {
+        $jdk = $env:JAVA_HOME
+    } else {
+        throw "No JDK with jpackage found. Set JAVA_HOME to a JDK 21+ (with jpackage), or place jdk-25.0.3+9 in the repo."
+    }
+}
+# Prefer the repo-bundled Maven; fall back to `mvn` on PATH (CI / system install).
+$mvn = Join-Path $repo "apache-maven-3.9.16\bin\mvn.cmd"
+if (-not (Test-Path $mvn)) { $mvn = "mvn" }
+
 $env:JAVA_HOME = $jdk
 $env:PATH = "$jdk\bin;$env:PATH"
 $env:MAVEN_OPTS = "-Djavax.net.ssl.trustStoreType=Windows-ROOT -Djavax.net.ssl.trustStore=NUL"
 
+# R is optional: bundle it only when R-Portable has been staged and -SkipR was not passed.
 $rportable = Join-Path $here "target\R-Portable"
-if (-not (Test-Path (Join-Path $rportable "bin\Rscript.exe"))) {
-    throw "R-Portable not staged. Run: powershell -File engine\stage-r-portable.ps1"
+$bundleR = (-not $SkipR) -and (Test-Path (Join-Path $rportable "bin\Rscript.exe"))
+if (-not $bundleR) {
+    Write-Host "R-Portable not bundled (-SkipR or not staged) -> Python-only fat binary; R plugins unavailable."
 }
 
 $pyportable = Join-Path $here "target\python"
@@ -36,7 +57,12 @@ if (-not (Test-Path (Join-Path $pyportable "python.exe"))) {
 Write-Host "Building jar + collecting dependencies…"
 & $mvn -B -f (Join-Path $here "pom.xml") clean package `
     dependency:copy-dependencies "-DoutputDirectory=target/libs" "-DincludeScope=runtime" "-DskipTests=true"
-Copy-Item (Join-Path $here "target\streamflow-2.0.0.jar") (Join-Path $here "target\libs\") -Force
+if ($LASTEXITCODE -ne 0) { throw "Maven build failed (exit $LASTEXITCODE)." }
+# Resolve the built jar by pattern so the script isn't tied to a hard-coded version string.
+$jar = Get-ChildItem (Join-Path $here "target") -Filter "streamflow-*.jar" | Select-Object -First 1
+if (-not $jar) { throw "Built jar not found in target\." }
+$jarName = $jar.Name
+Copy-Item $jar.FullName (Join-Path $here "target\libs\") -Force
 
 # 2) Stage app content (engine scripts + portable Python + R-Portable) next to the launcher.
 #    Excludes engine/vendor (R package SOURCE — only needed at R-Portable stage time)
@@ -46,7 +72,7 @@ if (Test-Path $content) { Remove-Item -Recurse -Force $content }
 New-Item -ItemType Directory -Force -Path $content | Out-Null
 robocopy (Join-Path $repo "engine") (Join-Path $content "engine") /E /XD "vendor" "py-env" "__pycache__" /NFL /NDL /NJH /NJS | Out-Null
 robocopy $pyportable (Join-Path $content "python") /E /NFL /NDL /NJH /NJS | Out-Null
-robocopy $rportable (Join-Path $content "R-Portable") /E /NFL /NDL /NJH /NJS | Out-Null
+if ($bundleR) { robocopy $rportable (Join-Path $content "R-Portable") /E /NFL /NDL /NJH /NJS | Out-Null }
 
 # 3) jpackage app-image (JavaFX runs from the classpath; the openjfx win jars carry natives).
 $dist = Join-Path $here "target\dist"
@@ -56,15 +82,17 @@ Write-Host "Running jpackage ($type)…"
 & (Join-Path $jdk "bin\jpackage.exe") `
     --type $type `
     --name "StreamFLOW" `
-    --app-version "2.0.0" `
+    --app-version $Version `
     --input (Join-Path $here "target\libs") `
-    --main-jar "streamflow-2.0.0.jar" `
+    --main-jar $jarName `
     --main-class "org.streamflow.StreamFlowApp" `
     --app-content $content `
     --icon (Join-Path $repo "build\icon.ico") `
     --dest $dist `
-    --java-options "-Dstreamflow.appDir=`$APPDIR\..\content" `
+    --java-options "-Dstreamflow.appDir=`$APPDIR\content" `
     --java-options "-Dstreamflow.engine.kind=python" `
     --vendor "StreamFLOW"
+if ($LASTEXITCODE -ne 0) { throw "jpackage failed (exit $LASTEXITCODE)." }
 
 Write-Host "Built -> $dist"
+Get-ChildItem $dist | ForEach-Object { Write-Host ("  {0}" -f $_.Name) }

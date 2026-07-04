@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ListView?>
 <?import javafx.scene.control.Menu?>
@@ -8,11 +9,13 @@
 <?import javafx.scene.control.MenuItem?>
 <?import javafx.scene.control.ProgressBar?>
 <?import javafx.scene.control.SeparatorMenuItem?>
+<?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.layout.BorderPane?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
+<?import org.controlsfx.control.ToggleSwitch?>
 
 <BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
             fx:controller="org.streamflow.ui.MainController" styleClass="app-root">
@@ -22,10 +25,12 @@
             <menus>
                 <Menu text="File">
                     <items>
+                        <MenuItem text="New Workspace" onAction="#onNewWorkspace"/>
                         <MenuItem text="Load FCS…" onAction="#onLoadFcs"/>
                         <SeparatorMenuItem/>
                         <MenuItem text="Open Workspace…" onAction="#onOpenWorkspace"/>
-                        <MenuItem text="Save Workspace…" onAction="#onSaveWorkspace"/>
+                        <MenuItem text="Save Workspace" onAction="#onSaveWorkspace"/>
+                        <MenuItem text="Save Workspace As…" onAction="#onSaveWorkspaceAs"/>
                         <SeparatorMenuItem/>
                         <MenuItem text="Settings…" onAction="#onSettings"/>
                         <SeparatorMenuItem/>
@@ -60,6 +65,9 @@
     <bottom>
         <HBox styleClass="statusbar" spacing="10.0">
             <children>
+                <ToggleSwitch fx:id="autoSaveToggle" text="Auto-save" selected="true">
+                    <tooltip><Tooltip text="Slide on to save the workspace automatically every few minutes. Turning it on asks you to choose a file if the workspace hasn't been saved yet."/></tooltip>
+                </ToggleSwitch>
                 <Label fx:id="statusLabel" text="Idle"/>
                 <Region HBox.hgrow="ALWAYS"/>
                 <ProgressBar fx:id="progressBar" prefWidth="180.0" progress="0.0"/>

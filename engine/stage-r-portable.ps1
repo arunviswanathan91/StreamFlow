@@ -9,7 +9,7 @@
 #
 # Slow (compiles/installs ~1 GB of packages). Re-run only when the R deps change.
 param(
-    [string]$RHome = "C:\Program Files\R\R-4.4.2",
+    [string]$RHome = "",   # auto-detected from PATH when empty (CI / r-lib/actions)
     [string]$Dest  = ""
 )
 $ErrorActionPreference = "Stop"
@@ -17,7 +17,19 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path     # engine\
 $repo = Split-Path -Parent $here
 if ($Dest -eq "") { $Dest = Join-Path $repo "app\target\R-Portable" }
 
-if (-not (Test-Path (Join-Path $RHome "bin\Rscript.exe"))) { throw "R not found at $RHome" }
+# Auto-detect R home when not provided: works with both r-lib/actions (CI) and
+# a local R install (dev), handling flat (bin\Rscript.exe) and x64 layouts.
+if ($RHome -eq "") {
+    $rscriptCmd = Get-Command Rscript.exe -ErrorAction SilentlyContinue
+    if (-not $rscriptCmd) { throw "Rscript.exe not found on PATH. Install R or pass -RHome." }
+    $rBin  = Split-Path $rscriptCmd.Source
+    $RHome = if ($rBin -match '\\x64$') { Split-Path (Split-Path $rBin) } else { Split-Path $rBin }
+    Write-Host "Auto-detected R home: $RHome"
+}
+if (-not (Test-Path (Join-Path $RHome "bin\Rscript.exe")) -and
+    -not (Test-Path (Join-Path $RHome "bin\x64\Rscript.exe"))) {
+    throw "R not found at $RHome (no bin\Rscript.exe or bin\x64\Rscript.exe)"
+}
 
 Write-Host "Staging R-Portable -> $Dest"
 if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }

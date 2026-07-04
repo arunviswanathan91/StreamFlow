@@ -31,7 +31,7 @@ import java.util.List;
  * {@link CytoPlot}s, then Apply. The residual diagnostic flags over/under-compensated pairs both
  * in the table and as outlines on the heatmap.
  */
-public class CompensationController implements ContextAware {
+public class CompensationController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -95,6 +95,8 @@ public class CompensationController implements ContextAware {
             if (!sampleCombo.getItems().isEmpty()) sampleCombo.getSelectionModel().selectFirst();
         });
     }
+
+    @Override public void refreshFromWorkspace() { refreshSamples(); }
 
     @FXML
     private void onExtract() {

@@ -47,6 +47,7 @@ public class MainController implements JobRunner {
     @FXML private Label engineLabel;
     @FXML private ProgressBar progressBar;
     @FXML private Button cancelButton;
+    @FXML private org.controlsfx.control.ToggleSwitch autoSaveToggle;
 
     // module name -> view node and controller
     private final Map<String, Node> views = new LinkedHashMap<>();
@@ -59,6 +60,13 @@ public class MainController implements JobRunner {
     private WorkspaceModel workspace;
     private AppContext appCtx;
     private Task<?> currentTask;
+
+    // ---- autosave / unsaved-changes state -----------------------------------
+    private File lastWorkspaceFile;            // where autosave writes (null until first save/open)
+    private boolean autoSaveEnabled = false;   // starts OFF; auto-enables after the first manual save
+    private long sessionStartMs;               // for the 10/30-minute nudges
+    private long lastAutoSaveMs;               // throttle silent saves to ~every 7 min
+    private boolean asked10, asked30;          // each nudge fires at most once per experiment
 
     @FXML
     public void initialize() {
@@ -80,6 +88,7 @@ public class MainController implements JobRunner {
         loadModule("Cross-Sample", "/org/streamflow/ui/cross-sample.fxml");
         loadModule("Longitudinal", "/org/streamflow/ui/longitudinal.fxml");
         loadModule("3D Scatter", "/org/streamflow/ui/scatter3d.fxml");
+        loadModule("Export", "/org/streamflow/ui/export.fxml");
         loadModule("Analysis Log", "/org/streamflow/ui/analysis-log.fxml");
         loadModule("Developer / Engine", "/org/streamflow/ui/devconsole.fxml");
         setupController = (SetupController) controllers.get("Setup");
@@ -91,7 +100,7 @@ public class MainController implements JobRunner {
                 "Dim. Reduction", "Clustering", "Statistics",
                 "Cell Cycle", "Proliferation", "Apoptosis", "Stats Comparison",
                 "Kinetic", "Classifier", "Cross-Sample", "Longitudinal", "3D Scatter",
-                "Analysis Log", "Developer / Engine");
+                "Export", "Analysis Log", "Developer / Engine");
         navList.setItems(names);
         navList.getSelectionModel().selectedItemProperty().addListener((o, prev, sel) -> showModule(sel));
         navList.getSelectionModel().select("Workstation");
@@ -99,6 +108,11 @@ public class MainController implements JobRunner {
         progressBar.setProgress(0);
         cancelButton.setDisable(true);
         cancelButton.setOnAction(e -> { if (currentTask != null && currentTask.isRunning()) currentTask.cancel(); });
+
+        // AutoSave starts OFF — turns on automatically after the first manual workspace save.
+        autoSaveToggle.setSelected(false);
+        autoSaveEnabled = false;
+        autoSaveToggle.selectedProperty().addListener((o, was, on) -> onAutoSaveChanged(on));
     }
 
     private void loadModule(String name, String fxml) {
@@ -122,7 +136,8 @@ public class MainController implements JobRunner {
         this.bridge = bridge;
         this.settings = new AppSettings();
         this.workspace = new WorkspaceModel();
-        AppContext ctx = new AppContext(bridge, this, new ChannelAliases(), workspace, settings, new AuditLog(), new FmoStore());
+        AppContext ctx = new AppContext(bridge, this, new ChannelAliases(), workspace, settings, new AuditLog(), new FmoStore(),
+                name -> Platform.runLater(() -> navList.getSelectionModel().select(name)));
         this.appCtx = ctx;
         for (Object c : controllers.values()) {
             if (c instanceof ContextAware ca) ca.init(ctx);
@@ -131,6 +146,88 @@ public class MainController implements JobRunner {
             cancelButton.setDisable(!busy);
             statusLabel.setText(busy ? "Working…" : "Idle");
         });
+        startAutoSave();
+    }
+
+    // ---- autosave -----------------------------------------------------------
+
+    /** Tick every minute: silent-save to a known file (~every 7 min), else nudge to save (10/30 min). */
+    private void startAutoSave() {
+        sessionStartMs = System.currentTimeMillis();
+        javafx.animation.Timeline t = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(javafx.util.Duration.minutes(1), e -> autoSaveTick()));
+        t.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        t.play();
+    }
+
+    private void autoSaveTick() {
+        if (!autoSaveEnabled || workspace == null || !workspace.isDirty() || bridge == null) return;
+        long now = System.currentTimeMillis();
+        if (lastWorkspaceFile != null) {                 // we know where to write → save silently
+            if (now - lastAutoSaveMs >= 7 * 60_000L) saveWorkspaceTo(lastWorkspaceFile, true, null);
+            return;
+        }
+        // never saved this experiment — gently nudge the user to choose a file
+        long elapsedMin = (now - sessionStartMs) / 60_000L;
+        if (!asked10 && elapsedMin >= 10) {
+            asked10 = true;
+            nudgeSave("Quick one 👀", "It's been 10 minutes and you've got unsaved gates.\nWant to save this workspace?");
+        } else if (!asked30 && elapsedMin >= 30) {
+            asked30 = true;
+            nudgeSave("Still there? 🙂", "30 minutes in and nothing's been saved yet —\ndid you forget to save your work?");
+        }
+    }
+
+    private void nudgeSave(String header, String msg) {
+        javafx.scene.control.Alert a = new javafx.scene.control.Alert(
+                javafx.scene.control.Alert.AlertType.CONFIRMATION, msg,
+                javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
+        a.setTitle("Save workspace?"); a.setHeaderText(header);
+        if (a.showAndWait().orElse(javafx.scene.control.ButtonType.NO) == javafx.scene.control.ButtonType.YES) {
+            onSaveWorkspace();
+        }
+    }
+
+    /** Auto-save switch flipped. ON: if the workspace was never saved, ask for a file now (so silent
+     *  autosave has a target); if it already has a file, the timer saves it at intervals. OFF: stop. */
+    private void onAutoSaveChanged(boolean on) {
+        autoSaveEnabled = on;
+        if (!on) { status("Auto-save off."); return; }
+        boolean hasData = workspace != null && !workspace.sampleNames().isEmpty();
+        if (lastWorkspaceFile == null && hasData) {
+            status("Auto-save on — choose where to save this workspace.");
+            javafx.scene.control.Alert a = new javafx.scene.control.Alert(
+                    javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                    "Auto-save needs a file to write to. Save this workspace now?",
+                    javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
+            a.setTitle("Auto-save"); a.setHeaderText("Save the workspace?");
+            if (a.showAndWait().orElse(javafx.scene.control.ButtonType.NO) == javafx.scene.control.ButtonType.YES) {
+                onSaveWorkspace();
+            }
+        } else {
+            status(lastWorkspaceFile != null
+                    ? "Auto-save on — saving to " + lastWorkspaceFile.getName() + " every few minutes."
+                    : "Auto-save on.");
+        }
+    }
+
+    /** Window close / File ▸ Exit: clean → quit silently; unsaved → offer Save / Don't save / Cancel. */
+    public void confirmCloseAndExit(javafx.stage.WindowEvent ev) {
+        if (workspace == null || !workspace.isDirty()) { Platform.exit(); return; }   // nothing unsaved
+        javafx.scene.control.ButtonType save = new javafx.scene.control.ButtonType("Save");
+        javafx.scene.control.ButtonType discard = new javafx.scene.control.ButtonType("Don't save");
+        javafx.scene.control.Alert a = new javafx.scene.control.Alert(
+                javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                "You have unsaved gating changes.",
+                save, discard, javafx.scene.control.ButtonType.CANCEL);
+        a.setTitle("Close StreamFLOW"); a.setHeaderText("Save before closing?");
+        javafx.scene.control.ButtonType r = a.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
+        if (r == javafx.scene.control.ButtonType.CANCEL) { if (ev != null) ev.consume(); return; }
+        if (r == discard) { Platform.exit(); return; }
+        // Save: write then exit. Known file → silent save then quit; otherwise let the user pick a path.
+        if (ev != null) ev.consume();   // don't close yet; exit only after the save completes
+        if (lastWorkspaceFile != null) saveWorkspaceTo(lastWorkspaceFile, true, Platform::exit);
+        else onSaveWorkspace();         // user picks a file; they can close again afterwards
     }
 
     public void setEngineStatus(String text) {
@@ -188,27 +285,83 @@ public class MainController implements JobRunner {
     @FXML
     private void onOpenWorkspace() {
         if (bridge == null) { status("Engine not ready."); return; }
+        // Guard: if the current experiment has unsaved changes, offer to save it first.
+        if (workspace != null && workspace.isDirty()) {
+            javafx.scene.control.ButtonType save  = new javafx.scene.control.ButtonType("Save");
+            javafx.scene.control.ButtonType discard = new javafx.scene.control.ButtonType("Don't save");
+            javafx.scene.control.Alert ask = new javafx.scene.control.Alert(
+                    javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                    "You have unsaved gating changes. Save before opening another workspace?",
+                    save, discard, javafx.scene.control.ButtonType.CANCEL);
+            ask.setTitle("Unsaved changes"); ask.setHeaderText("Save current workspace?");
+            javafx.scene.control.ButtonType r = ask.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
+            if (r == javafx.scene.control.ButtonType.CANCEL) return;
+            if (r == save) {
+                smartSave();   // overwrite existing file or show Save As for untitled
+                return;        // user re-tries Open Workspace after save completes
+            }
+        }
+        doOpenWorkspace();
+    }
+
+    private void doOpenWorkspace() {
         FileChooser fc = workspaceChooser("Open workspace");
         File f = fc.showOpenDialog(window());
         if (f == null) return;
+        purgeWorkspaceState();
         ObjectNode args = JSON.createObjectNode();
         args.put("file", f.getAbsolutePath().replace('\\', '/'));
         status("Opening " + f.getName() + "…");
         run(bridge.command("load_workspace", args), summary -> {
             if (setupController != null) setupController.populate(summary);
             restoreGates(summary.path("gates"));
+            if (appCtx != null) appCtx.auditLog().restore(summary.path("audit_log"));
+            refreshModules();
+            lastWorkspaceFile = f;
+            if (workspace != null) workspace.markClean();
+            if (!autoSaveEnabled) { autoSaveEnabled = true; autoSaveToggle.setSelected(true); }
+            asked10 = asked30 = false; sessionStartMs = System.currentTimeMillis();
             navList.getSelectionModel().select("Workstation");
             status("Workspace loaded: " + f.getName());
         });
     }
 
+    /** File ▸ New Workspace — saves current if dirty, then purges all state for a clean slate. */
+    @FXML
+    private void onNewWorkspace() {
+        if (workspace != null && workspace.isDirty()) {
+            javafx.scene.control.ButtonType save    = new javafx.scene.control.ButtonType("Save");
+            javafx.scene.control.ButtonType discard = new javafx.scene.control.ButtonType("Don't save");
+            javafx.scene.control.Alert ask = new javafx.scene.control.Alert(
+                    javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                    "You have unsaved gating changes.",
+                    save, discard, javafx.scene.control.ButtonType.CANCEL);
+            ask.setTitle("New Workspace"); ask.setHeaderText("Save before starting fresh?");
+            javafx.scene.control.ButtonType r = ask.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
+            if (r == javafx.scene.control.ButtonType.CANCEL) return;
+            if (r == save) { smartSave(); return; }   // user starts New Workspace again after save
+        }
+        purgeWorkspaceState();
+        status("New workspace — load FCS files to begin.");
+        navList.getSelectionModel().select("Workstation");
+    }
+
+    private File lastFcsDir;   // #20 remember the last folder across loads
+
+    /** File ▸ Load FCS — appends data to the current workspace; never prompts to save or clears state. */
     @FXML
     private void onLoadFcs() {
         if (bridge == null) { status("Engine not ready."); return; }
+        chooseAndLoadFcs();
+    }
+
+    private void chooseAndLoadFcs() {
         javafx.stage.DirectoryChooser dc = new javafx.stage.DirectoryChooser();
         dc.setTitle("Select FCS folder");
+        if (lastFcsDir != null && lastFcsDir.isDirectory()) dc.setInitialDirectory(lastFcsDir);
         File dir = dc.showDialog(window());
         if (dir == null) return;
+        lastFcsDir = dir;
         javafx.scene.control.Alert ask = new javafx.scene.control.Alert(
                 javafx.scene.control.Alert.AlertType.CONFIRMATION,
                 "Search sub-folders for .fcs files too?",
@@ -221,27 +374,109 @@ public class MainController implements JobRunner {
         args.put("recursive", recursive);
         status("Loading FCS from " + dir.getName() + "…");
         run(bridge.command("load_fcs", args), summary -> {
-            if (appCtx != null) appCtx.fmo().clearAll();   // FMO references don't carry across experiments (#18)
-            if (setupController != null) setupController.populate(summary);   // publishes to the workspace
+            if (setupController != null) setupController.populate(summary);   // appends new samples to workspace
+            refreshModules();
+            if (workspace != null) workspace.markDirty();   // new data added → unsaved changes
+            asked10 = asked30 = false; sessionStartMs = System.currentTimeMillis();
             navList.getSelectionModel().select("Workstation");
             status("Loaded FCS from " + dir.getName() + ".");
         });
     }
 
+    /** Wipe all experiment data: trees, events, gates, FMO, autosave target. */
+    private void purgeWorkspaceState() {
+        if (workspace != null) workspace.clearAll();
+        if (appCtx != null) appCtx.fmo().clearAll();
+        lastWorkspaceFile = null;
+        autoSaveEnabled = false;
+        autoSaveToggle.setSelected(false);
+        asked10 = asked30 = false;
+        sessionStartMs = System.currentTimeMillis();
+    }
+
+    /** #31 — re-run each module's workspace-driven refresh after data loads (drops manual Refresh). */
+    private void refreshModules() {
+        for (Object c : controllers.values()) {
+            if (c instanceof Refreshable r) {
+                try { r.refreshFromWorkspace(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /** File ▸ Save Workspace — overwrites the existing file if known; otherwise shows Save As dialog. */
     @FXML
     private void onSaveWorkspace() {
         if (bridge == null) { status("Engine not ready."); return; }
-        FileChooser fc = workspaceChooser("Save workspace");
-        fc.setInitialFileName("experiment.sfw");
+        smartSave();
+    }
+
+    /** File ▸ Save Workspace As — always shows the Save dialog. */
+    @FXML
+    private void onSaveWorkspaceAs() {
+        if (bridge == null) { status("Engine not ready."); return; }
+        FileChooser fc = workspaceChooser("Save workspace as");
+        fc.setInitialFileName(lastWorkspaceFile != null ? lastWorkspaceFile.getName() : "experiment.sfw");
         File f = fc.showSaveDialog(window());
         if (f == null) return;
+        saveWorkspaceTo(f, false, null);
+    }
+
+    /** If we already know where to save, overwrite silently; otherwise show the Save As dialog. */
+    private void smartSave() {
+        if (lastWorkspaceFile != null) {
+            saveWorkspaceTo(lastWorkspaceFile, false, null);
+        } else {
+            onSaveWorkspaceAs();
+        }
+    }
+
+    /** Write the workspace to {@code f}. {@code silent} suppresses the verbose status (used by autosave).
+     *  Runs {@code onDone} on the FX thread after a successful save. */
+    private void saveWorkspaceTo(File f, boolean silent, Runnable onDone) {
+        if (bridge == null) return;
         ObjectNode args = JSON.createObjectNode();
         args.put("file", f.getAbsolutePath().replace('\\', '/'));
         args.set("gates", serializeGates());   // gates live on the Java side; ship them to the .sfw
-        status("Saving " + f.getName() + "…");
-        run(bridge.command("save_workspace", args),
-                r -> status("Workspace saved: " + f.getName() + " ("
-                        + r.path("n_gates").asInt() + " gate(s))."));
+        if (appCtx != null) args.set("audit_log", appCtx.auditLog().toJson(JSON));   // #32b persist the log
+        if (!silent) status("Saving " + f.getName() + "…");
+        run(bridge.command("save_workspace", args), r -> {
+            lastWorkspaceFile = f;
+            lastAutoSaveMs = System.currentTimeMillis();
+            if (workspace != null) workspace.markClean();
+            if (silent) {
+                showAutoSaveToast(f.getName());
+            } else {
+                status("Workspace saved: " + f.getName()
+                        + " (" + r.path("n_gates").asInt() + " gate(s)).");
+                // First manual save → turn autosave on automatically
+                if (!autoSaveEnabled) {
+                    autoSaveEnabled = true;
+                    autoSaveToggle.setSelected(true);
+                }
+            }
+            if (onDone != null) onDone.run();
+        });
+    }
+
+    /** Floating toast shown after a silent auto-save — fades out after ~3.5 s. */
+    private void showAutoSaveToast(String filename) {
+        javafx.scene.control.Label toast = new javafx.scene.control.Label("✓  Auto-saved · " + filename);
+        toast.setStyle(
+                "-fx-background-color: #2E7D32;" +
+                "-fx-text-fill: white;" +
+                "-fx-padding: 6 14 6 14;" +
+                "-fx-background-radius: 6;" +
+                "-fx-font-size: 12px;");
+        javafx.scene.layout.StackPane.setAlignment(toast, javafx.geometry.Pos.BOTTOM_RIGHT);
+        javafx.scene.layout.StackPane.setMargin(toast, new javafx.geometry.Insets(0, 20, 20, 0));
+        contentPane.getChildren().add(toast);
+        javafx.animation.FadeTransition fade = new javafx.animation.FadeTransition(
+                javafx.util.Duration.seconds(2.0), toast);
+        fade.setFromValue(1.0);
+        fade.setToValue(0.0);
+        fade.setDelay(javafx.util.Duration.seconds(1.5));
+        fade.setOnFinished(e -> contentPane.getChildren().remove(toast));
+        fade.play();
     }
 
     // ---- workspace gate (de)serialization -----------------------------------
@@ -317,7 +552,7 @@ public class MainController implements JobRunner {
 
     @FXML
     private void onExit() {
-        Platform.exit();
+        confirmCloseAndExit(null);
     }
 
     @FXML
@@ -486,6 +721,9 @@ public class MainController implements JobRunner {
         fc.setTitle(title);
         fc.getExtensionFilters().add(
                 new FileChooser.ExtensionFilter("StreamFLOW workspace (*.sfw)", "*.sfw"));
+        if (lastWorkspaceFile != null && lastWorkspaceFile.getParentFile() != null
+                && lastWorkspaceFile.getParentFile().isDirectory())
+            fc.setInitialDirectory(lastWorkspaceFile.getParentFile());
         return fc;
     }
 

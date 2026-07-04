@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.Tab?>
+<?import javafx.scene.control.TabPane?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+<?import org.streamflow.ui.AnalysisChart?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.ExportController"
+      styleClass="content" spacing="10.0">
+    <children>
+        <Label text="Export" styleClass="title"/>
+        <Label text="Export statistics as a table, compose graphs (with histogram overlays), or build a gating-strategy figure for slides — all from the gated populations in your workspace."
+               styleClass="subtitle" wrapText="true"/>
+
+        <TabPane VBox.vgrow="ALWAYS" tabClosingPolicy="UNAVAILABLE">
+            <tabs>
+                <!-- ============ DATA EXPORT ============ -->
+                <Tab text="Data Export">
+                    <content>
+                        <HBox spacing="12.0">
+                            <children>
+                                <VBox spacing="6.0" prefWidth="260.0">
+                                    <children>
+                                        <Label text="Samples" styleClass="subtitle"/>
+                                        <HBox spacing="6.0">
+                                            <children>
+                                                <Button fx:id="selAllButton" text="All" onAction="#onSelectAll"/>
+                                                <Button fx:id="selNoneButton" text="None" onAction="#onSelectNone"/>
+                                            </children>
+                                        </HBox>
+                                        <TableView fx:id="sampleTable" prefHeight="180.0">
+                                            <columns>
+                                                <TableColumn fx:id="useCol"  text="Use"    prefWidth="44.0"/>
+                                                <TableColumn fx:id="nameCol" text="Sample" prefWidth="180.0"/>
+                                            </columns>
+                                            <placeholder><Label text="Load FCS first."/></placeholder>
+                                        </TableView>
+                                        <Label text="Statistics" styleClass="subtitle"/>
+                                        <CheckBox fx:id="statParent" text="\% of parent" selected="true"/>
+                                        <CheckBox fx:id="statTotal"  text="\% of total" selected="true"/>
+                                        <CheckBox fx:id="statCount"  text="Event count" selected="true"/>
+                                        <CheckBox fx:id="statMedian" text="Median (MFI) — per channel below"/>
+                                        <CheckBox fx:id="statGeoMean" text="Geometric mean"/>
+                                        <CheckBox fx:id="statCV"      text="CV %"/>
+                                        <Label text="MFI / geomean / CV channels" styleClass="subtitle"/>
+                                        <ListView fx:id="channelList" prefHeight="120.0"/>
+                                    </children>
+                                </VBox>
+                                <VBox spacing="6.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <HBox spacing="8.0" alignment="CENTER_LEFT">
+                                            <children>
+                                                <Button fx:id="computeButton" text="Build table" onAction="#onBuildTable" styleClass="primary">
+                                                    <graphic><FontIcon iconLiteral="fas-table"/></graphic>
+                                                </Button>
+                                                <Separator orientation="VERTICAL"/>
+                                                <Button fx:id="copyTsvButton" text="Copy (TSV)" onAction="#onCopyTsv">
+                                                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                                                </Button>
+                                                <Button fx:id="saveCsvButton" text="Save CSV" onAction="#onSaveCsv">
+                                                    <graphic><FontIcon iconLiteral="fas-file-csv"/></graphic>
+                                                </Button>
+                                                <Label fx:id="dataStatusLabel" text="" styleClass="subtitle"/>
+                                            </children>
+                                        </HBox>
+                                        <TableView fx:id="dataTable" VBox.vgrow="ALWAYS">
+                                            <placeholder><Label text="Pick samples + statistics, then Build table."/></placeholder>
+                                        </TableView>
+                                    </children>
+                                </VBox>
+                            </children>
+                        </HBox>
+                    </content>
+                </Tab>
+
+                <!-- ============ GRAPH EXPORT ============ -->
+                <Tab text="Graph Export">
+                    <content>
+                        <HBox spacing="12.0">
+                            <children>
+                                <VBox spacing="6.0" prefWidth="260.0">
+                                    <children>
+                                        <Label text="Superimposed histogram" styleClass="subtitle"/>
+                                        <Label text="Population:"/>
+                                        <ComboBox fx:id="gePopCombo" maxWidth="Infinity"/>
+                                        <Label text="Channel (X):"/>
+                                        <ComboBox fx:id="geChannelCombo" maxWidth="Infinity"/>
+                                        <Label text="Scale:"/>
+                                        <ComboBox fx:id="geScaleCombo" maxWidth="Infinity"/>
+                                        <CheckBox fx:id="geModalCheck" text="Modal (peak = 1)" selected="true"/>
+                                        <Separator/>
+                                        <Label text="Samples to overlay" styleClass="subtitle"/>
+                                        <HBox spacing="6.0">
+                                            <children>
+                                                <Button fx:id="geSelAllButton" text="All" onAction="#onGeSelectAll"/>
+                                                <Button fx:id="geSelNoneButton" text="None" onAction="#onGeSelectNone"/>
+                                            </children>
+                                        </HBox>
+                                        <TableView fx:id="geSampleTable" VBox.vgrow="ALWAYS">
+                                            <columns>
+                                                <TableColumn fx:id="geUseCol"  text="Use"    prefWidth="44.0"/>
+                                                <TableColumn fx:id="geNameCol" text="Sample" prefWidth="180.0"/>
+                                            </columns>
+                                            <placeholder><Label text="Load FCS first."/></placeholder>
+                                        </TableView>
+                                    </children>
+                                </VBox>
+                                <VBox spacing="6.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <HBox spacing="8.0" alignment="CENTER_LEFT">
+                                            <children>
+                                                <Button fx:id="gePlotButton" text="Plot overlay" onAction="#onGePlot" styleClass="primary">
+                                                    <graphic><FontIcon iconLiteral="fas-chart-area"/></graphic>
+                                                </Button>
+                                                <Separator orientation="VERTICAL"/>
+                                                <Button fx:id="geCopyButton" text="Copy" onAction="#onGeCopy">
+                                                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                                                </Button>
+                                                <Button fx:id="geSavePngButton" text="Save PNG" onAction="#onGeSavePng">
+                                                    <graphic><FontIcon iconLiteral="fas-image"/></graphic>
+                                                </Button>
+                                                <Label fx:id="geStatusLabel" text="" styleClass="subtitle"/>
+                                            </children>
+                                        </HBox>
+                                        <AnalysisChart fx:id="geChart" VBox.vgrow="ALWAYS"/>
+                                    </children>
+                                </VBox>
+                            </children>
+                        </HBox>
+                    </content>
+                </Tab>
+
+                <!-- ============ GATING STRATEGY FIGURE ============ -->
+                <Tab text="Gating Strategy">
+                    <content>
+                        <VBox spacing="8.0">
+                            <children>
+                                <HBox spacing="8.0" alignment="CENTER_LEFT">
+                                    <children>
+                                        <Label text="Sample:"/>
+                                        <ComboBox fx:id="gsSampleCombo" prefWidth="220.0"/>
+                                        <Button fx:id="gsBuildButton" text="Build figure" onAction="#onGsBuild" styleClass="primary">
+                                            <graphic><FontIcon iconLiteral="fas-sitemap"/></graphic>
+                                        </Button>
+                                        <Separator orientation="VERTICAL"/>
+                                        <Button fx:id="gsCopyButton" text="Copy (PPT)" onAction="#onGsCopy">
+                                            <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                                        </Button>
+                                        <Button fx:id="gsSavePngButton" text="Save PNG" onAction="#onGsSavePng">
+                                            <graphic><FontIcon iconLiteral="fas-image"/></graphic>
+                                        </Button>
+                                        <Label fx:id="gsStatusLabel" text="" styleClass="subtitle"/>
+                                    </children>
+                                </HBox>
+                                <Label text="Each step shows a population with the gate(s) drawn on it, in sequence — a ready-to-share strategy figure." styleClass="subtitle" wrapText="true"/>
+                                <ScrollPane fitToHeight="true" VBox.vgrow="ALWAYS" pannable="true">
+                                    <content>
+                                        <HBox fx:id="gsStrip" spacing="6.0" style="-fx-background-color:white; -fx-padding:12;"/>
+                                    </content>
+                                </ScrollPane>
+                            </children>
+                        </VBox>
+                    </content>
+                </Tab>
+            </tabs>
+        </TabPane>
+    </children>
+</VBox>

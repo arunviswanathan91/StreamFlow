@@ -16,7 +16,7 @@ import javafx.scene.control.Spinner;
  * (compensated) fluorescence channels. Channels default to all fluors; the user
  * can restrict the selection.
  */
-public class TransformationController implements ContextAware {
+public class TransformationController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -82,6 +82,8 @@ public class TransformationController implements ContextAware {
         a.getDialogPane().setContent(ta);
         a.showAndWait();
     }
+
+    @Override public void refreshFromWorkspace() { refreshChannels(); }
 
     private void refreshChannels() {
         if (ctx == null) return;

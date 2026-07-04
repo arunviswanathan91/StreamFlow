@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
+<?import javafx.scene.canvas.Canvas?>
 <?import javafx.scene.control.Button?>
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ListView?>
-<?import javafx.scene.control.ScrollPane?>
 <?import javafx.scene.control.Spinner?>
-<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.layout.HBox?>
-<?import javafx.scene.layout.Priority?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
 <?import org.kordamp.ikonli.javafx.FontIcon?>
@@ -20,6 +18,7 @@
         <Label text="Clustering" styleClass="title"/>
         <Label text="FlowSOM or PhenoGraph clustering of a sample's fluorescence channels, with a median-expression heatmap."
                styleClass="subtitle" wrapText="true"/>
+        <VBox fx:id="hintPane" styleClass="workflow-hints" managed="false" visible="false" spacing="6.0"/>
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
                 <Label text="Method:"/>
@@ -36,21 +35,23 @@
                 <Button fx:id="runButton" text="Run" onAction="#onRun" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-th"/></graphic>
                 </Button>
+                <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
+                    <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                </Button>
+                <Button fx:id="exportButton" text="Export PNG" onAction="#onExport">
+                    <graphic><FontIcon iconLiteral="fas-download"/></graphic>
+                </Button>
             </children>
         </HBox>
         <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
         <HBox spacing="10.0" VBox.vgrow="ALWAYS">
             <children>
-                <ScrollPane fitToWidth="true" fitToHeight="true" HBox.hgrow="ALWAYS" styleClass="plot-pane">
-                    <content>
-                        <StackPane>
-                            <children>
-                                <ImageView fx:id="heatmapView"/>
-                            </children>
-                        </StackPane>
-                    </content>
-                </ScrollPane>
-                <VBox spacing="4.0" prefWidth="240.0">
+                <StackPane fx:id="heatmapPane" HBox.hgrow="ALWAYS" VBox.vgrow="ALWAYS" styleClass="plot-pane">
+                    <children>
+                        <Canvas fx:id="heatmapCanvas"/>
+                    </children>
+                </StackPane>
+                <VBox spacing="4.0" prefWidth="220.0">
                     <children>
                         <Label text="Clusters" styleClass="subtitle"/>
                         <ListView fx:id="clusterList" VBox.vgrow="ALWAYS"/>

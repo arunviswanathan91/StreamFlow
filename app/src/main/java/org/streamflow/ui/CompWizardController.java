@@ -56,12 +56,15 @@ public class CompWizardController {
     static final String AUTO = "(auto)";
 
     @FXML private ComboBox<String> fscCombo, sscCombo;
-    @FXML private Button computeButton, useButton, closeButton;
+    @FXML private Button computeButton, useButton, closeButton, scatterResetButton;
     @FXML private TableView<Assignment> assignTable;
     @FXML private TableColumn<Assignment, String> sampleCol, roleCol, detectorCol;
     @FXML private FlowPane histBox;
     @FXML private CompMatrixView wizardHeatmap;
+    @FXML private CytoPlot scatterPlot;
     @FXML private Label statusLabel;
+
+    private EventData scatterData;          // a control's FSC/SSC events, for the cleanup gate
 
     private AppContext ctx;
     private Stage stage;
@@ -172,8 +175,80 @@ public class CompWizardController {
                     "%d file(s): %s%d single-stain, %d ignored. Adjust roles/detectors, then Compute matrix.",
                     samples.size(), unstainedSeen ? "1 unstained, " : "no unstained yet — set one, ",
                     nSingle, nIgnore));
+
+            // load a representative control's FSC/SSC for the interactive size-cleanup gate
+            String ref = firstWithRole(ROLE_UNSTAINED);
+            if (ref == null) ref = firstWithRole(ROLE_SINGLE);
+            if (ref == null && !samples.isEmpty()) ref = samples.get(0);
+            if (ref != null) loadScatter(ref);
         });
     }
+
+    private String firstWithRole(String role) {
+        for (Assignment x : assignments) if (role.equals(x.roleProperty().get())) return x.getSample();
+        return null;
+    }
+
+    /** Load a control's FSC/SSC events and show them with a default central cleanup rectangle. */
+    private void loadScatter(String sample) {
+        if (ctx == null || fscCombo.getValue() == null || sscCombo.getValue() == null) return;
+        ObjectNode args = JSON.createObjectNode();
+        args.put("sample", sample);
+        com.fasterxml.jackson.databind.node.ArrayNode ch = args.putArray("channels");
+        ch.add(fscCombo.getValue()); ch.add(sscCombo.getValue());
+        args.put("n", 60000);
+        ctx.jobs().run(ctx.bridge().command("get_events", args), r -> {
+            try {
+                List<String> chans = new ArrayList<>();
+                r.path("channels").forEach(n -> chans.add(n.asText()));
+                java.nio.file.Path bin = java.nio.file.Paths.get(r.path("file").asText());
+                scatterData = EventData.read(bin, chans, r.path("rows").asInt(), r.path("cols").asInt());
+                try { java.nio.file.Files.deleteIfExists(bin); } catch (Exception ignored) {}
+                scatterPlot.setChannelLabeler(c -> ctx.aliases().label(c));
+                scatterPlot.setData(scatterData);
+                scatterPlot.setView(fscCombo.getValue(), sscCombo.getValue(),
+                        CytoPlot.Scale.LINEAR, CytoPlot.Scale.LINEAR, "pseudocolor");
+                scatterPlot.clearGates();
+                scatterPlot.addGate(defaultCleanupGate());
+            } catch (Exception ex) {
+                statusLabel.setText("Could not load scatter for the cleanup gate: " + ex.getMessage());
+            }
+        });
+    }
+
+    @FXML
+    private void onResetScatterGate() {
+        if (scatterData == null) return;
+        scatterPlot.clearGates();
+        scatterPlot.addGate(defaultCleanupGate());
+        statusLabel.setText("Size-cleanup gate reset to the central population.");
+    }
+
+    /** A rectangle covering the 2nd–98th percentile of FSC × SSC (the main population). */
+    private CytoPlot.Gate defaultCleanupGate() {
+        double[] xr = pctRange(fscCombo.getValue(), 2, 98);
+        double[] yr = pctRange(sscCombo.getValue(), 2, 98);
+        CytoPlot.Gate g = new CytoPlot.Gate("cleanup", "rectangle",
+                fscCombo.getValue(), sscCombo.getValue(),
+                new double[]{xr[0], xr[1]}, new double[]{yr[0], yr[1]});
+        g.border = javafx.scene.paint.Color.web("#00B4D8");
+        return g;
+    }
+
+    private double[] pctRange(String ch, double loPct, double hiPct) {
+        if (scatterData == null) return new double[]{0, 1};
+        int c = scatterData.indexOf(ch);
+        if (c < 0) return new double[]{0, 1};
+        double[] v = new double[scatterData.rows()];
+        for (int i = 0; i < v.length; i++) v[i] = scatterData.get(i, c);
+        java.util.Arrays.sort(v);
+        int lo = (int) Math.max(0, Math.min(v.length - 1, Math.round(loPct / 100.0 * (v.length - 1))));
+        int hi = (int) Math.max(0, Math.min(v.length - 1, Math.round(hiPct / 100.0 * (v.length - 1))));
+        return new double[]{v[lo], v[hi]};
+    }
+
+    private static double minOf(double[] a) { double m = a[0]; for (double x : a) m = Math.min(m, x); return m; }
+    private static double maxOf(double[] a) { double m = a[0]; for (double x : a) m = Math.max(m, x); return m; }
 
     private static void selectMatch(ComboBox<String> combo, List<String> opts, String key) {
         String m = opts.stream().filter(o -> o.toUpperCase().contains(key)).findFirst()
@@ -206,6 +281,15 @@ public class CompWizardController {
         ObjectNode scatter = args.putObject("scatter");
         if (fscCombo.getValue() != null) scatter.put("x", fscCombo.getValue());
         if (sscCombo.getValue() != null) scatter.put("y", sscCombo.getValue());
+        // the user-drawn FSC/SSC cleanup rectangle overrides the engine's percentile box
+        if (!scatterPlot.gates().isEmpty()) {
+            CytoPlot.Gate g = scatterPlot.gates().get(0);
+            if (g.xs != null && g.ys != null && g.xs.length >= 2 && g.ys.length >= 2) {
+                ObjectNode gate = scatter.putObject("gate");
+                gate.put("x_min", minOf(g.xs)); gate.put("x_max", maxOf(g.xs));
+                gate.put("y_min", minOf(g.ys)); gate.put("y_max", maxOf(g.ys));
+            }
+        }
 
         // carry any manual positive/negative split overrides (from dragging a histogram)
         if (!thresholdOverrides.isEmpty()) {

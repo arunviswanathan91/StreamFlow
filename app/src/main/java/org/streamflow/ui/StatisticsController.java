@@ -34,7 +34,7 @@ import java.util.Set;
  * computed natively in Java from the gating tree (so drawn populations like P1 appear). The left list
  * selects which populations to include; events are fetched from the engine on demand and cached.
  */
-public class StatisticsController implements ContextAware {
+public class StatisticsController implements ContextAware, Refreshable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -69,6 +69,7 @@ public class StatisticsController implements ContextAware {
 
     @FXML
     private void onRefresh() { refreshPopulations(); }
+    @Override public void refreshFromWorkspace() { refreshPopulations(); }
 
     private void refreshPopulations() {
         if (ctx == null) return;
