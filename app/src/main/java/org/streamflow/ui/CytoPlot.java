@@ -131,7 +131,7 @@ public class CytoPlot extends Region {
     private int dragVertex = -1;
     private double[] editPressPx;            // pixel position at drag start
     private double[][] editOrigPx;           // gate vertices in pixel space at drag start
-    private Consumer<Gate> onGateChanged, onGateDeleted, onRenameRequest, onColorRequest, onOpenChild, onStatsConfig, onHistoryRequest;
+    private Consumer<Gate> onGateChanged, onGateDeleted, onRenameRequest, onColorRequest, onOpenChild, onStatsConfig, onHistoryRequest, onApplyToAll, onLabelMoved;
     private Consumer<Gate> onGateEditStart;  // fired with old state before any drag edit begins
     private double rotateDragCenterPxX, rotateDragCenterPxY;
     private java.util.function.BiConsumer<Double, Double> onFmoChanged;   // (x,y) when an FMO line is dragged
@@ -142,7 +142,8 @@ public class CytoPlot extends Region {
     private int pointRadius = 0;          // pseudocolor/dot point radius in pixels (0 = single pixel)
     private double axisFontSize = 12;     // axis title / tick label font
     private double labelFontSize = 12;    // gate label font
-    public void setPointRadius(int r) { this.pointRadius = Math.max(0, Math.min(4, r)); invalidate(); }
+    public void setPointRadius(int r) { this.pointRadius = Math.max(0, Math.min(10, r)); invalidate(); }
+    public int getPointRadius() { return pointRadius; }
     public void setAxisFontSize(double s) {
         this.axisFontSize = Math.max(6, s);
         // size the margins to hold the Y-title + tick labels (left) and X-title + tick row (bottom),
@@ -253,6 +254,8 @@ public class CytoPlot extends Region {
     public void setOnOpenChild(Consumer<Gate> c) { this.onOpenChild = c; }
     public void setOnStatsConfig(Consumer<Gate> c) { this.onStatsConfig = c; }
     public void setOnHistoryRequest(Consumer<Gate> c) { this.onHistoryRequest = c; }
+    public void setOnApplyToAll(Consumer<Gate> c) { this.onApplyToAll = c; }
+    public void setOnLabelMoved(Consumer<Gate> c) { this.onLabelMoved = c; }
     public void setChannelLabeler(java.util.function.Function<String, String> f) { this.channelLabeler = f; }
     private java.util.function.Function<String, String> channelLabeler;
     private String chLabel(String ch) { return (channelLabeler == null || ch == null) ? ch : channelLabeler.apply(ch); }
@@ -1591,6 +1594,10 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
             lbl.relocate(a[0] + 3 + gt.lblDx, a[1] + gt.lblDy);
             e.consume();
         });
+        lbl.setOnMouseReleased(e -> {
+            if (onLabelMoved != null) onLabelMoved.accept(gt);   // persist the new offset universally
+            e.consume();
+        });
         lbl.setOnMouseClicked(e -> {
             if (e.getClickCount() == 2 && onRenameRequest != null) onRenameRequest.accept(gt);
             e.consume();
@@ -1945,9 +1952,12 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         color.setOnAction(a -> { if (onColorRequest != null) onColorRequest.accept(g); });
         MenuItem history = new MenuItem("Gate history…");
         history.setOnAction(a -> { if (onHistoryRequest != null) onHistoryRequest.accept(g); });
+        MenuItem applyAll = new MenuItem("Apply gate → all samples");
+        applyAll.setOnAction(a -> { if (onApplyToAll != null) onApplyToAll.accept(g); });
         MenuItem del = new MenuItem("Delete");
         del.setOnAction(a -> deleteSelected());
-        new ContextMenu(open, rename, toPoly, addNode, stats, color, history, new SeparatorMenuItem(), del).show(anchor, screenX, screenY);
+        new ContextMenu(open, rename, toPoly, addNode, stats, color, history,
+                new SeparatorMenuItem(), applyAll, new SeparatorMenuItem(), del).show(anchor, screenX, screenY);
     }
 
     // ---- edit hit-testing & drag application --------------------------------

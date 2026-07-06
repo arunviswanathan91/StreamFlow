@@ -201,7 +201,10 @@ public class WorkstationController implements ContextAware {
     private static String popLabel(PopNode n) {
         if (n.isRoot()) return "All Events" + (n.count >= 0 ? "   —   " + n.count : "");
         String pct = Double.isNaN(n.parentPct) ? "" : String.format("   (%.1f%%)", n.parentPct);
-        return n.name() + (n.count >= 0 ? "   —   " + n.count + pct : "");
+        // "✎ … (edited)" flags a gate changed in a graph window but not yet re-applied to all samples.
+        String editMark = n.edited ? "✎ " : "";
+        String editTail = n.edited ? "   • edited" : "";
+        return editMark + n.name() + (n.count >= 0 ? "   —   " + n.count + pct : "") + editTail;
     }
 
     // ---- context menus -------------------------------------------------------
@@ -409,8 +412,11 @@ public class WorkstationController implements ContextAware {
     private void applyGateToAll(String sample, PopNode n) {
         List<String> others = ctx.workspace().sampleNames().stream().filter(s -> !s.equals(sample)).toList();
         if (others.isEmpty()) { statusLabel.setText("Only one sample — nothing to apply to."); return; }
+        n.edited = false;
         for (String o : others) {
             PopNode root = ctx.workspace().treeFor(o);
+            // Replace an existing same-named top-level gate instead of stacking a duplicate (BUG-15).
+            root.children.removeIf(c -> java.util.Objects.equals(c.name(), n.name()));
             root.children.add(n.cloneTree(root));
         }
         ctx.workspace().notifyTreeChanged();

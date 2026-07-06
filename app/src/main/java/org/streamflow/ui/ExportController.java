@@ -5,15 +5,30 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXML;
+import javafx.geometry.Insets;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
+import javafx.scene.control.Menu;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SelectionMode;
+import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.control.Slider;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.input.MouseButton;
+import javafx.scene.layout.Pane;
+import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+import javafx.scene.shape.Line;
+import javafx.scene.shape.Polygon;
 import javafx.stage.FileChooser;
 
 import java.io.File;
@@ -53,11 +68,59 @@ public class ExportController implements ContextAware, Refreshable {
     @FXML private Label geStatusLabel;
     private final ObservableList<SampleSel> geSamples = FXCollections.observableArrayList();
 
-    // ---- Gating Strategy figure tab ----
+    // ---- Gating Strategy canvas tab ----
     @FXML private javafx.scene.control.ComboBox<String> gsSampleCombo;
     @FXML private Button gsBuildButton, gsCopyButton, gsSavePngButton;
-    @FXML private javafx.scene.layout.HBox gsStrip;
+    @FXML private Button gsAddTextButton, gsZoomFitButton, gsClearCanvasButton;
+    @FXML private ToggleButton gsConnectBtn;
+    @FXML private javafx.scene.control.ComboBox<String> gsArrowStyleCombo;
+    @FXML private Pane gsCanvas;
+    @FXML private ScrollPane gsScrollPane;
     @FXML private Label gsStatusLabel;
+
+    // canvas state
+    private final List<VBox> gsCells = new ArrayList<>();
+    private final java.util.IdentityHashMap<VBox, PopNode> cellPopMap = new java.util.IdentityHashMap<>();
+    private final java.util.IdentityHashMap<VBox, CytoPlot> cellPlotMap = new java.util.IdentityHashMap<>();
+    private static final class GsLink {
+        VBox from, to;
+        GsLink(VBox from, VBox to) { this.from = from; this.to = to; }
+    }
+    private final List<GsLink> gsLinks = new ArrayList<>();
+    private GsLink gsSelectedArrow = null;
+    private final Map<GsLink, List<javafx.scene.Node>> arrowShapesByLink = new java.util.HashMap<>();
+    private boolean gsConnectMode = false;
+    private VBox gsConnectSource = null;
+    private String currentGsSample = null;
+    private javafx.scene.Node gsSelected = null;
+    private final List<javafx.scene.shape.Rectangle> gsHandles = new ArrayList<>();
+    private javafx.scene.shape.Rectangle gsSelectionOutline = null;
+    private final java.util.IdentityHashMap<VBox, Boolean> gsCellBorder = new java.util.IdentityHashMap<>();
+    private final java.util.IdentityHashMap<TextArea, TextStyleState> textStyles = new java.util.IdentityHashMap<>();
+
+    private static final class TextStyleState {
+        boolean bold, italic;
+        boolean showBorder = false;   // PowerPoint-style: no border by default, toggle on demand
+        double fontSize = 13;
+        Color color = Color.BLACK;
+        String toCss() {
+            // Explicit values with units so the inline style reliably beats the .text-area stylesheet
+            // rules (monospace font, dark bg). The .content dark fill is cleared via the .gs-textbox CSS
+            // class instead — inline styles cannot reach that sub-node. See ui-bug-log BUG-07.
+            return "-fx-background-color:transparent; -fx-control-inner-background:transparent;"
+                    + (showBorder ? " -fx-border-color:#AAAAAA; -fx-border-width:1;"
+                                  : " -fx-border-color:transparent; -fx-border-width:1;")
+                    + " -fx-font-family:'System';"
+                    + " -fx-font-size:" + (int) Math.round(fontSize) + "px;"
+                    + " -fx-font-weight:" + (bold ? "bold" : "normal") + ";"
+                    + " -fx-font-style:" + (italic ? "italic" : "normal") + ";"
+                    + " -fx-text-fill:" + toWeb(color) + ";";
+        }
+        private static String toWeb(Color c) {
+            return String.format("#%02X%02X%02X", (int) Math.round(c.getRed() * 255),
+                    (int) Math.round(c.getGreen() * 255), (int) Math.round(c.getBlue() * 255));
+        }
+    }
 
     private final ObservableList<SampleSel> samples = FXCollections.observableArrayList();
     private final ObservableList<String[]> rows = FXCollections.observableArrayList();
@@ -92,14 +155,36 @@ public class ExportController implements ContextAware, Refreshable {
         geScaleCombo.getSelectionModel().select("ArcSinh");
         geChart.setAxisLabels("", "Normalized");
 
+        // Gating Strategy canvas toolbar
+        gsArrowStyleCombo.setItems(FXCollections.observableArrayList(
+                "Solid arrow", "Dashed arrow", "Thick arrow", "Line only"));
+        gsArrowStyleCombo.getSelectionModel().selectFirst();
+        gsCanvas.setOnMousePressed(e -> { if (e.getTarget() == gsCanvas) { clearGsSelection(); clearArrowSelection(); hideGsPopup(); } });
+        gsScrollPane.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, this::onGsKeyPressed);
+
         setDisabled(true);
     }
+
+    private boolean gsTreeListenerAdded = false;
 
     @Override
     public void init(AppContext context) {
         this.ctx = context;
         setDisabled(false);
+        if (!gsTreeListenerAdded) {
+            // Auto-refresh the gating-strategy figure when gates/axes change anywhere (e.g. the user
+            // edits axes in the graph window). See ui-bug-log BUG-10.
+            context.workspace().addTreeChangeListener(this::onWorkspaceTreeChanged);
+            gsTreeListenerAdded = true;
+        }
         refreshFromWorkspace();
+    }
+
+    /** Rebuild the currently-shown figure so it reflects the latest gates/axes from the shared tree. */
+    private void onWorkspaceTreeChanged() {
+        if (ctx == null || currentGsSample == null || gsCells.isEmpty()) return;
+        if (ctx.workspace().data(currentGsSample) == null) return;   // data evicted — don't wipe the figure
+        buildCanvas(currentGsSample);
     }
 
     @Override
@@ -149,7 +234,8 @@ public class ExportController implements ContextAware, Refreshable {
         else if (!ctx.workspace().sampleNames().isEmpty()) gsSampleCombo.getSelectionModel().selectFirst();
     }
 
-    // ---- Gating Strategy figure ----
+    // ---- Gating Strategy canvas ----
+
     @FXML
     private void onGsBuild() {
         if (ctx == null) return;
@@ -159,33 +245,57 @@ public class ExportController implements ContextAware, Refreshable {
             info("No gates", "This sample has no gates. Draw a gating strategy first.");
             return;
         }
+        currentGsSample = sample;
         gsStatusLabel.setText("Loading events…");
-        EventLoader.ensureLoaded(ctx, List.of(sample), gsStatusLabel::setText, () -> buildStrip(sample));
+        EventLoader.ensureLoaded(ctx, List.of(sample), gsStatusLabel::setText, () -> buildCanvas(sample));
     }
 
-    private void buildStrip(String sample) {
+    private void buildCanvas(String sample) {
         WorkspaceModel ws = ctx.workspace();
         EventData root = ws.data(sample);
         if (root == null || root.rows() == 0) { gsStatusLabel.setText("No events for " + sample + "."); return; }
         PopNode rootNode = ws.treeFor(sample);
         List<PopNode> steps = new ArrayList<>();
-        collectSteps(rootNode, steps);                 // populations that carry gates, in tree order
-        gsStrip.getChildren().clear();
+        collectSteps(rootNode, steps);
         if (steps.isEmpty()) { info("No gates", "This sample has no gates to show."); return; }
-        boolean first = true;
-        int built = 0;
-        for (PopNode p : steps) {
+
+        // Clear previous canvas content (panels + arrows), but keep user text boxes
+        gsCanvas.getChildren().removeIf(n -> n.getUserData() instanceof String s &&
+                (s.startsWith("panel") || s.startsWith("arrow")));
+        gsCells.clear();
+        cellPopMap.clear();
+        cellPlotMap.clear();
+        gsLinks.clear();
+        gsSelectedArrow = null;
+        arrowShapesByLink.clear();
+        gsCellBorder.clear();
+        clearGsSelection();
+        hideGsPopup();
+
+        // Auto-layout: place panels left to right, auto-connect adjacent siblings
+        double x = 30, y = 40;
+        final double CELL_W = 240, GAP = 60;
+        for (int i = 0; i < steps.size(); i++) {
+            PopNode p = steps.get(i);
             try {
-                if (!first) gsStrip.getChildren().add(arrowNode());
-                first = false;
-                gsStrip.getChildren().add(stepCell(root, p));
-                built++;
+                VBox cell = makeStepCell(root, p);
+                cell.setLayoutX(x);
+                cell.setLayoutY(y);
+                cell.setUserData("panel:" + i);
+                gsCanvas.getChildren().add(cell);
+                gsCells.add(cell);
+                cellPopMap.put(cell, p);
+                makeGsDraggable(cell, () -> { redrawArrows(); if (gsSelected == cell) repositionHandles(); });
+                makeGsInteractive(cell, p);
+                if (i > 0) gsLinks.add(new GsLink(gsCells.get(i - 1), cell));
+                x += CELL_W + GAP;
             } catch (Exception ex) {
                 gsStatusLabel.setText("Error at step '" + p.name() + "': " + ex.getMessage());
                 return;
             }
         }
-        gsStatusLabel.setText(built + " gating step(s) for " + shortName(sample) + ". Copy (PPT) or Save PNG.");
+        redrawArrows();
+        gsStatusLabel.setText(steps.size() + " step(s) for " + shortName(sample) + ". Drag panels · Double-click to open · Right-click for options.");
     }
 
     private void collectSteps(PopNode n, List<PopNode> out) {
@@ -193,41 +303,619 @@ public class ExportController implements ContextAware, Refreshable {
         for (PopNode c : n.children) collectSteps(c, out);
     }
 
-    /** One figure panel: a population's events (light/publication style) with its child gates drawn. */
-    private javafx.scene.Node stepCell(EventData root, PopNode p) {
+    /** Build one panel VBox: label + CytoPlot, styled for light/publication mode. */
+    private VBox makeStepCell(EventData root, PopNode p) {
         EventData ev = p.isRoot() ? root : subsetFor(root, p);
-        // Use the axes where the child gates were drawn — that is always the correct view for a
-        // gating-strategy panel.  Fall back to the stored view config, then to the node's own gate.
-        String ax = null, ay = null, axs = p.viewXScale, ays = p.viewYScale;
-        if (!p.children.isEmpty()) {
+        // Axis selection — MUST match GraphWindowController.selectNode priority so the panel reflects
+        // whatever the graph window shows: user's stored view (viewX) first, then the axes the child
+        // gates were drawn on (so children render), then this node's own gate axes as a last resort.
+        // See ui-bug-log BUG-06: putting child-gate axes ahead of viewX made axis edits invisible here.
+        String ax = p.viewX, ay = p.viewY, axs = p.viewXScale, ays = p.viewYScale;
+        if (ax == null && !p.children.isEmpty()) {
             CytoPlot.Gate g0 = p.children.get(0).gate;
             if (g0 != null && g0.xChan != null) { ax = g0.xChan; ay = g0.yChan; }
         }
-        if (ax == null) { ax = p.viewX; ay = p.viewY; }
         if (ax == null && !p.isRoot() && p.gate != null) { ax = p.gate.xChan; ay = p.gate.yChan; }
+        // Scale is UNIVERSAL per marker (BUG-11): the workspace-wide scale for the channel wins, so the
+        // figure always matches the graph window. Fall back to stored node scale, then child-parent scale.
+        String axU = ctx.workspace().channelScale(ax);
+        if (axU != null) axs = axU;
+        else if (axs == null && !p.children.isEmpty()) {
+            PopNode firstChild = p.children.get(0);
+            axs = firstChild.parent != null ? firstChild.parent.viewXScale : null;
+        }
+        if (ay != null) { String ayU = ctx.workspace().channelScale(ay); if (ayU != null) ays = ayU; }
         boolean hist = ay == null;
         CytoPlot plot = new CytoPlot();
-        plot.setMinSize(220, 220); plot.setPrefSize(220, 220); plot.setMaxSize(220, 220);
+        plot.setMinSize(120, 120); plot.setPrefSize(220, 220); plot.setMaxSize(500, 500);
         plot.setChannelLabeler(c -> ctx.aliases().label(c));
         plot.setLightMode(true);
         plot.setData(ev);
         plot.setView(ax, hist ? null : ay, scaleOf(axs), scaleOf(ays), hist ? "histogram" : "pseudocolor");
-        for (PopNode c : p.children) if (c.gate != null) plot.addGate(c.gate);
+        for (PopNode c : p.children) if (c.gate != null) {
+            double[] off = ctx.workspace().popLabelOffset(c.name());   // BUG-14: universal label position
+            if (off != null) { c.gate.lblDx = off[0]; c.gate.lblDy = off[1]; }
+            plot.addGate(c.gate);
+        }
         Label cap = new Label((p.isRoot() ? "All Events" : p.name()) + "  (" + ev.rows() + ")");
         cap.setStyle("-fx-text-fill:#1A2330; -fx-font-weight:bold; -fx-font-size:11;");
-        javafx.scene.layout.VBox cell = new javafx.scene.layout.VBox(3, cap, plot);
-        cell.setStyle("-fx-background-color:white;");
+        VBox cell = new VBox(3, cap, plot);
+        cellPlotMap.put(cell, plot);
+        applyCellStyle(cell);
         return cell;
     }
 
-    private javafx.scene.Node arrowNode() {
-        org.kordamp.ikonli.javafx.FontIcon a = new org.kordamp.ikonli.javafx.FontIcon("fas-arrow-right");
-        a.setIconSize(22); a.setIconColor(javafx.scene.paint.Color.web("#444444"));
-        javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(a);
-        box.setAlignment(javafx.geometry.Pos.CENTER);
-        box.setMinWidth(30);
-        box.setStyle("-fx-background-color:white;");
-        return box;
+    /** Panel base style, honouring the per-cell border toggle (default: bordered). */
+    private void applyCellStyle(VBox cell) {
+        boolean border = gsCellBorder.getOrDefault(cell, Boolean.TRUE);
+        cell.setStyle("-fx-background-color:white; -fx-padding:4; -fx-border-width:1; -fx-border-color:"
+                + (border ? "#D0D8E4" : "transparent") + ";");
+    }
+
+    // ---- drag support ----
+
+    /** Shared drag-to-move behaviour for any canvas-resident Region (panel cell or text box). */
+    private void makeGsDraggable(javafx.scene.layout.Region node, Runnable onDragged) {
+        double[] base = new double[4];   // [sceneX, sceneY, layoutX, layoutY] at press
+        node.setOnMousePressed(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) return;
+            if (gsConnectMode) { e.consume(); return; }
+            base[0] = e.getSceneX(); base[1] = e.getSceneY();
+            base[2] = node.getLayoutX(); base[3] = node.getLayoutY();
+            node.toFront();
+            e.consume();
+        });
+        node.setOnMouseDragged(e -> {
+            if (e.getButton() != MouseButton.PRIMARY || gsConnectMode) return;
+            javafx.geometry.Point2D local = gsCanvas.sceneToLocal(e.getSceneX(), e.getSceneY());
+            javafx.geometry.Point2D baseLocal = gsCanvas.sceneToLocal(base[0], base[1]);
+            node.setLayoutX(Math.max(0, base[2] + local.getX() - baseLocal.getX()));
+            node.setLayoutY(Math.max(0, base[3] + local.getY() - baseLocal.getY()));
+            if (onDragged != null) onDragged.run();
+            e.consume();
+        });
+    }
+
+    // ---- selection (shared by panel cells and text boxes) ----
+
+    private void selectGsNode(javafx.scene.Node n) {
+        clearArrowSelection();
+        if (gsSelected == n) { if (n instanceof VBox && gsScrollPane != null) gsScrollPane.requestFocus(); return; }
+        clearGsSelection();
+        gsSelected = n;
+        showResizeHandles(n);
+        // Panels aren't focusable; focus the scroll pane so the Delete-key filter receives keys.
+        if (n instanceof VBox && gsScrollPane != null) gsScrollPane.requestFocus();
+    }
+
+    /** Delete/Backspace removes the selected arrow, text box, or panel (unless a text box is being edited). */
+    private void onGsKeyPressed(javafx.scene.input.KeyEvent e) {
+        if (e.getCode() != javafx.scene.input.KeyCode.DELETE && e.getCode() != javafx.scene.input.KeyCode.BACK_SPACE) return;
+        if (gsSelectedArrow != null) {
+            gsLinks.remove(gsSelectedArrow); gsSelectedArrow = null; redrawArrows(); e.consume(); return;
+        }
+        if (gsSelected instanceof TextArea ta) {
+            if (ta.isEditable()) return;   // actively editing text — let Delete edit, don't remove the box
+            removeGsTextBox(ta); e.consume();
+        } else if (gsSelected instanceof VBox cell) {
+            removeGsPanel(cell); e.consume();
+        }
+    }
+
+    private void clearGsSelection() {
+        gsSelected = null;
+        gsHandles.clear();
+        gsSelectionOutline = null;
+        gsCanvas.getChildren().removeIf(n -> "handle".equals(n.getUserData()));
+    }
+
+    private static final int[][] GS_HANDLE_ALIGN = {{-1,-1},{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0}};
+
+    /** Build the selection outline + 8 resize handles around the selected node, in gsCanvas coordinates. */
+    private void showResizeHandles(javafx.scene.Node n) {
+        gsCanvas.getChildren().removeIf(c -> "handle".equals(c.getUserData()));
+        gsHandles.clear();
+
+        javafx.scene.layout.Region moveTarget;
+        javafx.scene.layout.Region sizeTarget;
+        if (n instanceof VBox cell) {
+            moveTarget = cell;
+            CytoPlot plot = cellPlotMap.get(cell);
+            sizeTarget = plot != null ? plot : cell;
+        } else if (n instanceof javafx.scene.layout.Region r) {
+            moveTarget = r;
+            sizeTarget = r;
+        } else {
+            return;
+        }
+
+        gsSelectionOutline = new javafx.scene.shape.Rectangle();
+        gsSelectionOutline.setUserData("handle");
+        gsSelectionOutline.setFill(Color.TRANSPARENT);
+        gsSelectionOutline.setStroke(Color.web("#1976D2"));
+        gsSelectionOutline.setStrokeWidth(1.5);
+        gsSelectionOutline.setMouseTransparent(true);
+        gsCanvas.getChildren().add(gsSelectionOutline);
+
+        for (int[] align : GS_HANDLE_ALIGN) {
+            javafx.scene.shape.Rectangle h = new javafx.scene.shape.Rectangle(8, 8);
+            h.setFill(Color.web("#1976D2"));
+            h.setUserData("handle");
+            gsHandles.add(h);
+            gsCanvas.getChildren().add(h);
+            wireResizeHandle(h, n, sizeTarget, moveTarget, align[0], align[1]);
+        }
+        repositionHandles();
+    }
+
+    /** Reposition the current selection outline + handles to match gsSelected's live bounds (no node recreation). */
+    private void repositionHandles() {
+        if (gsSelected == null || gsSelectionOutline == null) return;
+        double x = gsSelected.getLayoutX(), y = gsSelected.getLayoutY();
+        double w = gsSelected.getBoundsInLocal().getWidth(), h = gsSelected.getBoundsInLocal().getHeight();
+        gsSelectionOutline.setX(x); gsSelectionOutline.setY(y);
+        gsSelectionOutline.setWidth(w); gsSelectionOutline.setHeight(h);
+        for (int i = 0; i < gsHandles.size() && i < GS_HANDLE_ALIGN.length; i++) {
+            int hAlign = GS_HANDLE_ALIGN[i][0], vAlign = GS_HANDLE_ALIGN[i][1];
+            double hx = x + (hAlign + 1) / 2.0 * w - 4;
+            double hy = y + (vAlign + 1) / 2.0 * h - 4;
+            gsHandles.get(i).setX(hx); gsHandles.get(i).setY(hy);
+        }
+    }
+
+    private static final double GS_TEXT_MIN_W = 40, GS_TEXT_MIN_H = 30, GS_TEXT_MAX = 900;
+
+    private void wireResizeHandle(javafx.scene.shape.Rectangle handle, javafx.scene.Node node,
+                                   javafx.scene.layout.Region sizeTarget, javafx.scene.layout.Region moveTarget,
+                                   int hAlign, int vAlign) {
+        double[] base = new double[6]; // sceneX, sceneY, sizeW, sizeH, moveX, moveY at press
+        handle.setOnMousePressed(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) return;
+            base[0] = e.getSceneX(); base[1] = e.getSceneY();
+            base[2] = sizeTarget.getWidth(); base[3] = sizeTarget.getHeight();
+            base[4] = moveTarget.getLayoutX(); base[5] = moveTarget.getLayoutY();
+            e.consume();
+        });
+        handle.setOnMouseDragged(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) return;
+            javafx.geometry.Point2D cur = gsCanvas.sceneToLocal(e.getSceneX(), e.getSceneY());
+            javafx.geometry.Point2D start = gsCanvas.sceneToLocal(base[0], base[1]);
+            double dx = cur.getX() - start.getX(), dy = cur.getY() - start.getY();
+            boolean isPlot = sizeTarget instanceof CytoPlot;
+            double minW = isPlot ? 120 : GS_TEXT_MIN_W, maxW = isPlot ? 500 : GS_TEXT_MAX;
+            double minH = isPlot ? 120 : GS_TEXT_MIN_H, maxH = isPlot ? 500 : GS_TEXT_MAX;
+            if (hAlign != 0) {
+                double newW = Math.max(minW, Math.min(maxW, base[2] + hAlign * dx));
+                double deltaW = newW - base[2];
+                sizeTarget.setPrefWidth(newW);
+                if (hAlign < 0) moveTarget.setLayoutX(base[4] - deltaW);
+            }
+            if (vAlign != 0) {
+                double newH = Math.max(minH, Math.min(maxH, base[3] + vAlign * dy));
+                double deltaH = newH - base[3];
+                sizeTarget.setPrefHeight(newH);
+                if (vAlign < 0) moveTarget.setLayoutY(base[5] - deltaH);
+            }
+            node.autosize();
+            repositionHandles();
+            redrawArrows();
+            e.consume();
+        });
+    }
+
+    // ---- interactions: double-click + right-click ----
+
+    private void makeGsInteractive(VBox cell, PopNode pop) {
+        CytoPlot plot = cellPlotMap.get(cell);
+        Label cap = (Label) cell.getChildren().get(0);
+
+        // Single primary click on the panel (outside the title) → connect-mode source/target pick, or select.
+        cell.setOnMouseClicked(e -> {
+            if (e.getButton() != MouseButton.PRIMARY || e.getClickCount() != 1) return;
+            if (gsConnectMode) { handleConnectClick(cell); e.consume(); }
+            else { selectGsNode(cell); }
+        });
+
+        // Double-click on the plot body → open graphing window for this population.
+        if (plot != null) {
+            plot.setOnMouseClicked(e -> {
+                if (e.getButton() != MouseButton.PRIMARY || e.getClickCount() < 2) return;
+                if (currentGsSample == null) return;
+                hideGsPopup();
+                PopNode focus = pop.isRoot() ? null : pop;
+                GraphWindowController.openChild(ctx, currentGsSample, focus, true);
+                e.consume();
+            });
+        }
+
+        // Double-click on the title → inline rename (display-only, does not rename the underlying gate).
+        cap.setOnMouseClicked(e -> {
+            if (e.getButton() != MouseButton.PRIMARY || e.getClickCount() < 2) return;
+            startInlineRename(cell, cap);
+            e.consume();
+        });
+
+        // Right-click → context menu
+        ContextMenu cm = buildPanelContextMenu(cell, pop);
+        cell.setOnContextMenuRequested(e -> cm.show(cell, e.getScreenX(), e.getScreenY()));
+    }
+
+    private void startInlineRename(VBox cell, Label cap) {
+        javafx.scene.control.TextField tf = new javafx.scene.control.TextField(cap.getText());
+        tf.setStyle(cap.getStyle());
+        cell.getChildren().set(0, tf);
+        tf.requestFocus();
+        tf.selectAll();
+        boolean[] committed = {false};
+        Runnable commit = () -> {
+            if (committed[0]) return;
+            committed[0] = true;
+            String text = tf.getText();
+            if (text != null && !text.isBlank()) cap.setText(text);
+            if (!cell.getChildren().isEmpty() && cell.getChildren().get(0) == tf) cell.getChildren().set(0, cap);
+        };
+        tf.setOnAction(e -> commit.run());
+        tf.focusedProperty().addListener((o, was, isNow) -> { if (!isNow) commit.run(); });
+        tf.setOnKeyPressed(e -> {
+            if (e.getCode() == javafx.scene.input.KeyCode.ESCAPE) {
+                committed[0] = true;
+                cell.getChildren().set(0, cap);
+            }
+        });
+    }
+
+    private ContextMenu buildPanelContextMenu(VBox cell, PopNode pop) {
+        ContextMenu cm = new ContextMenu();
+
+        MenuItem miOpen = new MenuItem("Open in graphing window");
+        miOpen.setOnAction(e -> {
+            if (currentGsSample == null) return;
+            hideGsPopup();
+            GraphWindowController.openChild(ctx, currentGsSample, pop.isRoot() ? null : pop, true);
+        });
+
+        // Plot style submenu — re-derive axes from the PopNode axes stored in viewX/viewY
+        Menu miStyle = new Menu("Plot style");
+        for (String style : List.of("pseudocolor", "histogram", "dot")) {
+            MenuItem si = new MenuItem(style.substring(0,1).toUpperCase() + style.substring(1));
+            si.setOnAction(ev -> {
+                CytoPlot plot = cellPlotMap.get(cell);
+                if (plot == null) return;
+                String ax = pop.viewX, ay = pop.viewY;
+                if (ax == null && !pop.children.isEmpty()) {
+                    CytoPlot.Gate g0 = pop.children.get(0).gate;
+                    if (g0 != null) { ax = g0.xChan; ay = g0.yChan; }
+                }
+                plot.setView(ax, "histogram".equals(style) ? null : ay,
+                        scaleOf(pop.viewXScale), scaleOf(pop.viewYScale), style);
+            });
+            miStyle.getItems().add(si);
+        }
+
+        // Axis font size slider
+        MenuItem miAxisFont = new MenuItem("Axis label size…");
+        miAxisFont.setOnAction(e -> showSliderPopup(cell, "Axis label size", 8, 24, 12,
+                v -> { CytoPlot p = cellPlotMap.get(cell); if (p != null) p.setAxisFontSize(v); }));
+
+        // Point/dot size, expressed as a percentage of the 0-10px internal radius range
+        MenuItem miDotSize = new MenuItem("Point size…");
+        miDotSize.setOnAction(e -> {
+            CytoPlot p0 = cellPlotMap.get(cell);
+            double initPct = p0 != null ? p0.getPointRadius() / 10.0 * 100.0 : 10.0;
+            showSliderPopup(cell, "Point size (%)", 0, 100, initPct,
+                    v -> { CytoPlot p = cellPlotMap.get(cell); if (p != null) p.setPointRadius((int) Math.round(v / 100.0 * 10)); });
+        });
+
+        // Border toggle (PowerPoint-style — the frame is optional)
+        javafx.scene.control.CheckMenuItem miBorder = new javafx.scene.control.CheckMenuItem("Border");
+        miBorder.setSelected(gsCellBorder.getOrDefault(cell, Boolean.TRUE));
+        miBorder.setOnAction(e -> { gsCellBorder.put(cell, miBorder.isSelected()); applyCellStyle(cell); });
+
+        // Remove this panel
+        MenuItem miRemovePanel = new MenuItem("Remove panel");
+        miRemovePanel.setOnAction(e -> removeGsPanel(cell));
+
+        // Connect from this panel
+        MenuItem miConnect = new MenuItem("Connect from here");
+        miConnect.setOnAction(e -> { gsConnectMode = true; gsConnectSource = cell; gsConnectBtn.setSelected(true);
+            gsStatusLabel.setText("Click a second panel to draw the arrow."); });
+
+        cm.getItems().addAll(miOpen, new SeparatorMenuItem(), miStyle, new SeparatorMenuItem(),
+                miAxisFont, miDotSize, miBorder, new SeparatorMenuItem(), miConnect, miRemovePanel);
+        return cm;
+    }
+
+    private void removeGsPanel(VBox cell) {
+        gsCanvas.getChildren().remove(cell);
+        gsCells.remove(cell);
+        cellPopMap.remove(cell);
+        cellPlotMap.remove(cell);
+        gsCellBorder.remove(cell);
+        gsLinks.removeIf(l -> l.from == cell || l.to == cell);
+        if (gsSelected == cell) clearGsSelection();
+        redrawArrows();
+    }
+
+    // ---- connect mode ----
+
+    @FXML private void onGsConnectToggle() {
+        gsConnectMode = gsConnectBtn.isSelected();
+        gsConnectSource = null;
+        gsStatusLabel.setText(gsConnectMode ? "Click the SOURCE panel, then the TARGET panel." : "");
+    }
+
+    private void handleConnectClick(VBox cell) {
+        if (gsConnectSource == null) {
+            gsConnectSource = cell;
+            cell.setStyle(cell.getStyle() + "-fx-border-color:#2C7FB8; -fx-border-width:2;");
+            gsStatusLabel.setText("Source selected — click target panel.");
+        } else if (gsConnectSource != cell) {
+            gsLinks.add(new GsLink(gsConnectSource, cell));
+            applyCellStyle(gsConnectSource);
+            gsConnectSource = null;
+            gsConnectMode = false;
+            gsConnectBtn.setSelected(false);
+            redrawArrows();
+            gsStatusLabel.setText("Connection added. Right-click an arrow to remove it.");
+        }
+    }
+
+    // ---- arrow drawing ----
+
+    private void redrawArrows() {
+        // Remove all existing arrow shapes (lines, heads, endpoint handles) from canvas
+        gsCanvas.getChildren().removeIf(n -> "arrow".equals(n.getUserData()));
+        arrowShapesByLink.clear();
+        String style = gsArrowStyleCombo.getValue() != null ? gsArrowStyleCombo.getValue() : "Solid arrow";
+        for (GsLink link : gsLinks) {
+            drawArrow(link, style);
+        }
+    }
+
+    private void drawArrow(GsLink link, String style) {
+        VBox from = link.from, to = link.to;
+        double fx = from.getLayoutX() + from.getWidth() / 2;
+        double fy = from.getLayoutY() + from.getHeight() / 2;
+        double tx = to.getLayoutX() + to.getWidth() / 2;
+        double ty = to.getLayoutY() + to.getHeight() / 2;
+
+        // Direction unit vector
+        double len = Math.hypot(tx - fx, ty - fy);
+        if (len < 2) return;
+        double dx = (tx - fx) / len, dy = (ty - fy) / len;
+
+        // Trim line to cell edges
+        double[] fp = edgePoint(from, dx, dy);
+        double[] tp = edgePoint(to, -dx, -dy);
+
+        double headLen = 14, headW = 7;
+        double lineEndX = tp[0] - dx * headLen, lineEndY = tp[1] - dy * headLen;
+
+        boolean selected = link == gsSelectedArrow;
+        Color color = selected ? Color.web("#1976D2") : Color.web("#444444");
+        List<javafx.scene.Node> shapes = new ArrayList<>();
+
+        Line line = new Line(fp[0], fp[1], lineEndX, lineEndY);
+        line.setStroke(color);
+        boolean dashed = style.contains("Dashed");
+        boolean thick = style.contains("Thick");
+        boolean lineOnly = style.contains("Line only");
+        line.setStrokeWidth(selected ? 3 : (thick ? 2.5 : 1.5));
+        if (dashed) line.getStrokeDashArray().addAll(8.0, 5.0);
+        line.setUserData("arrow");
+        line.setOnMouseClicked(e -> { if (e.getButton() == MouseButton.PRIMARY) { selectGsArrow(link); e.consume(); } });
+        line.setOnContextMenuRequested(e -> buildArrowContextMenu(link).show(line, e.getScreenX(), e.getScreenY()));
+        gsCanvas.getChildren().add(line);
+        shapes.add(line);
+
+        if (!lineOnly) {
+            double perpX = -dy, perpY = dx;
+            Polygon head = new Polygon(
+                    tp[0], tp[1],
+                    lineEndX + perpX * headW, lineEndY + perpY * headW,
+                    lineEndX - perpX * headW, lineEndY - perpY * headW);
+            head.setFill(color);
+            head.setUserData("arrow");
+            head.setOnMouseClicked(e -> { if (e.getButton() == MouseButton.PRIMARY) { selectGsArrow(link); e.consume(); } });
+            head.setOnContextMenuRequested(e -> buildArrowContextMenu(link).show(head, e.getScreenX(), e.getScreenY()));
+            gsCanvas.getChildren().add(head);
+            shapes.add(head);
+        }
+
+        if (selected) {
+            javafx.scene.shape.Circle hFrom = new javafx.scene.shape.Circle(fp[0], fp[1], 5, Color.web("#1976D2"));
+            hFrom.setUserData("arrow");
+            wireArrowEndpointHandle(hFrom, link, true);
+            gsCanvas.getChildren().add(hFrom);
+            shapes.add(hFrom);
+
+            javafx.scene.shape.Circle hTo = new javafx.scene.shape.Circle(tp[0], tp[1], 5, Color.web("#1976D2"));
+            hTo.setUserData("arrow");
+            wireArrowEndpointHandle(hTo, link, false);
+            gsCanvas.getChildren().add(hTo);
+            shapes.add(hTo);
+        }
+
+        arrowShapesByLink.put(link, shapes);
+    }
+
+    private void selectGsArrow(GsLink link) {
+        clearGsSelection();
+        gsSelectedArrow = link;
+        redrawArrows();
+    }
+
+    private void clearArrowSelection() {
+        if (gsSelectedArrow != null) { gsSelectedArrow = null; redrawArrows(); }
+    }
+
+    private ContextMenu buildArrowContextMenu(GsLink link) {
+        ContextMenu cm = new ContextMenu();
+        MenuItem miDelete = new MenuItem("Delete arrow");
+        miDelete.setOnAction(e -> {
+            gsLinks.remove(link);
+            if (gsSelectedArrow == link) gsSelectedArrow = null;
+            redrawArrows();
+        });
+        cm.getItems().add(miDelete);
+        return cm;
+    }
+
+    /** Drag an arrow endpoint onto a different panel to relink it; snaps back if dropped on empty space. */
+    private void wireArrowEndpointHandle(javafx.scene.shape.Circle handle, GsLink link, boolean isFromEnd) {
+        handle.setOnMousePressed(e -> { if (e.getButton() == MouseButton.PRIMARY) e.consume(); });
+        handle.setOnMouseDragged(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) return;
+            javafx.geometry.Point2D p = gsCanvas.sceneToLocal(e.getSceneX(), e.getSceneY());
+            handle.setCenterX(p.getX()); handle.setCenterY(p.getY());
+            e.consume();
+        });
+        handle.setOnMouseReleased(e -> {
+            javafx.geometry.Point2D p = gsCanvas.sceneToLocal(e.getSceneX(), e.getSceneY());
+            VBox target = findCellAt(p.getX(), p.getY());
+            VBox other = isFromEnd ? link.to : link.from;
+            if (target != null && target != other) {
+                if (isFromEnd) link.from = target; else link.to = target;
+            }
+            redrawArrows();
+            e.consume();
+        });
+    }
+
+    private VBox findCellAt(double x, double y) {
+        for (VBox c : gsCells) {
+            if (x >= c.getLayoutX() && x <= c.getLayoutX() + c.getWidth()
+                    && y >= c.getLayoutY() && y <= c.getLayoutY() + c.getHeight()) return c;
+        }
+        return null;
+    }
+
+    /** Compute the point on a cell's bounding-box edge in direction (dx,dy) from its center. */
+    private double[] edgePoint(VBox cell, double dx, double dy) {
+        double cx = cell.getLayoutX() + cell.getWidth() / 2;
+        double cy = cell.getLayoutY() + cell.getHeight() / 2;
+        double hw = cell.getWidth() / 2 + 4, hh = cell.getHeight() / 2 + 4;
+        double tx = dx != 0 ? hw / Math.abs(dx) : Double.MAX_VALUE;
+        double ty = dy != 0 ? hh / Math.abs(dy) : Double.MAX_VALUE;
+        double t = Math.min(tx, ty);
+        return new double[]{cx + dx * t, cy + dy * t};
+    }
+
+    // ---- text box ----
+
+    @FXML private void onGsAddText() {
+        TextArea ta = new TextArea("Label text");
+        ta.setPrefSize(180, 60);
+        ta.setWrapText(true);
+        TextStyleState state = new TextStyleState();
+        textStyles.put(ta, state);
+        ta.getStyleClass().add("gs-textbox");
+        ta.setStyle(state.toCss());
+        ta.setLayoutX(80); ta.setLayoutY(340);
+        ta.setUserData("textbox");
+        // PowerPoint-style: single click selects (shows handles); double-click enters text editing.
+        // Staying out of edit mode until double-click is what lets the Delete key remove the box.
+        ta.setEditable(false);
+        makeGsDraggable(ta, () -> { if (gsSelected == ta) repositionHandles(); });
+        ta.setOnMouseClicked(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) return;
+            if (e.getClickCount() >= 2) { ta.setEditable(true); ta.requestFocus(); }
+            else selectGsNode(ta);
+        });
+        ta.focusedProperty().addListener((o, was, isNow) -> { if (!isNow) ta.setEditable(false); });
+        // Right-click for formatting
+        ContextMenu tcm = buildTextContextMenu(ta);
+        ta.setOnContextMenuRequested(e -> tcm.show(ta, e.getScreenX(), e.getScreenY()));
+        gsCanvas.getChildren().add(ta);
+        selectGsNode(ta);
+        gsStatusLabel.setText("Text box added — click to select, double-click to edit, Del to remove.");
+    }
+
+    private ContextMenu buildTextContextMenu(TextArea ta) {
+        TextStyleState state = textStyles.get(ta);
+        ContextMenu cm = new ContextMenu();
+        javafx.scene.control.CheckMenuItem miBold = new javafx.scene.control.CheckMenuItem("Bold");
+        miBold.setSelected(state.bold);
+        miBold.setOnAction(e -> { state.bold = miBold.isSelected(); ta.setStyle(state.toCss()); });
+        javafx.scene.control.CheckMenuItem miItalic = new javafx.scene.control.CheckMenuItem("Italic");
+        miItalic.setSelected(state.italic);
+        miItalic.setOnAction(e -> { state.italic = miItalic.isSelected(); ta.setStyle(state.toCss()); });
+        MenuItem miFontSize = new MenuItem("Font size…");
+        miFontSize.setOnAction(e -> showSliderPopup(ta, "Font size", 8, 36, state.fontSize,
+                v -> { state.fontSize = v; ta.setStyle(state.toCss()); }));
+        javafx.scene.control.ColorPicker picker = new javafx.scene.control.ColorPicker(state.color);
+        picker.valueProperty().addListener((o, ov, nv) -> { state.color = nv; ta.setStyle(state.toCss()); });
+        javafx.scene.control.CustomMenuItem miColor = new javafx.scene.control.CustomMenuItem(picker, false);
+        javafx.scene.control.CheckMenuItem miBorder = new javafx.scene.control.CheckMenuItem("Border");
+        miBorder.setSelected(state.showBorder);
+        miBorder.setOnAction(e -> { state.showBorder = miBorder.isSelected(); ta.setStyle(state.toCss()); });
+        MenuItem miRemove = new MenuItem("Remove");
+        miRemove.setOnAction(e -> removeGsTextBox(ta));
+        cm.getItems().addAll(miBold, miItalic, miFontSize, new SeparatorMenuItem(),
+                miColor, miBorder, new SeparatorMenuItem(), miRemove);
+        return cm;
+    }
+
+    private void removeGsTextBox(TextArea ta) {
+        gsCanvas.getChildren().remove(ta);
+        textStyles.remove(ta);
+        if (gsSelected == ta) clearGsSelection();
+    }
+
+    // ---- canvas toolbar actions ----
+
+    @FXML private void onGsZoomFit() {
+        if (gsCells.isEmpty() || gsScrollPane == null) return;
+        double maxX = 0, maxY = 0;
+        for (VBox c : gsCells) { maxX = Math.max(maxX, c.getLayoutX() + c.getWidth()); maxY = Math.max(maxY, c.getLayoutY() + c.getHeight()); }
+        double vpW = gsScrollPane.getWidth() - 20, vpH = gsScrollPane.getHeight() - 20;
+        if (maxX > 0 && maxY > 0 && vpW > 0 && vpH > 0) {
+            double scale = Math.min(vpW / (maxX + 30), vpH / (maxY + 30));
+            gsCanvas.setScaleX(scale); gsCanvas.setScaleY(scale);
+        }
+    }
+
+    @FXML private void onGsClearCanvas() {
+        gsCanvas.getChildren().clear();
+        gsCells.clear(); cellPopMap.clear(); cellPlotMap.clear(); gsLinks.clear();
+        textStyles.clear();
+        gsCellBorder.clear();
+        gsSelected = null;
+        gsHandles.clear();
+        gsSelectionOutline = null;
+        gsSelectedArrow = null;
+        arrowShapesByLink.clear();
+        hideGsPopup();
+        gsStatusLabel.setText("Canvas cleared.");
+    }
+
+    // ---- slider popup helper ----
+
+    private javafx.scene.control.PopupControl gsOpenPopup;
+
+    private void hideGsPopup() {
+        if (gsOpenPopup != null) { gsOpenPopup.hide(); gsOpenPopup = null; }
+    }
+
+    private void showSliderPopup(javafx.scene.Node anchor, String title, double min, double max, double init,
+                                  java.util.function.DoubleConsumer onChange) {
+        hideGsPopup();
+        Slider slider = new Slider(min, max, init);
+        slider.setShowTickLabels(true); slider.setShowTickMarks(true);
+        slider.setMajorTickUnit((max - min) / 4);
+        slider.valueProperty().addListener((o, ov, nv) -> onChange.accept(nv.doubleValue()));
+        VBox box = new VBox(6, new Label(title), slider);
+        box.setPadding(new Insets(10));
+        box.setStyle("-fx-background-color:#1A2330; -fx-background-radius:6;");
+        javafx.scene.control.PopupControl popup = new javafx.scene.control.PopupControl();
+        popup.getScene().setRoot(box);
+        popup.setAutoHide(true);
+        popup.setOnAutoHide(e -> { if (gsOpenPopup == popup) gsOpenPopup = null; });
+        box.setOnKeyPressed(e -> { if (e.getCode() == javafx.scene.input.KeyCode.ESCAPE) popup.hide(); });
+        gsOpenPopup = popup;
+        javafx.geometry.Bounds b = anchor.localToScreen(anchor.getBoundsInLocal());
+        if (b != null) popup.show(anchor, b.getMinX(), b.getMaxY() + 4);
+        javafx.application.Platform.runLater(slider::requestFocus);
     }
 
     private static CytoPlot.Scale scaleOf(String s) {
@@ -239,7 +927,7 @@ public class ExportController implements ContextAware, Refreshable {
 
     @FXML
     private void onGsCopy() {
-        javafx.scene.image.WritableImage img = snapStrip();
+        javafx.scene.image.WritableImage img = snapCanvas();
         if (img == null) { gsStatusLabel.setText("Build the figure first."); return; }
         javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
         cc.putImage(img);
@@ -250,13 +938,13 @@ public class ExportController implements ContextAware, Refreshable {
 
     @FXML
     private void onGsSavePng() {
-        javafx.scene.image.WritableImage img = snapStrip();
+        javafx.scene.image.WritableImage img = snapCanvas();
         if (img == null) { gsStatusLabel.setText("Build the figure first."); return; }
         FileChooser fc = new FileChooser();
         fc.setTitle("Save gating-strategy figure (PNG)");
         fc.setInitialFileName("gating_strategy.png");
         fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("PNG image (*.png)", "*.png"));
-        File f = fc.showSaveDialog(gsStrip.getScene().getWindow());
+        File f = fc.showSaveDialog(gsCanvas.getScene().getWindow());
         if (f == null) return;
         try {
             javax.imageio.ImageIO.write(javafx.embed.swing.SwingFXUtils.fromFXImage(img, null), "png", f);
@@ -266,14 +954,27 @@ public class ExportController implements ContextAware, Refreshable {
         }
     }
 
-    /** Snapshot the whole figure strip at the export DPI, white background (publication-ready). */
-    private javafx.scene.image.WritableImage snapStrip() {
-        if (gsStrip == null || gsStrip.getChildren().isEmpty()) return null;
+    /** Snapshot just the content area (panels + arrows) for Copy / Save PNG. */
+    private javafx.scene.image.WritableImage snapCanvas() {
+        clearGsSelection();
+        if (gsCanvas == null || gsCanvas.getChildren().isEmpty()) return null;
+        // Temporarily reset canvas scale for full-res snapshot
+        double sx = gsCanvas.getScaleX(), sy = gsCanvas.getScaleY();
+        gsCanvas.setScaleX(1); gsCanvas.setScaleY(1);
         double scale = Math.max(1.0, (ctx != null ? ctx.settings().exportDpi() : 300) / 96.0);
         javafx.scene.SnapshotParameters sp = new javafx.scene.SnapshotParameters();
         sp.setFill(javafx.scene.paint.Color.WHITE);
         sp.setTransform(javafx.scene.transform.Transform.scale(scale, scale));
-        return gsStrip.snapshot(sp, null);
+        // Compute tight bounding box around content
+        double maxX = 0, maxY = 0;
+        for (javafx.scene.Node n : gsCanvas.getChildren()) {
+            maxX = Math.max(maxX, n.getLayoutX() + n.getBoundsInParent().getWidth());
+            maxY = Math.max(maxY, n.getLayoutY() + n.getBoundsInParent().getHeight());
+        }
+        sp.setViewport(new javafx.geometry.Rectangle2D(0, 0, maxX + 20, maxY + 20));
+        javafx.scene.image.WritableImage img = gsCanvas.snapshot(sp, null);
+        gsCanvas.setScaleX(sx); gsCanvas.setScaleY(sy);
+        return img;
     }
 
     @FXML private void onGeSelectAll()  { for (SampleSel s : geSamples) s.use.set(true);  geSampleTable.refresh(); }

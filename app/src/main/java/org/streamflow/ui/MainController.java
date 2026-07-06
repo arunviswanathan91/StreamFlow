@@ -318,6 +318,10 @@ public class MainController implements JobRunner {
         run(bridge.command("load_workspace", args), summary -> {
             if (setupController != null) setupController.populate(summary);
             restoreGates(summary.path("gates"));
+            if (workspace != null) {
+                workspace.seedChannelScalesFromTrees();       // BUG-11: restore per-marker scales
+                workspace.seedPopLabelOffsetsFromTrees();     // BUG-14: restore per-population label positions
+            }
             if (appCtx != null) appCtx.auditLog().restore(summary.path("audit_log"));
             refreshModules();
             lastWorkspaceFile = f;
@@ -395,6 +399,7 @@ public class MainController implements JobRunner {
         autoSaveToggle.setSelected(false);
         asked10 = asked30 = false;
         sessionStartMs = System.currentTimeMillis();
+        refreshModules();   // update all UI panels to reflect the now-empty workspace
     }
 
     /** #31 — re-run each module's workspace-driven refresh after data loads (drops manual Refresh). */
@@ -509,6 +514,13 @@ public class MainController implements JobRunner {
                 if (g.xs != null) for (double x : g.xs) xs.add(x);
                 ArrayNode ys = gn.putArray("ys");
                 if (g.ys != null) for (double y : g.ys) ys.add(y);
+                // Persist the per-node view (axes + scales) so a saved workspace reopens on the same
+                // axes/scale instead of reverting to the FSC/SSC Linear default. See ui-bug-log BUG-09.
+                if (n.viewX != null)      gn.put("view_x", n.viewX);
+                if (n.viewY != null)      gn.put("view_y", n.viewY);
+                if (n.viewXScale != null) gn.put("view_x_scale", n.viewXScale);
+                if (n.viewYScale != null) gn.put("view_y_scale", n.viewYScale);
+                if (g.lblDx != 0 || g.lblDy != -4) { gn.put("lbl_dx", g.lblDx); gn.put("lbl_dy", g.lblDy); }
                 arr.add(gn);
             }
             if (!arr.isEmpty()) out.set(sample, arr);
@@ -532,7 +544,15 @@ public class MainController implements JobRunner {
                         gn.path("x_channel").asText(null),
                         gn.path("y_channel").asText(null), xs, ys);
                 g.angle = gn.path("angle").asDouble(0);
-                byId.put(gn.path("id").asText(), new PopNode(g, null));
+                PopNode pn = new PopNode(g, null);
+                // Restore the per-node view (axes + scales) saved by serializeGates. See ui-bug-log BUG-09.
+                pn.viewX      = gn.path("view_x").asText(null);
+                pn.viewY      = gn.path("view_y").asText(null);
+                pn.viewXScale = gn.path("view_x_scale").asText(null);
+                pn.viewYScale = gn.path("view_y_scale").asText(null);
+                if (gn.has("lbl_dx")) g.lblDx = gn.path("lbl_dx").asDouble(0);
+                if (gn.has("lbl_dy")) g.lblDy = gn.path("lbl_dy").asDouble(-4);
+                byId.put(gn.path("id").asText(), pn);
             }
             for (JsonNode gn : arr) {                       // pass 2: link parents
                 PopNode node = byId.get(gn.path("id").asText());
@@ -541,9 +561,18 @@ public class MainController implements JobRunner {
                 node.parent = parent;
                 parent.children.add(node);
             }
+            dedupSiblingsByName(root);   // BUG-15 auto-heal: drop duplicate same-named gates from old saves
             workspace.replaceTree(sample, root);
         });
         workspace.notifyTreeChanged();
+    }
+
+    /** Remove duplicate same-named sibling gates (keeps the first). Gates are auto-named uniquely, so
+     *  same-named siblings only arise from the old apply-to-all duplication bug (BUG-15). */
+    private static void dedupSiblingsByName(PopNode parent) {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        parent.children.removeIf(c -> c.name() != null && !seen.add(c.name()));
+        for (PopNode c : parent.children) dedupSiblingsByName(c);
     }
 
     private static double[] toArray(JsonNode arr) {
