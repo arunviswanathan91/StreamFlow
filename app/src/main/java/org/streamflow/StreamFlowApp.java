@@ -30,14 +30,25 @@ public class StreamFlowApp extends Application {
         BorderPane root = loader.load();
         controller = loader.getController();
 
-        Scene scene = new Scene(root, 1400, 900);
+        // Fit the initial window to the screen's USABLE area (excludes the taskbar), so on small or
+        // display-scaled screens the window doesn't open larger than the screen (spilling past the edge
+        // and under the taskbar/menu bar). Clamp the preferred size and the minimums to what fits.
+        javafx.geometry.Rectangle2D vb = javafx.stage.Screen.getPrimary().getVisualBounds();
+        double w = Math.min(1400, vb.getWidth());
+        double h = Math.min(900, vb.getHeight());
+
+        Scene scene = new Scene(root, w, h);
         scene.getStylesheets().add(
                 getClass().getResource("/org/streamflow/ui/streamflow-dark.css").toExternalForm());
 
         stage.setTitle("StreamFLOW");
-        stage.setMinWidth(1100);
-        stage.setMinHeight(700);
+        stage.setMinWidth(Math.min(1100, vb.getWidth()));
+        stage.setMinHeight(Math.min(700, vb.getHeight()));
         stage.setScene(scene);
+        // Center the restored size, then maximize so the first-run window fills the usable screen.
+        stage.setX(vb.getMinX() + Math.max(0, (vb.getWidth() - w) / 2));
+        stage.setY(vb.getMinY() + Math.max(0, (vb.getHeight() - h) / 2));
+        stage.setMaximized(true);
         org.streamflow.ui.AppIcons.apply(stage);
         // Intercept the window close so unsaved gating changes can be saved first.
         stage.setOnCloseRequest(controller::confirmCloseAndExit);

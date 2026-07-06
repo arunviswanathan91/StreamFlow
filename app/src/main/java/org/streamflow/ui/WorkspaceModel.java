@@ -173,6 +173,66 @@ public final class WorkspaceModel {
 
     public void registerWindow(String sample, javafx.stage.Stage stage) { openWindows.put(sample, stage); }
     public void unregisterWindow(String sample) { openWindows.remove(sample); }
+
+    // ---- per-marker (channel) UNIVERSAL scale -------------------------------
+    // The display scale for a marker is chosen once and applies to that channel EVERYWHERE (every
+    // sample, every window, the export figure) — a marker is Logicle or Linear globally, not per-file.
+    private final Map<String, String> channelScales = new HashMap<>();
+    /** The universal scale chosen for this channel, or null if the user hasn't set one. */
+    public String channelScale(String channel) { return channel == null ? null : channelScales.get(channel); }
+    /** Set the universal scale for a channel (applies to that marker across all samples). */
+    public void setChannelScale(String channel, String scale) {
+        if (channel != null && scale != null) channelScales.put(channel, scale);
+    }
+    /** Live map for serialization (channel → scale). */
+    public Map<String, String> channelScales() { return channelScales; }
+    public void setChannelScales(Map<String, String> m) {
+        channelScales.clear();
+        if (m != null) channelScales.putAll(m);
+    }
+    // ---- per-population UNIVERSAL statistics-displayed config --------------------
+    // Which stats show on a gate's label is chosen once per population NAME and applies to that
+    // population across every sample (so Prev/Next keeps it). null = never configured (use gate default).
+    private final Map<String, java.util.List<String>> popStatConfig = new HashMap<>();
+    public java.util.List<String> popStatConfig(String popName) {
+        return popName == null ? null : popStatConfig.get(popName);
+    }
+    public void setPopStatConfig(String popName, java.util.List<String> keys) {
+        if (popName != null && keys != null) popStatConfig.put(popName, new ArrayList<>(keys));
+    }
+
+    // ---- per-population UNIVERSAL gate-label position (offset px from anchor) ----
+    // Dragging a gate's name/stat label sets an offset that applies to that population across every
+    // sample (so Prev/Next keeps the label where you put it).
+    private final Map<String, double[]> popLabelOffset = new HashMap<>();
+    public double[] popLabelOffset(String popName) { return popName == null ? null : popLabelOffset.get(popName); }
+    public void setPopLabelOffset(String popName, double dx, double dy) {
+        if (popName != null) popLabelOffset.put(popName, new double[]{dx, dy});
+    }
+    /** Seed label offsets from the per-gate offsets that round-trip through saved gates. Call after load. */
+    public void seedPopLabelOffsetsFromTrees() {
+        for (String s : samples()) {
+            PopNode root = treeFor(s);
+            if (root == null) continue;
+            for (PopNode n : root.selfAndDescendants()) {
+                if (!n.isRoot() && n.gate != null && (n.gate.lblDx != 0 || n.gate.lblDy != -4))
+                    popLabelOffset.putIfAbsent(n.name(), new double[]{n.gate.lblDx, n.gate.lblDy});
+            }
+        }
+    }
+
+    /** Rebuild the universal channel→scale map from the per-node view scales that round-trip through the
+     *  saved gates (BUG-09), so a reopened workspace keeps each marker's chosen scale. Call after load. */
+    public void seedChannelScalesFromTrees() {
+        for (String s : samples()) {
+            PopNode root = treeFor(s);
+            if (root == null) continue;
+            for (PopNode n : root.selfAndDescendants()) {
+                if (n.viewX != null && n.viewXScale != null) channelScales.putIfAbsent(n.viewX, n.viewXScale);
+                if (n.viewY != null && n.viewYScale != null) channelScales.putIfAbsent(n.viewY, n.viewYScale);
+            }
+        }
+    }
     /** Returns the open Stage for this sample, or null if none. */
     public javafx.stage.Stage openWindowFor(String sample) {
         javafx.stage.Stage s = openWindows.get(sample);

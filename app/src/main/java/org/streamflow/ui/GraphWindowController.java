@@ -27,6 +27,9 @@ import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.Slider;
 import javafx.scene.control.TextInputDialog;
+import javafx.scene.control.Toggle;
+import javafx.scene.control.ToggleButton;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -58,7 +61,10 @@ public class GraphWindowController {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String HIST = "(Histogram)";
 
-    @FXML private ComboBox<String> plotTypeCombo, xAxisCombo, yAxisCombo, toolCombo;
+    @FXML private ComboBox<String> plotTypeCombo, xAxisCombo, yAxisCombo;
+    @FXML private ToggleGroup toolGroup;
+    @FXML private javafx.scene.control.ToggleButton toolNoneBtn, toolPolyBtn, toolRectBtn,
+                                                     toolEllipseBtn, toolIntervalBtn, toolQuadBtn;
     @FXML private ComboBox<String> xScaleCombo, yScaleCombo;
     @FXML private Button xAxisOptsButton, yAxisOptsButton;
     @FXML private Button prevSampleButton, nextSampleButton, copyButton, copySettingsButton, channelsButton;
@@ -124,12 +130,22 @@ public class GraphWindowController {
         w.stage().show();
         w.stage().toFront();
         ctx.workspace().registerWindow(name, w.stage());  // §14: track for focus-existing behaviour
+        w.stage().getProperties().put("gwc", w.controller());  // let openChild reuse this one window
     }
 
     /** Drill-down window: another view of the SAME sample/tree, initially focused on {@code focus}.
      *  @param stealFocus true when the user explicitly navigated here (double-click); false for
      *                    background auto-opens (gate draw) so the parent window keeps focus. */
     public static void openChild(AppContext ctx, String sampleFile, PopNode focus, boolean stealFocus) {
+        // §14/BUG-10: one window per sample. If a window for this sample is already open (opened from
+        // the Workstation OR a previous drill-down/export double-click), navigate it to the requested
+        // population instead of spawning a duplicate — so edits there always reflect back everywhere.
+        javafx.stage.Stage existing = ctx.workspace().openWindowFor(sampleFile);
+        if (existing != null && existing.getProperties().get("gwc") instanceof GraphWindowController gwc) {
+            gwc.navigateTo(focus);
+            if (stealFocus) { existing.toFront(); existing.requestFocus(); }
+            return;
+        }
         Win w = build(ctx, sampleFile);
         GraphWindowController c = w.controller();
         c.sampleFile = sampleFile;
@@ -138,6 +154,8 @@ public class GraphWindowController {
         c.initialFocus = focus;
         c.loadFromEngine(true);
         w.stage().show();
+        ctx.workspace().registerWindow(sampleFile, w.stage());   // register so future opens reuse it
+        w.stage().getProperties().put("gwc", c);
         if (stealFocus) { w.stage().toFront(); w.stage().requestFocus(); }
     }
 
@@ -176,16 +194,16 @@ public class GraphWindowController {
                     return;
                 }
                 switch (ev.getCode()) {
-                    case ESCAPE -> { c.plot.cancelDrawing(); c.toolCombo.getSelectionModel().select("None"); }
+                    case ESCAPE -> { c.plot.cancelDrawing(); c.selectGateTool("None"); }
                     case DELETE, BACK_SPACE -> c.deleteSelectedPopulation();
                     case LEFT  -> c.gotoSample(c.sampleIndex - 1);
                     case RIGHT -> c.gotoSample(c.sampleIndex + 1);
-                    case P -> c.toolCombo.getSelectionModel().select("Polygon");
-                    case R -> c.toolCombo.getSelectionModel().select("Rectangle");
-                    case E -> c.toolCombo.getSelectionModel().select("Ellipse");
-                    case I -> c.toolCombo.getSelectionModel().select("Interval");
-                    case Q -> c.toolCombo.getSelectionModel().select("Quadrant");
-                    case N -> c.toolCombo.getSelectionModel().select("None");
+                    case P -> c.selectGateTool("Polygon");
+                    case R -> c.selectGateTool("Rectangle");
+                    case E -> c.selectGateTool("Ellipse");
+                    case I -> c.selectGateTool("Interval");
+                    case Q -> c.selectGateTool("Quadrant");
+                    case N -> c.selectGateTool("None");
                     default -> { }
                 }
             });
@@ -208,9 +226,10 @@ public class GraphWindowController {
         plotTypeCombo.setItems(FXCollections.observableArrayList(
                 "pseudocolor", "dot", "contour", "density", "zebra", "histogram"));
         plotTypeCombo.getSelectionModel().select("pseudocolor");
-        toolCombo.setItems(FXCollections.observableArrayList(
-                "None", "Polygon", "Rectangle", "Ellipse", "Interval", "Quadrant"));
-        toolCombo.getSelectionModel().select("None");
+        toolGroup.selectedToggleProperty().addListener((obs, o, n) -> {
+            if (n == null) { toolNoneBtn.setSelected(true); return; }
+            plot.setTool(toolNameOf(n));
+        });
         xScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "ArcSinh"));
         yScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "ArcSinh"));
         xScaleCombo.getSelectionModel().select("Linear");
@@ -230,6 +249,7 @@ public class GraphWindowController {
         });
         plot.setOnGateChanged(g -> {
             recomputeCounts(); refreshTreeLabels(); snapshotGate(g);
+            PopNode en = nodeForGate(g); if (en != null) en.edited = true;   // flag for Workstation indicator
             notifyTree();   // gate moved/resized → mark workspace dirty
             if (pendingEditGate == g && pendingEditXs != null) {
                 final double[] oldXs = pendingEditXs.clone();
@@ -253,6 +273,11 @@ public class GraphWindowController {
         plot.setOnColorRequest(this::pickGateColor);
         plot.setOnOpenChild(this::openChildForGate);   // double-click gate body / "Open in new window"
         plot.setOnStatsConfig(this::configureStats);
+        plot.setOnApplyToAll(this::applyGateToAllSamples);
+        plot.setOnLabelMoved(g -> {   // BUG-14: label position is universal per population
+            ctx.workspace().setPopLabelOffset(g.name, g.lblDx, g.lblDy);
+            notifyTree();
+        });
         plot.setOnBusy(busy -> {                 // disable axis controls while a render runs
             // Never disable the combos while the axis-options popover is visible: the popover
             // itself triggers invalidate() (e.g. dragging the Logicle-W or zoom slider), and
@@ -266,12 +291,18 @@ public class GraphWindowController {
             }
         });
 
-        plotTypeCombo.setOnAction(e -> { if (!suppressAxisEvents) applyAxes(); });
-        xAxisCombo.setOnAction(e -> { if (suppressAxisEvents) return; xScaleCombo.getSelectionModel().select(defaultScale(xAxisCombo.getValue())); applyAxes(); });
-        yAxisCombo.setOnAction(e -> { if (suppressAxisEvents) return; yScaleCombo.getSelectionModel().select(defaultScale(yAxisCombo.getValue())); applyAxes(); });
-        xScaleCombo.setOnAction(e -> { if (!suppressAxisEvents) applyAxes(); });
-        yScaleCombo.setOnAction(e -> { if (!suppressAxisEvents) applyAxes(); });
-        toolCombo.setOnAction(e -> plot.setTool(toolCombo.getValue()));
+        // On a USER axis/scale change, apply then broadcast (notifyTree) so the gating-strategy figure
+        // and any other open window re-sync to the new view. Safe from cascade: programmatic combo sets
+        // during selectNode run with suppressAxisEvents=true, so these handlers don't fire there, and the
+        // originating window is skipped via notifyTree's selfNotifying guard. See ui-bug-log BUG-10.
+        plotTypeCombo.setOnAction(e -> { if (!suppressAxisEvents) { applyAxes(); notifyTree(); } });
+        // Switching a channel adopts THAT marker's universal scale (not a per-file default).
+        xAxisCombo.setOnAction(e -> { if (suppressAxisEvents) return; xScaleCombo.getSelectionModel().select(scaleForChannel(xAxisCombo.getValue())); applyAxes(); notifyTree(); });
+        yAxisCombo.setOnAction(e -> { if (suppressAxisEvents) return; yScaleCombo.getSelectionModel().select(scaleForChannel(yAxisCombo.getValue())); applyAxes(); notifyTree(); });
+        // Changing a scale sets it UNIVERSALLY for that marker, then broadcasts so every sample/window syncs.
+        xScaleCombo.setOnAction(e -> { if (!suppressAxisEvents) { ctx.workspace().setChannelScale(xAxisCombo.getValue(), xScaleCombo.getValue()); applyAxes(); notifyTree(); } });
+        yScaleCombo.setOnAction(e -> { if (!suppressAxisEvents) { ctx.workspace().setChannelScale(yAxisCombo.getValue(), yScaleCombo.getValue()); applyAxes(); notifyTree(); } });
+        // tool wired via toolGroup listener above
 
         // real Ikonli icons (MD2 cog for axis settings, FontAwesome5 for the rest)
         iconOnly(prevSampleButton, "fas-chevron-left", "◀");
@@ -459,8 +490,8 @@ public class GraphWindowController {
         aliasCombo(xAxisCombo); aliasCombo(yAxisCombo);
         selectPreferred(xAxisCombo, chans, "FSC-A");
         selectPreferred(yAxisCombo, chans, "SSC-A");
-        xScaleCombo.getSelectionModel().select(defaultScale(xAxisCombo.getValue()));
-        yScaleCombo.getSelectionModel().select(defaultScale(yAxisCombo.getValue()));
+        xScaleCombo.getSelectionModel().select(scaleForChannel(xAxisCombo.getValue()));
+        yScaleCombo.getSelectionModel().select(scaleForChannel(yAxisCombo.getValue()));
         rootNode = ctx.workspace().treeFor(sampleFile);   // shared, persistent gating tree
         rebuildTree();
         recomputeCounts();
@@ -470,6 +501,13 @@ public class GraphWindowController {
 
     private boolean isInTree(PopNode n) {
         return rootNode != null && rootNode.selfAndDescendants().contains(n);
+    }
+
+    /** Navigate an ALREADY-OPEN window to a population (used when openChild reuses this window). */
+    void navigateTo(PopNode focus) {
+        if (rootNode == null) { initialFocus = focus; return; }   // not loaded yet; useData will honour it
+        PopNode target = (focus != null && isInTree(focus)) ? focus : rootNode;
+        selectNode(target);
     }
 
     /** Navigating to another sample: switch to THAT sample's own gating tree, keep axes/scales,
@@ -565,18 +603,28 @@ public class GraphWindowController {
         // Restore the axes this population was gated on so its child gates are shown + editable.
         // If it has no children yet (viewX unset), fall back to the axes its OWN gate was drawn on
         // (and the parent's scales) instead of dropping to the default FSC/SSC view.
-        String ax = node.viewX, ay = node.viewY, axs = node.viewXScale, ays = node.viewYScale;
+        String ax = node.viewX, ay = node.viewY;   // scale is universal per marker (below), not per-node
+        // BUG-06: viewX is transient (wiped on workspace reload). When it's null, prefer the axes the
+        // CHILD gates were drawn on — otherwise the children don't render (they live on different axes
+        // than this node's own gate). Only fall back to this node's own gate axes if it has no children.
+        // This ordering (viewX → child-gate → own-gate) MUST match ExportController.makeStepCell.
+        if (ax == null && !node.children.isEmpty() && node.children.get(0).gate != null
+                && node.children.get(0).gate.xChan != null) {
+            CytoPlot.Gate g0 = node.children.get(0).gate;
+            ax = g0.xChan; ay = g0.yChan;
+        }
         if (ax == null && !node.isRoot() && node.gate != null) {
             ax = node.gate.xChan;
             ay = node.gate.yChan;
-            if (node.parent != null) { axs = node.parent.viewXScale; ays = node.parent.viewYScale; }
         }
         if (ax != null) {
             suppressAxisEvents = true;
             if (xAxisCombo.getItems().contains(ax)) xAxisCombo.getSelectionModel().select(ax);
             if (ay != null && yAxisCombo.getItems().contains(ay)) yAxisCombo.getSelectionModel().select(ay);
-            if (axs != null) xScaleCombo.getSelectionModel().select(axs);
-            if (ays != null) yScaleCombo.getSelectionModel().select(ays);
+            // Scale is UNIVERSAL per marker (BUG-11): always derive from the channel, so navigating
+            // Prev/Next or across populations never reverts a marker's scale to a per-file default.
+            xScaleCombo.getSelectionModel().select(scaleForChannel(ax));
+            if (ay != null) yScaleCombo.getSelectionModel().select(scaleForChannel(ay));
             suppressAxisEvents = false;
         }
         plot.clearGates();
@@ -606,6 +654,12 @@ public class GraphWindowController {
             int c = 0; for (boolean b : CytoPlot.mask(pd, n.gate)) if (b) c++;
             n.count = c;
             n.parentPct = pd.rows() == 0 ? 0 : 100.0 * c / pd.rows();
+            // Universal stats-displayed (BUG-13): a population's chosen stats apply across every sample.
+            List<String> cfg = ctx.workspace().popStatConfig(n.name());
+            if (cfg != null) { n.gate.statKeys.clear(); n.gate.statKeys.addAll(cfg); }
+            // Universal label position (BUG-14): keep the label where the user dragged it, on every sample.
+            double[] off = ctx.workspace().popLabelOffset(n.name());
+            if (off != null) { n.gate.lblDx = off[0]; n.gate.lblDy = off[1]; }
             n.gate.statLine = statLineFor(n);
         }
     }
@@ -667,6 +721,25 @@ public class GraphWindowController {
     }
 
     /** Right-click → "Change Statistics Displayed": pick which stats appear on the label. */
+    /** Right-click a gate → "Apply gate → all samples": clone this population's subtree onto every other
+     *  sample's tree, so a gate drawn/adjusted here propagates everywhere. Clears the "edited" flag. */
+    private void applyGateToAllSamples(CytoPlot.Gate g) {
+        PopNode n = nodeForGate(g);
+        if (n == null) return;
+        List<String> others = ctx.workspace().sampleNames().stream()
+                .filter(s -> !s.equals(sampleFile)).toList();
+        if (others.isEmpty()) { statusLabel.setText("Only one sample — nothing to apply to."); return; }
+        for (String o : others) {
+            PopNode root = ctx.workspace().treeFor(o);
+            // Replace an existing same-named top-level gate instead of stacking a duplicate (BUG-15).
+            root.children.removeIf(c -> java.util.Objects.equals(c.name(), n.name()));
+            root.children.add(n.cloneTree(root));
+        }
+        n.edited = false;
+        notifyTree();
+        statusLabel.setText("Applied gate '" + n.name() + "' to " + others.size() + " other sample(s).");
+    }
+
     private void configureStats(CytoPlot.Gate g) {
         javafx.scene.control.CheckBox parent = new javafx.scene.control.CheckBox("% of parent");
         javafx.scene.control.CheckBox total = new javafx.scene.control.CheckBox("% of total");
@@ -689,11 +762,13 @@ public class GraphWindowController {
         gp.add(mfi, 0, 3); gp.add(gmean, 0, 4); gp.add(cvBox, 0, 5);
         gp.add(new Label("Channel:"), 0, 6); gp.add(chan, 1, 6);
 
-        Dialog<Void> dlg = new Dialog<>();
+        Dialog<ButtonType> dlg = new Dialog<>();
         dlg.setTitle("Statistics — " + g.name); dlg.setHeaderText(null);
         dlg.getDialogPane().setContent(gp);
         dlg.getDialogPane().getButtonTypes().addAll(ButtonType.APPLY, ButtonType.CLOSE);
-        dlg.showAndWait();
+        dlg.setResultConverter(b -> b);
+        java.util.Optional<ButtonType> res = dlg.showAndWait();
+        if (res.isEmpty() || res.get() != ButtonType.APPLY) return;   // Close/✕ = cancel, don't change
 
         List<String> keys = new ArrayList<>();
         if (parent.isSelected()) keys.add("parent");
@@ -703,11 +778,14 @@ public class GraphWindowController {
         if (mfi.isSelected()) keys.add("mfi:" + ch);
         if (gmean.isSelected()) keys.add("geomean:" + ch);
         if (cvBox.isSelected()) keys.add("cv:" + ch);
-        if (keys.isEmpty()) keys.add("parent");   // at least one must remain
+        // Allow ZERO stats (label shows just the gate name). Do NOT force "parent" back — that made
+        // "% of parent" impossible to remove and re-checked itself on reopen. See ui-bug-log BUG-12.
         g.statKeys.clear(); g.statKeys.addAll(keys);
+        ctx.workspace().setPopStatConfig(g.name, keys);   // BUG-13: stats-displayed is universal per population
         PopNode n = nodeForGate(g);
         if (n != null) g.statLine = statLineFor(n);
         plot.selectGate(g);   // repaint label
+        notifyTree();         // sync the label change to the export figure + other windows
     }
 
     private void rebuildTree() {
@@ -787,6 +865,13 @@ public class GraphWindowController {
                 scaleOf(xScaleCombo.getValue()), scaleOf(yScaleCombo.getValue()),
                 plotTypeCombo.getValue());   // single coalesced re-render off the FX thread
         applyFmoLines(hist);
+        // Persist view config so the gating-strategy figure always reflects the current axes/scale.
+        if (currentNode != null) {
+            currentNode.viewX = xAxisCombo.getValue();
+            currentNode.viewY = hist ? null : yAxisCombo.getValue();
+            currentNode.viewXScale = xScaleCombo.getValue();
+            currentNode.viewYScale = yScaleCombo.getValue();
+        }
     }
 
     /** Push the stored FMO levels (if any) for the current channels onto the plot. */
@@ -827,6 +912,15 @@ public class GraphWindowController {
         if (channel == null) return "Linear";
         // FlowJo v10: scatter/Time/Width linear; fluorescence defaults to Logicle (biexponential).
         return channel.matches("(?i).*(FSC|SSC|Time|Width).*") ? "Linear" : "Logicle";
+    }
+
+    /** UNIVERSAL scale for a marker: the workspace-wide choice for this channel if the user has set
+     *  one, else the sensible default. This is what keeps a marker's scale identical across every
+     *  sample (incl. Prev/Next navigation) and in the export figure. See ui-bug-log BUG-11. */
+    private String scaleForChannel(String channel) {
+        if (channel == null) return "Linear";
+        String s = ctx != null ? ctx.workspace().channelScale(channel) : null;
+        return s != null ? s : defaultScale(channel);
     }
 
     private static CytoPlot.Scale scaleOf(String s) {
@@ -1110,7 +1204,7 @@ public class GraphWindowController {
         TextInputDialog d = new TextInputDialog("P" + ctx.workspace().nextSeq(sampleFile));
         d.setTitle("Name gate"); d.setHeaderText(null); d.setContentText("Population name:");
         Optional<String> r = d.showAndWait();
-        if (r.isEmpty() || r.get().isBlank()) { toolCombo.getSelectionModel().select("None"); return; }
+        if (r.isEmpty() || r.get().isBlank()) { selectGateTool("None"); return; }
         g.name = r.get().trim();
         PopNode node = new PopNode(g, currentNode);
         currentNode.children.add(node);
@@ -1126,7 +1220,7 @@ public class GraphWindowController {
         if (parentItem != null) { parentItem.getChildren().add(buildItem(node)); parentItem.setExpanded(true); }
         refreshTreeLabels();
         statusLabel.setText(String.format("Gate '%s': %d events (%.1f%%)", node.name(), node.count, node.parentPct));
-        toolCombo.getSelectionModel().select("None"); // one gate per draw (FlowJo)
+        selectGateTool("None"); // one gate per draw (FlowJo)
         notifyTree();          // update Workstation view
         ctx.auditLog().add(AuditLog.Type.GATE, sampleFile,
                 String.format("'%s' (%s on %s / %s)", g.name, g.type, g.xChan, g.yChan == null ? "—" : g.yChan));
@@ -1146,7 +1240,7 @@ public class GraphWindowController {
         d.setTitle("Quadrant gate prefix"); d.setHeaderText(null);
         d.setContentText("Prefix for Q1/Q2/Q3/Q4 (e.g. 'Annex' → Annex Q1 … Q4):");
         Optional<String> r = d.showAndWait();
-        if (r.isEmpty() || r.get().isBlank()) { toolCombo.getSelectionModel().select("None"); return; }
+        if (r.isEmpty() || r.get().isBlank()) { selectGateTool("None"); return; }
         String prefix = r.get().trim();
 
         currentNode.viewX = xAxisCombo.getValue();
@@ -1172,7 +1266,7 @@ public class GraphWindowController {
         if (parentItem != null) parentItem.setExpanded(true);
         recomputeCounts();
         refreshTreeLabels();
-        toolCombo.getSelectionModel().select("None");
+        selectGateTool("None");
         notifyTree();
         statusLabel.setText("Quadrant gate '" + prefix + "' added (Q1–Q4).");
         ctx.auditLog().add(AuditLog.Type.GATE, sampleFile,
@@ -1459,6 +1553,30 @@ public class GraphWindowController {
     private static boolean isAncestor(PopNode ancestor, PopNode of) {
         for (PopNode n = of; n != null; n = n.parent) if (n == ancestor) return true;
         return false;
+    }
+
+    // ---- gate tool helpers --------------------------------------------------
+
+    /** Programmatically select a gate tool by name (None/Polygon/Rectangle/Ellipse/Interval/Quadrant). */
+    void selectGateTool(String name) {
+        ToggleButton btn = switch (name) {
+            case "Polygon"   -> toolPolyBtn;
+            case "Rectangle" -> toolRectBtn;
+            case "Ellipse"   -> toolEllipseBtn;
+            case "Interval"  -> toolIntervalBtn;
+            case "Quadrant"  -> toolQuadBtn;
+            default          -> toolNoneBtn;
+        };
+        btn.setSelected(true);
+    }
+
+    private String toolNameOf(Toggle t) {
+        if (t == toolPolyBtn)     return "Polygon";
+        if (t == toolRectBtn)     return "Rectangle";
+        if (t == toolEllipseBtn)  return "Ellipse";
+        if (t == toolIntervalBtn) return "Interval";
+        if (t == toolQuadBtn)     return "Quadrant";
+        return "None";
     }
 
     // ---- undo/redo management -----------------------------------------------
