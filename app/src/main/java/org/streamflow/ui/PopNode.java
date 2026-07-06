@@ -20,6 +20,9 @@ final class PopNode {
     // Plot configuration used while gating THIS population, so reopening it (or its parent)
     // shows the child gates on the axes they were drawn on, and they stay editable.
     String viewX, viewY, viewXScale, viewYScale;
+    /** True when this gate was moved/resized in a graph window since it was last applied to all samples —
+     *  surfaced in the Workstation tree so the user knows to re-propagate it. */
+    boolean edited = false;
 
     /** Geometry snapshots for gate-history replay (#18): each = {timestampMs, xs[], ys[]}. */
     final List<GateSnapshot> history = new ArrayList<>();

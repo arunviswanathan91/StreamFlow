@@ -11,7 +11,9 @@
 <?import javafx.scene.control.TabPane?>
 <?import javafx.scene.control.TableColumn?>
 <?import javafx.scene.control.TableView?>
+<?import javafx.scene.control.ToggleButton?>
 <?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Pane?>
 <?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.VBox?>
 <?import org.kordamp.ikonli.javafx.FontIcon?>
@@ -146,8 +148,9 @@
                 <!-- ============ GATING STRATEGY FIGURE ============ -->
                 <Tab text="Gating Strategy">
                     <content>
-                        <VBox spacing="8.0">
+                        <VBox spacing="6.0">
                             <children>
+                                <!-- Row 1: sample picker + build + export -->
                                 <HBox spacing="8.0" alignment="CENTER_LEFT">
                                     <children>
                                         <Label text="Sample:"/>
@@ -162,13 +165,35 @@
                                         <Button fx:id="gsSavePngButton" text="Save PNG" onAction="#onGsSavePng">
                                             <graphic><FontIcon iconLiteral="fas-image"/></graphic>
                                         </Button>
+                                        <Region HBox.hgrow="ALWAYS"/>
                                         <Label fx:id="gsStatusLabel" text="" styleClass="subtitle"/>
                                     </children>
                                 </HBox>
-                                <Label text="Each step shows a population with the gate(s) drawn on it, in sequence — a ready-to-share strategy figure." styleClass="subtitle" wrapText="true"/>
-                                <ScrollPane fitToHeight="true" VBox.vgrow="ALWAYS" pannable="true">
+                                <!-- Row 2: annotation toolbar -->
+                                <HBox spacing="5.0" alignment="CENTER_LEFT" style="-fx-padding:2 0;">
+                                    <children>
+                                        <Button fx:id="gsAddTextButton" text="+ Text" onAction="#onGsAddText">
+                                            <graphic><FontIcon iconLiteral="fas-font"/></graphic>
+                                        </Button>
+                                        <ToggleButton fx:id="gsConnectBtn" text="Connect" onAction="#onGsConnectToggle">
+                                            <graphic><FontIcon iconLiteral="fas-project-diagram"/></graphic>
+                                        </ToggleButton>
+                                        <ComboBox fx:id="gsArrowStyleCombo" prefWidth="110"/>
+                                        <Separator orientation="VERTICAL"/>
+                                        <Button fx:id="gsZoomFitButton" text="Fit" onAction="#onGsZoomFit">
+                                            <graphic><FontIcon iconLiteral="fas-compress-arrows-alt"/></graphic>
+                                        </Button>
+                                        <Button fx:id="gsClearCanvasButton" text="Clear canvas" onAction="#onGsClearCanvas">
+                                            <graphic><FontIcon iconLiteral="fas-trash-alt"/></graphic>
+                                        </Button>
+                                    </children>
+                                </HBox>
+                                <!-- Free-form canvas inside a scroll pane -->
+                                <ScrollPane fx:id="gsScrollPane" VBox.vgrow="ALWAYS" pannable="true"
+                                            fitToWidth="false" fitToHeight="false">
                                     <content>
-                                        <HBox fx:id="gsStrip" spacing="6.0" style="-fx-background-color:white; -fx-padding:12;"/>
+                                        <Pane fx:id="gsCanvas" prefWidth="1400.0" prefHeight="900.0"
+                                              style="-fx-background-color:white;"/>
                                     </content>
                                 </ScrollPane>
                             </children>

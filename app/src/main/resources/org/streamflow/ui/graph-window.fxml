@@ -7,6 +7,8 @@
 <?import javafx.scene.control.Separator?>
 <?import javafx.scene.control.Slider?>
 <?import javafx.scene.control.TitledPane?>
+<?import javafx.scene.control.ToggleButton?>
+<?import javafx.scene.control.ToggleGroup?>
 <?import javafx.scene.control.ToolBar?>
 <?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.control.TreeView?>
@@ -19,6 +21,9 @@
 
 <BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
             fx:controller="org.streamflow.ui.GraphWindowController" styleClass="app-root">
+    <fx:define>
+        <ToggleGroup fx:id="toolGroup"/>
+    </fx:define>
 
     <top>
         <VBox>
@@ -36,8 +41,31 @@
                         <Label text="Plot:"/>
                         <ComboBox fx:id="plotTypeCombo"/>
                         <Separator orientation="VERTICAL"/>
-                        <Label text="Gate:"/>
-                        <ComboBox fx:id="toolCombo"/>
+                        <Label text="Gate:" style="-fx-text-fill:#EAEFF5;"/>
+                        <ToggleButton fx:id="toolNoneBtn" toggleGroup="$toolGroup" selected="true" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="fas-mouse-pointer"/></graphic>
+                            <tooltip><Tooltip text="No gate tool — select / move (N)"/></tooltip>
+                        </ToggleButton>
+                        <ToggleButton fx:id="toolPolyBtn" toggleGroup="$toolGroup" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="fas-draw-polygon"/></graphic>
+                            <tooltip><Tooltip text="Polygon gate (P)"/></tooltip>
+                        </ToggleButton>
+                        <ToggleButton fx:id="toolRectBtn" toggleGroup="$toolGroup" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="fas-vector-square"/></graphic>
+                            <tooltip><Tooltip text="Rectangle gate (R)"/></tooltip>
+                        </ToggleButton>
+                        <ToggleButton fx:id="toolEllipseBtn" toggleGroup="$toolGroup" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="far-circle"/></graphic>
+                            <tooltip><Tooltip text="Ellipse gate (E)"/></tooltip>
+                        </ToggleButton>
+                        <ToggleButton fx:id="toolIntervalBtn" toggleGroup="$toolGroup" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="fas-ruler-horizontal"/></graphic>
+                            <tooltip><Tooltip text="Interval gate (I)"/></tooltip>
+                        </ToggleButton>
+                        <ToggleButton fx:id="toolQuadBtn" toggleGroup="$toolGroup" styleClass="tool-btn">
+                            <graphic><FontIcon iconLiteral="fas-th"/></graphic>
+                            <tooltip><Tooltip text="Quadrant gate (Q)"/></tooltip>
+                        </ToggleButton>
                         <Separator orientation="VERTICAL"/>
                         <Button fx:id="channelsButton" text="Channels…" onAction="#onChannels">
                             <tooltip><Tooltip text="Name detector channels with their target (CD4 …)"/></tooltip>

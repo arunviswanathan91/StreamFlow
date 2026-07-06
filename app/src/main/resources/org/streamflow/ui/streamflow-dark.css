@@ -11,6 +11,9 @@
     -fx-text-mut:  #C7D6E8;
     -fx-font-family: "Segoe UI", "Inter", sans-serif;
     -fx-font-size: 13px;
+    /* suppress focus rings app-wide — they cause a 1-2 px layout reflow on every click */
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
 }
 
 .app-root {
@@ -106,13 +109,16 @@
     -fx-text-fill: -fx-text-mut;
 }
 
-/* Buttons */
+/* Buttons — always reserve a 1px border so :focused state does not change layout size */
 .button {
     -fx-background-color: -fx-panel-2;
     -fx-text-fill: -fx-text-c;
     -fx-background-radius: 4;
     -fx-padding: 6 14 6 14;
     -fx-cursor: hand;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-border-radius: 4;
 }
 .button:hover {
     -fx-background-color: derive(#243447, 18%);
@@ -120,7 +126,6 @@
 .button:default,
 .button:focused {
     -fx-border-color: -fx-accent-c;
-    -fx-border-radius: 4;
 }
 .button:disabled {
     -fx-opacity: 0.45;
@@ -133,6 +138,57 @@
 .button.primary:hover {
     -fx-background-color: derive(#00B4D8, 12%);
 }
+/* Generic toggle buttons (e.g. Connect in the gating-strategy toolbar) — match .button so they
+   don't fall back to the light modena default. Keep the reserved 1px border (BUG-04 jitter guard).
+   Placed BEFORE .tool-btn so the gate-tool toggles keep their transparent icon style. */
+.toggle-button {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-text-c;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-border-radius: 4;
+}
+.toggle-button:hover {
+    -fx-background-color: derive(#243447, 18%);
+}
+.toggle-button:focused {
+    -fx-border-color: -fx-accent-c;
+}
+.toggle-button:selected {
+    -fx-background-color: -fx-accent-c;
+    -fx-text-fill: #06222E;
+}
+.toggle-button:selected .ikonli-font-icon {
+    -fx-icon-color: #06222E;
+    -fx-fill: #06222E;
+}
+.toggle-button:disabled {
+    -fx-opacity: 0.45;
+}
+
+/* Gate tool toggle buttons in the graphing window toolbar */
+.tool-btn {
+    -fx-background-color: transparent;
+    -fx-text-fill: -fx-text-mut;
+    -fx-padding: 4 7 4 7;
+    -fx-background-radius: 4;
+    -fx-cursor: hand;
+}
+.tool-btn:hover {
+    -fx-background-color: -fx-panel-2;
+}
+.tool-btn:selected {
+    -fx-background-color: -fx-accent-c;
+    -fx-text-fill: #06222E;
+}
+.tool-btn:selected .ikonli-font-icon {
+    -fx-icon-color: #06222E;
+    -fx-fill: #06222E;
+}
+
 /* Ikonli icons inherit text colour */
 .ikonli-font-icon {
     -fx-icon-color: -fx-text-c;
@@ -155,6 +211,18 @@
 }
 .text-area .content {
     -fx-background-color: #0A1622;
+}
+/* Gating-strategy canvas text boxes: fully transparent so only the typed text shows on the figure.
+   The dark fill comes from several TextArea sub-nodes (.scroll-pane, .viewport, .content), so ALL
+   must be cleared. Uses .gs-textbox.text-area (specificity 0,2,0 on the element; 0,3,0 on descendants)
+   so it beats the themed .text-area / .text-area .content rules above. See ui-bug-log BUG-07. */
+.gs-textbox.text-area,
+.gs-textbox.text-area .scroll-pane,
+.gs-textbox.text-area .viewport,
+.gs-textbox.text-area .content {
+    -fx-background-color: transparent;
+    -fx-control-inner-background: transparent;
+    -fx-background-insets: 0;
 }
 
 /* Plot pane */
@@ -202,7 +270,15 @@
     -fx-text-fill: -fx-text-mut;
 }
 
-/* Combo boxes */
+/* Combo boxes — same "pre-reserve border" trick to prevent focus-state reflow */
+.combo-box-base {
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-border-radius: 4;
+}
+.combo-box-base:focused {
+    -fx-border-color: -fx-accent-c;
+}
 .combo-box {
     -fx-background-color: -fx-panel-2;
     -fx-background-radius: 4;
@@ -228,6 +304,25 @@
     -fx-background-color: -fx-accent-c;
     -fx-text-fill: -fx-bg;
 }
+
+/* Color picker (e.g. text-box font colour) — theme to match the dark combos, not the grey default. */
+.color-picker {
+    -fx-background-color: -fx-panel-2;
+    -fx-background-radius: 4;
+}
+.color-picker > .label,
+.color-picker .color-picker-label,
+.color-picker .color-picker-label .text {
+    -fx-text-fill: -fx-text-c;
+    -fx-fill: -fx-text-c;
+}
+.color-picker .arrow-button { -fx-background-color: transparent; }
+.color-picker .arrow-button .arrow { -fx-background-color: -fx-text-mut; }
+.color-palette {
+    -fx-background-color: -fx-panel;
+    -fx-border-color: -fx-panel-2;
+}
+.color-palette .label { -fx-text-fill: -fx-text-c; }
 
 /* Split panes + scroll panes */
 .split-pane {
