@@ -340,6 +340,7 @@ public class CellCycleController implements ContextAware, Refreshable {
         TextArea ta = new TextArea(msg);
         ta.setEditable(false); ta.setWrapText(true); ta.setPrefSize(560, 380);
         a.getDialogPane().setContent(ta);
+        AppIcons.theme(a, null);
         a.showAndWait();
     }
 

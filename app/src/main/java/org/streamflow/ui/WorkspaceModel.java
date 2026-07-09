@@ -173,6 +173,8 @@ public final class WorkspaceModel {
 
     public void registerWindow(String sample, javafx.stage.Stage stage) { openWindows.put(sample, stage); }
     public void unregisterWindow(String sample) { openWindows.remove(sample); }
+    /** Read-only view of every currently-open Graph Window, keyed by sample — for the "Jump" control. */
+    public Map<String, javafx.stage.Stage> openWindowsView() { return java.util.Collections.unmodifiableMap(openWindows); }
 
     // ---- per-marker (channel) UNIVERSAL scale -------------------------------
     // The display scale for a marker is chosen once and applies to that channel EVERYWHERE (every
@@ -184,6 +186,15 @@ public final class WorkspaceModel {
     public void setChannelScale(String channel, String scale) {
         if (channel != null && scale != null) channelScales.put(channel, scale);
     }
+    // ---- per-marker UNIVERSAL axis range (locked scaling) -------------------
+    // A marker's display range {min,max} is locked once and reused on every sample, so a gate at fixed
+    // data coordinates lands in the same place everywhere (it doesn't "move" across Prev/Next).
+    private final Map<String, double[]> channelRange = new HashMap<>();
+    public double[] channelRange(String channel) { return channel == null ? null : channelRange.get(channel); }
+    public void setChannelRange(String channel, double min, double max) {
+        if (channel != null && max > min) channelRange.put(channel, new double[]{min, max});
+    }
+
     /** Live map for serialization (channel → scale). */
     public Map<String, String> channelScales() { return channelScales; }
     public void setChannelScales(Map<String, String> m) {
@@ -199,6 +210,13 @@ public final class WorkspaceModel {
     }
     public void setPopStatConfig(String popName, java.util.List<String> keys) {
         if (popName != null && keys != null) popStatConfig.put(popName, new ArrayList<>(keys));
+    }
+    // Global default stat config: the last-chosen stats apply to EVERY gate that hasn't been individually
+    // customised, so "what to show on a gate" is universal across all gates/children until changed.
+    private java.util.List<String> defaultStatConfig = null;
+    public java.util.List<String> defaultStatConfig() { return defaultStatConfig; }
+    public void setDefaultStatConfig(java.util.List<String> keys) {
+        defaultStatConfig = keys == null ? null : new ArrayList<>(keys);
     }
 
     // ---- per-population UNIVERSAL gate-label position (offset px from anchor) ----

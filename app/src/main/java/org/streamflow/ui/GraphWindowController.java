@@ -25,6 +25,8 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.Slider;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Toggle;
@@ -70,13 +72,31 @@ public class GraphWindowController {
     @FXML private Button prevSampleButton, nextSampleButton, copyButton, copySettingsButton, channelsButton;
     @FXML private Button fmoButton;
     @FXML private Button compareButton;
+    @FXML private MenuButton jumpButton;
     @FXML private ComboBox<String> sampleJumpCombo;
     @FXML private javafx.scene.control.CheckBox smoothCheck;
+    @FXML private javafx.scene.control.CheckBox smoothDensityCheck, contourSmoothCheck;
+    @FXML private javafx.scene.control.Slider contourLevelsSlider;
+    @FXML private Label contourLevelsLabel;
+    @FXML private javafx.scene.control.CheckBox contourOutliersCheck;
+    @FXML private javafx.scene.control.Slider outlierSizeSlider;
+    @FXML private Label outlierSizeLabel;
+    @FXML private javafx.scene.control.Slider sizeControlSlider;
+    @FXML private Label sizeControlLabel;
+    @FXML private ComboBox<String> paletteCombo;
+    @FXML private javafx.scene.control.ColorPicker contourColorPicker, dotColorPicker, backgateColorPicker;
+    @FXML private javafx.scene.control.ColorPicker gateBorderColorPicker, gateFillColorPicker, gateTextColorPicker, gateShadowColorPicker;
+    @FXML private javafx.scene.control.Slider gateOpacitySlider, gateShadowOpacitySlider;
+    @FXML private javafx.scene.control.CheckBox gateTextShadowCheck;
+    @FXML private javafx.scene.control.CheckBox interceptCheck;
+    @FXML private javafx.scene.control.TextField interceptXField, interceptYField;
+    @FXML private javafx.scene.control.TitledPane histGroup, densityGroup, contourGroup;
     @FXML private javafx.scene.control.CheckBox snapCheck;
     @FXML private javafx.scene.control.CheckBox confidenceCheck;
     @FXML private javafx.scene.control.CheckBox backgateCheck;
     @FXML private ComboBox<String> histModeCombo;
     @FXML private Slider bandwidthSlider;
+    private boolean fmoShiftDown = false;   // tracked so a plain vs shift click on "Set FMO" can differ
     @FXML private StackPane plotHost;
     @FXML private TreeView<PopNode> gateTree;
     @FXML private HBox breadcrumbBar;
@@ -128,6 +148,7 @@ public class GraphWindowController {
         w.controller().sampleFile = name;
         w.controller().loadFromEngine(true);
         w.stage().show();
+        UiFx.fadeSlideIn(w.stage().getScene().getRoot());
         w.stage().toFront();
         ctx.workspace().registerWindow(name, w.stage());  // §14: track for focus-existing behaviour
         w.stage().getProperties().put("gwc", w.controller());  // let openChild reuse this one window
@@ -154,6 +175,7 @@ public class GraphWindowController {
         c.initialFocus = focus;
         c.loadFromEngine(true);
         w.stage().show();
+        UiFx.fadeSlideIn(w.stage().getScene().getRoot());
         ctx.workspace().registerWindow(sampleFile, w.stage());   // register so future opens reuse it
         w.stage().getProperties().put("gwc", c);
         if (stealFocus) { w.stage().toFront(); w.stage().requestFocus(); }
@@ -173,6 +195,7 @@ public class GraphWindowController {
             BorderPane root = loader.load();
             GraphWindowController c = loader.getController();
             c.ctx = ctx;
+            c.applyDefaultPreferences();
             ctx.workspace().addTreeChangeListener(c::onExternalTreeChange);   // live sync across windows
             c.sample = title;
             c.plot.setChannelLabeler(ch -> ctx.aliases().label(ch));
@@ -207,6 +230,7 @@ public class GraphWindowController {
                     default -> { }
                 }
             });
+            root.setOpacity(0);   // faded in by UiFx.fadeSlideIn right after each call site's stage.show()
             Stage stage = new Stage();
             stage.setTitle("StreamFLOW — " + title);
             stage.setScene(scene);
@@ -219,6 +243,18 @@ public class GraphWindowController {
         } catch (Exception e) {
             throw new RuntimeException("Could not open graph window: " + e.getMessage(), e);
         }
+    }
+
+    /** Seed per-window defaults from Settings ▸ General right after ctx is assigned (initialize()
+     *  runs during FXML load, before ctx exists, so this can't live there). */
+    private void applyDefaultPreferences() {
+        if (ctx == null || ctx.settings() == null) return;
+        boolean lb = ctx.settings().defaultLightBackground();
+        lightModeCheck.setSelected(lb);
+        plot.setLightMode(lb);
+        boolean iv = ctx.settings().defaultInterceptLines();
+        interceptCheck.setSelected(iv);
+        plot.setInterceptVisible(iv);
     }
 
     @FXML
@@ -315,7 +351,41 @@ public class GraphWindowController {
 
         histModeCombo.setItems(FXCollections.observableArrayList("Filled Smooth", "Raw Bars", "Line Only", "CDF"));
         histModeCombo.getSelectionModel().select("Filled Smooth");
-        smoothCheck.setOnAction(e -> plot.setSmooth(smoothCheck.isSelected()));
+        // Histogram "Smooth" only ever affected computeHistogram's own KDE blur; it was displayed next
+        // to Hist/bandwidth but used to be wired to the SAME flag as density/contour smoothing, so
+        // unchecking it silently killed contour lines too. Now split: this one is histogram-only.
+        smoothCheck.setOnAction(e -> plot.setSmoothHistogram(smoothCheck.isSelected()));
+        // Density and Contour smoothing are now INDEPENDENT flags (a contour can be smoothed without
+        // touching density/zebra and vice-versa). The mutual "only one active at a time" is handled by
+        // refreshOptionGroups() disabling whichever group isn't the current plot type.
+        smoothDensityCheck.setOnAction(e -> plot.setSmoothDensity(smoothDensityCheck.isSelected()));
+        contourSmoothCheck.setOnAction(e -> plot.setSmoothContour(contourSmoothCheck.isSelected()));
+        contourLevelsSlider.valueProperty().addListener((o, a, b) -> {
+            int n = (int) Math.round(b.doubleValue());
+            contourLevelsLabel.setText("Contour lines: " + n);
+            plot.setContourLevels(n);
+        });
+        contourOutliersCheck.setOnAction(e -> {
+            boolean on = contourOutliersCheck.isSelected();
+            plot.setContourOutliers(on);
+            outlierSizeSlider.setDisable(!on);   // only meaningful once outliers are shown
+        });
+        outlierSizeSlider.valueProperty().addListener((o, a, b) -> plot.setOutlierSize((int) Math.round(b.doubleValue())));
+        // Context-sensitive size/smoothing control: "Point size" for pseudocolor/dot, "Smoothing" for density plots.
+        sizeControlSlider.valueProperty().addListener((o, a, b) -> applySizeControl((int) Math.round(b.doubleValue())));
+        plotTypeCombo.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> { refreshSizeControl(); refreshOptionGroups(); });
+        // Editable colours + palette
+        paletteCombo.getItems().setAll(CytoPlot.paletteNames());
+        paletteCombo.getSelectionModel().select(plot.palette());
+        paletteCombo.setOnAction(e -> plot.setPalette(paletteCombo.getValue()));
+        contourColorPicker.setValue(plot.contourColor());
+        contourColorPicker.valueProperty().addListener((o, a, b) -> plot.setContourColor(b));
+        dotColorPicker.setValue(plot.dotColor());
+        dotColorPicker.valueProperty().addListener((o, a, b) -> plot.setDotColor(b));
+        backgateColorPicker.setValue(plot.backgateColor());
+        backgateColorPicker.valueProperty().addListener((o, a, b) -> plot.setBackgateColor(b));
+        refreshSizeControl();
+        refreshOptionGroups();
         snapCheck.setOnAction(e -> {
             plot.setSnapEnabled(snapCheck.isSelected());
             statusLabel.setText(snapCheck.isSelected()
@@ -332,20 +402,11 @@ public class GraphWindowController {
             if (!backgateCheck.isSelected()) { plot.setHighlight(null); statusLabel.setText("Backgating off."); }
             else statusLabel.setText("Backgating on — select a descendant population in the tree to overlay it.");
         });
-        fmoButton.setOnMouseClicked(e -> {
-            if (ctx == null) return;
-            String xch = xAxisCombo.getValue();
-            boolean alreadySet = xch != null && ctx.fmo().has(xch);
-            // Shift-click always clears; a plain click TOGGLES (set if absent, clear if present).
-            if (e.isShiftDown() || alreadySet) {
-                if (xch != null) ctx.fmo().clear(xch);
-                if (yAxisCombo.getValue() != null) ctx.fmo().clear(yAxisCombo.getValue());
-                applyFmoLines(HIST.equals(yAxisCombo.getValue()));
-                statusLabel.setText("FMO reference cleared for current channel(s).");
-            } else {
-                setFmoFromCurrent();
-            }
-        });
+        // Track Shift purely so onSetFmo() (an ActionEvent, which carries no modifier keys) can tell a
+        // plain click from a Shift-click. A plain click now ALWAYS (re)sets FMO from the current sample
+        // — it used to silently clear an already-set value instead, which read as "the button does
+        // nothing". onAction (not setOnMouseClicked) also means the button responds to Enter/Space.
+        fmoButton.setOnMousePressed(e -> fmoShiftDown = e.isShiftDown());
         histModeCombo.setOnAction(e -> plot.setHistMode(histModeCombo.getValue()));
         // Apply bandwidth only when the drag settles (or on a discrete step), not on every tick —
         // per-tick re-renders during a drag were a source of the histogram render storm.
@@ -398,6 +459,55 @@ public class GraphWindowController {
         if (lightModeCheck != null) lightModeCheck.setOnAction(e -> plot.setLightMode(lightModeCheck.isSelected()));
         if (labelsVisibleCheck != null) labelsVisibleCheck.setOnAction(e -> plot.setLabelsVisible(labelsVisibleCheck.isSelected()));
         if (fmoVisibleCheck != null) fmoVisibleCheck.setOnAction(e -> plot.setFmoVisible(fmoVisibleCheck.isSelected()));
+
+        // "Jump" — list every currently-open Graph Window and bring the chosen one to front. Built
+        // lazily on open (not maintained live) since window-open/close is infrequent relative to clicks.
+        jumpButton.setOnShowing(e -> refreshJumpMenu());
+
+        // Gate color panel: mirrors the right-click "Color…" dialog but lives in Options for quick,
+        // repeated tweaks. Disabled with no live gate selected; refreshed via CytoPlot's selection hook.
+        plot.setOnSelectionChanged(this::refreshGateColorControls);
+        refreshGateColorControls(null);
+        gateBorderColorPicker.setOnAction(e -> {
+            CytoPlot.Gate g = plot.selectedGate();
+            if (g != null) { g.border = gateBorderColorPicker.getValue(); plot.selectGate(g); notifyTree(); }
+        });
+        gateFillColorPicker.setOnAction(e -> applyGateFillFromOptions());
+        gateOpacitySlider.valueProperty().addListener((o, a, b) -> { if (!gateOpacitySlider.isValueChanging()) applyGateFillFromOptions(); });
+        gateOpacitySlider.valueChangingProperty().addListener((o, was, changing) -> { if (!changing) applyGateFillFromOptions(); });
+        gateTextColorPicker.setOnAction(e -> {
+            CytoPlot.Gate g = plot.selectedGate();
+            if (g != null) { g.textColor = gateTextColorPicker.getValue(); plot.selectGate(g); notifyTree(); }
+        });
+        gateTextShadowCheck.setOnAction(e -> {
+            CytoPlot.Gate g = plot.selectedGate();
+            if (g != null) { g.textShadow = gateTextShadowCheck.isSelected(); plot.selectGate(g); notifyTree(); }
+            boolean on = gateTextShadowCheck.isSelected() && plot.selectedGate() != null;
+            gateShadowColorPicker.setDisable(!on);
+            gateShadowOpacitySlider.setDisable(!on);
+        });
+        gateShadowColorPicker.setOnAction(e -> {
+            CytoPlot.Gate g = plot.selectedGate();
+            if (g != null) { g.shadowColor = gateShadowColorPicker.getValue(); plot.selectGate(g); notifyTree(); }
+        });
+        gateShadowOpacitySlider.valueProperty().addListener((o, a, b) -> {
+            CytoPlot.Gate g = plot.selectedGate();
+            if (g != null) { g.shadowOpacity = b.doubleValue(); plot.selectGate(g); notifyTree(); }
+        });
+
+        // X/Y intercept lines (FlowJo-style draggable crosshair). On enable, the crosshair is placed at
+        // the VISUAL CENTRE of the current view (axis/scale-aware, not a raw clamped 0), and the fields
+        // are seeded from that. Dragging a line updates the fields live; typing still works (clamped).
+        interceptCheck.setOnAction(e -> {
+            boolean on = interceptCheck.isSelected();
+            plot.setInterceptVisible(on);
+            if (on) { plot.centerIntercept(); syncInterceptFields(); }
+        });
+        interceptXField.setOnAction(e -> commitInterceptX());
+        interceptXField.focusedProperty().addListener((o, was, isNow) -> { if (!isNow) commitInterceptX(); });
+        interceptYField.setOnAction(e -> commitInterceptY());
+        interceptYField.focusedProperty().addListener((o, was, isNow) -> { if (!isNow) commitInterceptY(); });
+        plot.setOnInterceptChanged((x, y) -> syncInterceptFields());   // drag → fields track live
         // Dragging an FMO line repositions it and persists the new level for the shown channel(s).
         plot.setOnFmoChanged((x, y) -> {
             if (ctx == null) return;
@@ -494,6 +604,7 @@ public class GraphWindowController {
         yScaleCombo.getSelectionModel().select(scaleForChannel(yAxisCombo.getValue()));
         rootNode = ctx.workspace().treeFor(sampleFile);   // shared, persistent gating tree
         rebuildTree();
+        resolveSubsamples();   // set subsample row indices for this sample (cached sync, else async)
         recomputeCounts();
         PopNode focus = (initialFocus != null && isInTree(initialFocus)) ? initialFocus : rootNode;
         selectNode(focus);
@@ -515,12 +626,31 @@ public class GraphWindowController {
     private void reapplyData(EventData d) {
         rootData = d;
         List<String> keepPath = currentNode != null ? pathNames(currentNode) : new ArrayList<>();
+        // Keep the axes the user is currently viewing so Prev/Next stays on the SAME plot (FlowJo-style)
+        // instead of snapping back to each node's own gating axes. See ui-bug-log BUG-19.
+        String keepX = xAxisCombo.getValue(), keepY = yAxisCombo.getValue(),
+               keepXs = xScaleCombo.getValue(), keepYs = yScaleCombo.getValue();
         rootNode = ctx.workspace().treeFor(sampleFile);   // this sample's own persistent tree
         rebuildTree();
+        resolveSubsamples();   // set subsample row indices for this sample (cached sync, else async)
         recomputeCounts();
         PopNode target = resolveByNames(rootNode, keepPath);
         selectNode(target != null ? target : rootNode);
+        restoreAxes(keepX, keepY, keepXs, keepYs);
         refreshTreeLabels();
+    }
+
+    /** Re-select the given axes/scales (if this sample has them) and re-render — used to carry the user's
+     *  chosen view across Prev/Next navigation instead of resetting to the node's default axes. */
+    private void restoreAxes(String x, String y, String xs, String ys) {
+        if (x == null || !xAxisCombo.getItems().contains(x)) return;
+        suppressAxisEvents = true;
+        xAxisCombo.getSelectionModel().select(x);
+        if (y != null && yAxisCombo.getItems().contains(y)) yAxisCombo.getSelectionModel().select(y);
+        if (xs != null) xScaleCombo.getSelectionModel().select(xs);
+        if (ys != null) yScaleCombo.getSelectionModel().select(ys);
+        suppressAxisEvents = false;
+        applyAxes();
     }
 
     private boolean selfNotifying = false;
@@ -630,7 +760,8 @@ public class GraphWindowController {
         plot.clearGates();
         currentData = dataForNode(node);
         plot.setData(currentData);                 // also clears any backgate highlight
-        for (PopNode ch : node.children) plot.addGate(ch.gate);
+        // Subsample children are tree populations, not drawn shapes (no geometry) — don't add them as gates.
+        for (PopNode ch : node.children) if (!"subsample".equals(ch.gate.type)) plot.addGate(ch.gate);
         applyAxes();
         // keep the tree selection in sync without re-entering the listener loop
         TreeItem<PopNode> item = findItem(gateTree.getRoot(), node);
@@ -654,14 +785,53 @@ public class GraphWindowController {
             int c = 0; for (boolean b : CytoPlot.mask(pd, n.gate)) if (b) c++;
             n.count = c;
             n.parentPct = pd.rows() == 0 ? 0 : 100.0 * c / pd.rows();
-            // Universal stats-displayed (BUG-13): a population's chosen stats apply across every sample.
+            // Universal stats-displayed (BUG-13/18): a population's own override wins; otherwise the
+            // global default (last-chosen stats) applies to every gate + child until the user changes it.
             List<String> cfg = ctx.workspace().popStatConfig(n.name());
+            if (cfg == null) cfg = ctx.workspace().defaultStatConfig();
             if (cfg != null) { n.gate.statKeys.clear(); n.gate.statKeys.addAll(cfg); }
             // Universal label position (BUG-14): keep the label where the user dragged it, on every sample.
             double[] off = ctx.workspace().popLabelOffset(n.name());
             if (off != null) { n.gate.lblDx = off[0]; n.gate.lblDy = off[1]; }
             n.gate.statLine = statLineFor(n);
         }
+    }
+
+    /** For every subsample population in this sample's tree, set its per-sample row indices: cached
+     *  ones apply synchronously; uncached ones are fetched from the engine (FlowKit selection) and
+     *  applied when they arrive, re-running counts + re-rendering the current view. Called on load. */
+    private void resolveSubsamples() {
+        if (rootNode == null || rootData == null) return;
+        List<CytoPlot.Gate> pending = new ArrayList<>();
+        for (PopNode n : rootNode.selfAndDescendants()) {
+            CytoPlot.Gate g = n.gate;
+            if (g == null || !"subsample".equals(g.type)) continue;
+            int[] cached = g.subBySample.get(sampleFile);
+            if (cached != null) g.subSelected = cached; else pending.add(g);
+        }
+        for (CytoPlot.Gate g : pending) {
+            ObjectNode args = JSON.createObjectNode();
+            args.put("sample", sampleFile);
+            args.put("n", g.subN);
+            args.put("seed", g.subSeed);
+            args.put("total", rootData.rows());
+            Task<JsonNode> task = ctx.bridge().command("subsample", args);
+            task.setOnSucceeded(e -> {
+                int[] idx = toIntArray(task.getValue().path("indices"));
+                g.subBySample.put(sampleFile, idx);
+                g.subSelected = idx;
+                recomputeCounts(); refreshTreeLabels();
+                if (currentNode != null) { currentData = dataForNode(currentNode); plot.setData(currentData); }
+            });
+            Thread t = new Thread(task, "subsample"); t.setDaemon(true); t.start();
+        }
+    }
+
+    private static int[] toIntArray(JsonNode arr) {
+        if (arr == null || !arr.isArray()) return new int[0];
+        int[] out = new int[arr.size()];
+        for (int i = 0; i < out.length; i++) out[i] = arr.get(i).asInt();
+        return out;
     }
 
     // ---- gate statistics (Feature 1) ----------------------------------------
@@ -767,6 +937,7 @@ public class GraphWindowController {
         dlg.getDialogPane().setContent(gp);
         dlg.getDialogPane().getButtonTypes().addAll(ButtonType.APPLY, ButtonType.CLOSE);
         dlg.setResultConverter(b -> b);
+        AppIcons.theme(dlg, currentStage());
         java.util.Optional<ButtonType> res = dlg.showAndWait();
         if (res.isEmpty() || res.get() != ButtonType.APPLY) return;   // Close/✕ = cancel, don't change
 
@@ -781,7 +952,8 @@ public class GraphWindowController {
         // Allow ZERO stats (label shows just the gate name). Do NOT force "parent" back — that made
         // "% of parent" impossible to remove and re-checked itself on reopen. See ui-bug-log BUG-12.
         g.statKeys.clear(); g.statKeys.addAll(keys);
-        ctx.workspace().setPopStatConfig(g.name, keys);   // BUG-13: stats-displayed is universal per population
+        ctx.workspace().setPopStatConfig(g.name, keys);      // this gate's own override
+        ctx.workspace().setDefaultStatConfig(keys);          // BUG-18: also the new universal default for all gates
         PopNode n = nodeForGate(g);
         if (n != null) g.statLine = statLineFor(n);
         plot.selectGate(g);   // repaint label
@@ -865,6 +1037,7 @@ public class GraphWindowController {
                 scaleOf(xScaleCombo.getValue()), scaleOf(yScaleCombo.getValue()),
                 plotTypeCombo.getValue());   // single coalesced re-render off the FX thread
         applyFmoLines(hist);
+        applyUniversalRange(hist);   // BUG-17: lock each marker's axis range so gates don't shift across samples
         // Persist view config so the gating-strategy figure always reflects the current axes/scale.
         if (currentNode != null) {
             currentNode.viewX = xAxisCombo.getValue();
@@ -874,12 +1047,130 @@ public class GraphWindowController {
         }
     }
 
+    /** Lock the shown channels to their UNIVERSAL range (first sample to display a marker sets it from its
+     *  All-Events data; every later sample reuses it), so a gate at fixed coordinates lands in the same
+     *  place on every sample. See ui-bug-log BUG-17. */
+    private void applyUniversalRange(boolean hist) {
+        if (ctx == null || rootData == null) return;
+        String xch = xAxisCombo.getValue();
+        if (xch != null) {
+            double[] r = ctx.workspace().channelRange(xch);
+            if (r == null) {
+                int xc = rootData.indexOf(xch);
+                if (xc >= 0) { double[] dr = rootData.range(xc); ctx.workspace().setChannelRange(xch, dr[0], dr[1]); r = ctx.workspace().channelRange(xch); }
+            }
+            if (r != null) { plot.setXMin(r[0]); plot.setXMax(r[1]); }
+        }
+        String ych = hist ? null : yAxisCombo.getValue();
+        if (ych != null) {
+            double[] r = ctx.workspace().channelRange(ych);
+            if (r == null) {
+                int yc = rootData.indexOf(ych);
+                if (yc >= 0) { double[] dr = rootData.range(yc); ctx.workspace().setChannelRange(ych, dr[0], dr[1]); r = ctx.workspace().channelRange(ych); }
+            }
+            if (r != null) { plot.setYMin(r[0]); plot.setYMax(r[1]); }
+        }
+    }
+
     /** Push the stored FMO levels (if any) for the current channels onto the plot. */
     private void applyFmoLines(boolean hist) {
         if (ctx == null) return;
         double fx = ctx.fmo().level(xAxisCombo.getValue());
         double fy = hist ? Double.NaN : ctx.fmo().level(yAxisCombo.getValue());
         plot.setFmo(fx, fy);
+    }
+
+    /** Set-FMO toolbar button: plain click (re)sets from the current sample; Shift-click clears. */
+    @FXML
+    private void onSetFmo() {
+        if (ctx == null) return;
+        String xch = xAxisCombo.getValue();
+        boolean alreadySet = xch != null && ctx.fmo().has(xch);
+        // Plain click TOGGLES: sets the FMO reference (lines appear) if none is set for the current
+        // channel(s), or clears it (lines disappear) if one already is. Shift-click always clears.
+        // The Options ▸ "Show FMO lines" checkbox is a SEPARATE, independent visibility toggle that
+        // hides/shows the lines without discarding the stored level — do not conflate the two.
+        if (fmoShiftDown || alreadySet) {
+            if (xch != null) ctx.fmo().clear(xch);
+            if (yAxisCombo.getValue() != null) ctx.fmo().clear(yAxisCombo.getValue());
+            applyFmoLines(HIST.equals(yAxisCombo.getValue()));
+            statusLabel.setText("FMO reference cleared for current channel(s).");
+        } else {
+            setFmoFromCurrent();
+        }
+    }
+
+    /** Populate the "Jump" menu with every other currently-open Graph Window. */
+    private void refreshJumpMenu() {
+        jumpButton.getItems().clear();
+        if (ctx == null) return;
+        for (var entry : ctx.workspace().openWindowsView().entrySet()) {
+            javafx.stage.Stage st = entry.getValue();
+            if (st == null || !st.isShowing() || entry.getKey().equals(sampleFile)) continue;
+            MenuItem mi = new MenuItem(entry.getKey());
+            mi.setOnAction(ev -> { st.toFront(); st.requestFocus(); });
+            jumpButton.getItems().add(mi);
+        }
+        if (jumpButton.getItems().isEmpty()) {
+            MenuItem none = new MenuItem("(no other open windows)");
+            none.setDisable(true);
+            jumpButton.getItems().add(none);
+        }
+    }
+
+    /** Options panel "Gate color" section: reflects/edits whichever gate is currently selected. */
+    private void refreshGateColorControls(CytoPlot.Gate g) {
+        boolean has = g != null;
+        gateBorderColorPicker.setDisable(!has);
+        gateFillColorPicker.setDisable(!has);
+        gateOpacitySlider.setDisable(!has);
+        gateTextColorPicker.setDisable(!has);
+        gateTextShadowCheck.setDisable(!has);
+        boolean shadowOn = has && g.textShadow;
+        gateShadowColorPicker.setDisable(!shadowOn);   // shadow color/transparency only when shadow is on
+        gateShadowOpacitySlider.setDisable(!shadowOn);
+        if (!has) return;
+        gateBorderColorPicker.setValue(g.border);
+        gateFillColorPicker.setValue(opaque(g.fill));
+        gateOpacitySlider.setValue(g.fill.getOpacity());
+        gateTextColorPicker.setValue(g.textColor != null ? g.textColor : g.border);
+        gateTextShadowCheck.setSelected(g.textShadow);
+        gateShadowColorPicker.setValue(g.shadowColor);
+        gateShadowOpacitySlider.setValue(g.shadowOpacity);
+    }
+
+    private void applyGateFillFromOptions() {
+        CytoPlot.Gate g = plot.selectedGate();
+        if (g == null) return;
+        Color fc = gateFillColorPicker.getValue();
+        g.fill = Color.color(fc.getRed(), fc.getGreen(), fc.getBlue(), gateOpacitySlider.getValue());
+        plot.selectGate(g);
+        notifyTree();
+    }
+
+    /** Clamp typed text to [lo,hi] (swapped if inverted); invalid text reverts to the current value. */
+    private static double parseClamp(String s, double lo, double hi, double fallback) {
+        double v;
+        try { v = Double.parseDouble(s.trim()); } catch (Exception e) { return fallback; }
+        if (hi < lo) { double t = lo; lo = hi; hi = t; }
+        return Math.max(lo, Math.min(hi, v));
+    }
+    private static String fmtNum(double v) { return String.format("%.2f", v); }
+
+    private void commitInterceptX() {
+        double v = parseClamp(interceptXField.getText(), plot.xMin(), plot.xMax(), plot.interceptX());
+        interceptXField.setText(fmtNum(v));
+        plot.setInterceptX(v);
+    }
+    private void commitInterceptY() {
+        double v = parseClamp(interceptYField.getText(), plot.yMin(), plot.yMax(), plot.interceptY());
+        interceptYField.setText(fmtNum(v));
+        plot.setInterceptY(v);
+    }
+    /** Mirror the plot's current intercept position into the number fields (after centring or a drag). */
+    private void syncInterceptFields() {
+        interceptXField.setText(fmtNum(plot.interceptX()));
+        interceptYField.setText(fmtNum(plot.interceptY()));
     }
 
     /** "Set FMO" — record the current sample's 95th-percentile level for the shown channel(s). */
@@ -1117,6 +1408,7 @@ public class GraphWindowController {
         sp.setFitToWidth(true); sp.setPrefViewportHeight(360);
         dlg.getDialogPane().setContent(sp);
         dlg.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        AppIcons.theme(dlg, currentStage());
         if (dlg.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         for (int i = 0; i < chans.size(); i++) ctx.aliases().set(chans.get(i), fields.get(i).getText());
         refreshCombo(xAxisCombo); refreshCombo(yAxisCombo);
@@ -1134,6 +1426,51 @@ public class GraphWindowController {
         plot.setPointRadius(ctx.settings().exportPointSize());
         plot.setAxisFontSize(ctx.settings().exportAxisFontSize());
         plot.setLabelFontSize(ctx.settings().exportFontSize());
+        if (sizeControlSlider != null) refreshSizeControl();
+    }
+
+    private boolean isDensityPlotType() {
+        String t = plotTypeCombo.getValue();
+        return "contour".equals(t) || "density".equals(t) || "zebra".equals(t);
+    }
+
+    /** Enable only the Options group relevant to the current plot type: Histogram for histograms,
+     *  Density for pseudocolor/dot/density/zebra, Contour for contour. A disabled group is greyed and
+     *  collapsed. This also gives the "density smooth vs contour smooth are never both active" behaviour. */
+    private void refreshOptionGroups() {
+        if (histGroup == null) return;
+        String t = plotTypeCombo.getValue();
+        boolean hist = "histogram".equals(t);
+        boolean contour = "contour".equals(t);
+        boolean density = "pseudocolor".equals(t) || "dot".equals(t) || "density".equals(t) || "zebra".equals(t);
+        setGroupActive(histGroup, hist);
+        setGroupActive(densityGroup, density);
+        setGroupActive(contourGroup, contour);
+    }
+    private static void setGroupActive(javafx.scene.control.TitledPane pane, boolean active) {
+        if (pane == null) return;
+        pane.setDisable(!active);
+        if (!active) pane.setExpanded(false);
+    }
+
+    /** Point-size for pseudocolor/dot; smoothing strength for density-based plots. */
+    private void applySizeControl(int v) {
+        if (isDensityPlotType()) { plot.setSmoothStrength(v); sizeControlLabel.setText("Smoothing: " + plot.smoothStrength()); }
+        else { plot.setPointRadius(v); sizeControlLabel.setText("Point size: " + plot.getPointRadius()); }
+    }
+
+    /** Re-point the shared size slider at the current plot type's parameter (label + value + range). */
+    private void refreshSizeControl() {
+        if (sizeControlSlider == null) return;
+        if (isDensityPlotType()) {
+            sizeControlSlider.setMax(8);
+            sizeControlSlider.setValue(plot.smoothStrength());
+            sizeControlLabel.setText("Smoothing: " + plot.smoothStrength());
+        } else {
+            sizeControlSlider.setMax(10);
+            sizeControlSlider.setValue(plot.getPointRadius());
+            sizeControlLabel.setText("Point size: " + plot.getPointRadius());
+        }
     }
 
     /** Copy button — copy the plot straight to the clipboard using the current app-wide format. */
@@ -1181,6 +1518,7 @@ public class GraphWindowController {
             org.kordamp.ikonli.javafx.FontIcon fi = new org.kordamp.ikonli.javafx.FontIcon(literal);
             fi.setIconSize(15); fi.setIconColor(ICON_C);
             b.setGraphic(fi); b.setText("");
+            UiFx.hoverPulse(b);
         } catch (Exception e) { b.setText(fallback); }
     }
     private static void withIcon(javafx.scene.control.Labeled b, String literal) {
@@ -1188,6 +1526,7 @@ public class GraphWindowController {
             org.kordamp.ikonli.javafx.FontIcon fi = new org.kordamp.ikonli.javafx.FontIcon(literal);
             fi.setIconSize(14); fi.setIconColor(ICON_C);
             b.setGraphic(fi);
+            UiFx.hoverPulse(b);
         } catch (Exception ignored) { }
     }
 
@@ -1203,6 +1542,7 @@ public class GraphWindowController {
 
         TextInputDialog d = new TextInputDialog("P" + ctx.workspace().nextSeq(sampleFile));
         d.setTitle("Name gate"); d.setHeaderText(null); d.setContentText("Population name:");
+        AppIcons.theme(d, currentStage());
         Optional<String> r = d.showAndWait();
         if (r.isEmpty() || r.get().isBlank()) { selectGateTool("None"); return; }
         g.name = r.get().trim();
@@ -1239,6 +1579,7 @@ public class GraphWindowController {
         TextInputDialog d = new TextInputDialog("Q");
         d.setTitle("Quadrant gate prefix"); d.setHeaderText(null);
         d.setContentText("Prefix for Q1/Q2/Q3/Q4 (e.g. 'Annex' → Annex Q1 … Q4):");
+        AppIcons.theme(d, currentStage());
         Optional<String> r = d.showAndWait();
         if (r.isEmpty() || r.get().isBlank()) { selectGateTool("None"); return; }
         String prefix = r.get().trim();
@@ -1425,6 +1766,7 @@ public class GraphWindowController {
         ButtonType restore = new ButtonType("Restore this version", javafx.scene.control.ButtonBar.ButtonData.OK_DONE);
         dlg.getDialogPane().getButtonTypes().addAll(restore, ButtonType.CANCEL);
         show.run();
+        AppIcons.theme(dlg, currentStage());
 
         ButtonType result = dlg.showAndWait().orElse(ButtonType.CANCEL);
         if (result == restore) {
@@ -1631,6 +1973,7 @@ public class GraphWindowController {
     private void renameGate(CytoPlot.Gate g) {
         TextInputDialog d = new TextInputDialog(g.name);
         d.setTitle("Rename population"); d.setHeaderText(null); d.setContentText("Population name:");
+        AppIcons.theme(d, currentStage());
         Optional<String> r = d.showAndWait();
         if (r.isEmpty() || r.get().isBlank()) return;
         final String oldName = g.name;
@@ -1672,6 +2015,7 @@ public class GraphWindowController {
         dlg.setHeaderText(null);
         dlg.getDialogPane().setContent(gp);
         dlg.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        AppIcons.theme(dlg, currentStage());
         dlg.showAndWait();
 
         final Color newBorder = g.border;

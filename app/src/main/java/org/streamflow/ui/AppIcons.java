@@ -50,4 +50,24 @@ public final class AppIcons {
             return null;
         }
     }
+
+    /** Apply the app's dark theme + icon to a {@link javafx.scene.control.Dialog}/{@link javafx.scene.control.Alert}.
+     *  Most of the app's popups were built as bare Dialogs with no stylesheet, so they rendered in the
+     *  OS's native (light) look next to an otherwise dark app — this is the one-line fix for all of them. */
+    public static void theme(javafx.scene.control.Dialog<?> dlg, javafx.stage.Window owner) {
+        try {
+            var pane = dlg.getDialogPane();
+            var css = AppIcons.class.getResource("/org/streamflow/ui/streamflow-dark.css");
+            if (css != null && !pane.getStylesheets().contains(css.toExternalForm())) {
+                pane.getStylesheets().add(css.toExternalForm());
+            }
+            if (!pane.getStyleClass().contains("app-root")) pane.getStyleClass().add("app-root");
+            if (owner != null) dlg.initOwner(owner);
+            // The Dialog's Stage isn't created until just before it's shown, so apply the icon then
+            // rather than immediately (pane.getScene() is null at the usual construction-time call site).
+            dlg.setOnShowing(e -> {
+                if (pane.getScene() != null && pane.getScene().getWindow() instanceof Stage st) apply(st);
+            });
+        } catch (Exception ignored) {}
+    }
 }

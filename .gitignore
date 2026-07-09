@@ -1,94 +1,11 @@
-# ── Internal / dev-only docs (kept locally, not for the public repo) ──────────
 AUDIT_REPORT.md
 BUILDING.md
 MANUAL_TESTING.md
 
-# ── Build outputs & dependencies ─────────────────────────────────────────────
-node_modules/
-dist/
-out/
-release/
-# npm debug output (npm-debug.log is matched by *.log below, these are not)
-npm-debug.log*
-yarn-error.log
-.npm/
-
-# ── Bundled R runtime (≈1 GB, produced by the build, never committed) ─────────
-R-Portable/
-
-# ── Vendored dev tooling (large binaries kept locally, never committed) ───────
-# JDKs and Maven are set up by CI / the dev scripts, not stored in git.
-jdk-25.0.3+9/
-jdk-26.0.1/
-apache-maven-3.9.16/
-# Ikonli is consumed as a Maven dependency, not from its source tree.
-ikonli-master/
-# Vendored R package sources — cloned/extracted locally, installed into the R
-# library at build time, never committed (hundreds of MB of external source).
-engine/vendor/
-# Vendored Python package sources / wheels for the Python migration (large).
-python-migration/
-engine/py-vendor/
-# Python virtual environment for the engine (~500 MB, recreated by install scripts).
-engine/py-env/
-.venv/
-venv/
-env/
-
-# ── Python bytecode / caches ─────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-# claude-code-java toolkit (review skills/templates), not part of the app build.
-claude-code-java-main/
-
-# ── Java / Maven build output ────────────────────────────────────────────────
-target/
-*.class
-
-# ── Logs ─────────────────────────────────────────────────────────────────────
-*.log
-logs/
-install_log.txt
-# Captured stdout/stderr from install/build runs (engine_install.out, py_install.out, …)
-*.out
-
-# ── R session artifacts (RStudio / Rscript leave these behind) ───────────────
-.Rhistory
-.RData
-.Rapp.history
-.Ruserdata
-.Rproj.user/
-
-# ── Secrets / local environment ──────────────────────────────────────────────
-.env
-.env.*
-!.env.example
-
-# ── Temp & backup files ──────────────────────────────────────────────────────
-*.tmp
-*.temp
-*.bak
-*~
-# Office / OneDrive lock files (this repo lives under OneDrive\Documents)
-~$*
-
-# ── Large / private test data (FCS files, fixtures — never for the public repo) ─
-test-assests/
-test-assets/
-test-data/
-*.fcs
-
-# ── AI assistant artifacts (never for the public repo) ───────────────────────
-# Local Claude Code config (personal permissions + machine-specific paths),
-# project instruction files, memories, and any other coding-assistant scratch.
 .claude/
+.claude.json
 CLAUDE.md
 CLAUDE.local.md
-.claude.json
 *.local.md
 .cursor/
 .cursorrules
@@ -96,16 +13,92 @@ CLAUDE.local.md
 .continue/
 .windsurf/
 .github/copilot-instructions.md
-# AI-generated planning / report scratch left at the repo root
+claude-code-java-main/
+
+plans/
 PLAN.md
+PLANS.md
 NOTES.md
 TODO.ai.md
+TODO.private.md
+notes.private.md
 SCRATCH.md
+*.plan
+*.plan.md
 
-# ── OS / editor cruft ────────────────────────────────────────────────────────
-Thumbs.db
-desktop.ini
-.DS_Store
-.vscode/
+.env
+.env.*
+!.env.example
+*.pem
+!engine/win-ca-bundle.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*.secret
+secrets/
+credentials.json
+*.credentials
+
+node_modules/
+dist/
+out/
+release/
+npm-debug.log*
+yarn-error.log
+.npm/
+
+R-Portable/
+jdk-25.0.3+9/
+jdk-26.0.1/
+apache-maven-3.9.16/
+ikonli-master/
+engine/vendor/
+python-migration/
+engine/py-vendor/
+engine/py-env/
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+target/
+*.class
+
+*.log
+logs/
+install_log.txt
+*.out
+
+.Rhistory
+.RData
+.Rapp.history
+.Ruserdata
+.Rproj.user/
+
+*.tmp
+*.temp
+*.bak
+*~
+~$*
+
 .idea/
 *.iml
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+test-assests/
+test-assets/
+test-data/
+*.fcs

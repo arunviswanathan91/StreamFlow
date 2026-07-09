@@ -7,11 +7,13 @@
 <?import javafx.scene.control.ListView?>
 <?import javafx.scene.control.ScrollPane?>
 <?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.Spinner?>
 <?import javafx.scene.control.Tab?>
 <?import javafx.scene.control.TabPane?>
 <?import javafx.scene.control.TableColumn?>
 <?import javafx.scene.control.TableView?>
 <?import javafx.scene.control.ToggleButton?>
+<?import javafx.scene.control.TreeView?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.Pane?>
 <?import javafx.scene.layout.Region?>
@@ -198,6 +200,57 @@
                                 </ScrollPane>
                             </children>
                         </VBox>
+                    </content>
+                </Tab>
+
+                <!-- ============ LAYOUT EDITOR (drag-drop tiles + batch PDF) ============ -->
+                <Tab text="Layout">
+                    <content>
+                        <HBox spacing="10.0">
+                            <children>
+                                <VBox spacing="6.0" prefWidth="250.0" minWidth="230.0" HBox.hgrow="NEVER">
+                                    <children>
+                                        <Label text="Populations" styleClass="subtitle"/>
+                                        <Label text="Sample:"/>
+                                        <ComboBox fx:id="layoutSampleCombo" maxWidth="Infinity"/>
+                                        <Label text="Drag a population onto the canvas. Batch renders the same tiles for every sample." styleClass="subtitle" wrapText="true"/>
+                                        <TreeView fx:id="layoutTree" VBox.vgrow="ALWAYS"/>
+                                    </children>
+                                </VBox>
+                                <VBox spacing="6.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <HBox spacing="8.0" alignment="CENTER_LEFT">
+                                            <children>
+                                                <Label text="Cols:"/>
+                                                <Spinner fx:id="layoutColsSpinner" prefWidth="70.0"/>
+                                                <Label text="Rows:"/>
+                                                <Spinner fx:id="layoutRowsSpinner" prefWidth="70.0"/>
+                                                <CheckBox fx:id="layoutPaginateCheck" text="One page per sample" selected="true"/>
+                                                <Separator orientation="VERTICAL"/>
+                                                <Button fx:id="layoutSavePdfButton" text="Save PDF" onAction="#onLayoutSavePdf">
+                                                    <graphic><FontIcon iconLiteral="fas-file-pdf"/></graphic>
+                                                </Button>
+                                                <Button fx:id="layoutBatchButton" text="Batch → PDF" onAction="#onLayoutBatch" styleClass="primary">
+                                                    <graphic><FontIcon iconLiteral="fas-layer-group"/></graphic>
+                                                </Button>
+                                                <Button fx:id="layoutClearButton" text="Clear" onAction="#onLayoutClear">
+                                                    <graphic><FontIcon iconLiteral="fas-trash-alt"/></graphic>
+                                                </Button>
+                                                <Region HBox.hgrow="ALWAYS"/>
+                                                <Label fx:id="layoutStatusLabel" text="" styleClass="subtitle"/>
+                                            </children>
+                                        </HBox>
+                                        <ScrollPane fx:id="layoutScroll" VBox.vgrow="ALWAYS" pannable="true"
+                                                    fitToWidth="false" fitToHeight="false">
+                                            <content>
+                                                <Pane fx:id="layoutCanvas" prefWidth="1400.0" prefHeight="900.0"
+                                                      style="-fx-background-color:white;"/>
+                                            </content>
+                                        </ScrollPane>
+                                    </children>
+                                </VBox>
+                            </children>
+                        </HBox>
                     </content>
                 </Tab>
             </tabs>

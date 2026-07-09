@@ -74,6 +74,7 @@ public class StreamFlowApp extends Application {
                     Alert a = new Alert(Alert.AlertType.ERROR,
                             "The R analysis engine could not be started:\n\n" + e.getMessage());
                     a.setHeaderText("Analysis Engine Error");
+                    org.streamflow.ui.AppIcons.theme(a, null);
                     a.showAndWait();
                 });
             }

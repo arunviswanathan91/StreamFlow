@@ -2,15 +2,16 @@ name: release
 
 # Builds the self-contained Windows StreamFLOW.exe installer (jpackage) and publishes it as a
 # GitHub Release asset. The installer bundles the JavaFX app, a private JRE, the engine scripts,
-# a portable Python (FlowKit) runtime, and the pre-staged R-Portable (FlowMagic plugins), so the
-# end user needs no Java, Python, or R installed.
+# and a portable Python (FlowKit) runtime, so the end user needs no Java or Python installed.
+#
+# Python-only by DEFAULT (smaller, faster). The R-plugin runway is preserved: set the "bundle_r"
+# input to true to ALSO bundle R-Portable + the R-based plugins (FlowMagic, PeacoQC). When bundle_r
+# is false the R download step is skipped and package.ps1 runs with -SkipR. Tag-triggered releases
+# are always Python-only; use "Run workflow" with bundle_r=true for an R-enabled build.
 #
 # Triggers:
-#   * push a tag like v2.0.0      -> release named after the tag
-#   * manual "Run workflow"       -> provide the version; a v<version> tag is created
-#
-# R-Portable is NOT built here — it is downloaded from a GitHub Release asset produced by
-# the stage-r-portable workflow. Update R_PORTABLE_TAG below whenever a new R build is staged.
+#   * push a tag like v2.0.0      -> Python-only release named after the tag
+#   * manual "Run workflow"       -> provide the version; optionally bundle_r=true for an R build
 
 on:
   push:
@@ -22,13 +23,18 @@ on:
         description: 'App version to build and release (e.g. 2.0.1)'
         required: true
         default: '2.0.0'
+      bundle_r:
+        description: 'Also bundle R-Portable + R plugins (FlowMagic/PeacoQC)? Leave false for a Python-only build.'
+        type: boolean
+        required: false
+        default: false
       r_portable_tag:
-        description: 'R-Portable release tag to bundle (leave blank to use the default below)'
+        description: 'R-Portable release tag to bundle (only used when bundle_r is true; blank = default below)'
         required: false
         default: ''
 
 env:
-  # Default R-Portable release tag — update this after running stage-r-portable
+  # Default R-Portable release tag — used only when bundle_r=true. Update after running stage-r-portable.
   R_PORTABLE_TAG: r-portable-2026-07-04
 
 permissions:
@@ -75,6 +81,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File engine\stage-python.ps1
 
       - name: Download R-Portable from release assets
+        if: ${{ github.event.inputs.bundle_r == 'true' }}
         shell: pwsh
         run: |
           # Prefer the workflow-dispatch override, then fall back to the env default.

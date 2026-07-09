@@ -238,6 +238,7 @@ public class CrossSampleController implements ContextAware, Refreshable {
     private void info(String title, String msg) {
         Alert a = new Alert(Alert.AlertType.INFORMATION);
         a.setTitle(title); a.setHeaderText(title); a.setContentText(msg);
+        AppIcons.theme(a, null);
         a.showAndWait();
     }
 
