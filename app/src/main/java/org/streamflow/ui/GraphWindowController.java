@@ -76,6 +76,8 @@ public class GraphWindowController {
     @FXML private ComboBox<String> sampleJumpCombo;
     @FXML private javafx.scene.control.CheckBox smoothCheck;
     @FXML private javafx.scene.control.CheckBox smoothDensityCheck, contourSmoothCheck;
+    @FXML private javafx.scene.control.Slider contourSmoothSlider;
+    @FXML private Label contourSmoothLabel;
     @FXML private javafx.scene.control.Slider contourLevelsSlider;
     @FXML private Label contourLevelsLabel;
     @FXML private javafx.scene.control.CheckBox contourOutliersCheck;
@@ -359,7 +361,18 @@ public class GraphWindowController {
         // touching density/zebra and vice-versa). The mutual "only one active at a time" is handled by
         // refreshOptionGroups() disabling whichever group isn't the current plot type.
         smoothDensityCheck.setOnAction(e -> plot.setSmoothDensity(smoothDensityCheck.isSelected()));
-        contourSmoothCheck.setOnAction(e -> plot.setSmoothContour(contourSmoothCheck.isSelected()));
+        contourSmoothCheck.setOnAction(e -> {
+            boolean on = contourSmoothCheck.isSelected();
+            plot.setSmoothContour(on);
+            contourSmoothSlider.setDisable(!on);   // strength only matters while smoothing is on
+        });
+        // Contour has its own blur-radius slider: the Density group (which owns the density/zebra
+        // smoothing strength) is disabled while contour is the active plot type, so it'd be unreachable.
+        contourSmoothSlider.valueProperty().addListener((o, a, b) -> {
+            int s = (int) Math.round(b.doubleValue());
+            contourSmoothLabel.setText("Contour smoothness: " + s);
+            plot.setContourSmoothStrength(s);
+        });
         contourLevelsSlider.valueProperty().addListener((o, a, b) -> {
             int n = (int) Math.round(b.doubleValue());
             contourLevelsLabel.setText("Contour lines: " + n);

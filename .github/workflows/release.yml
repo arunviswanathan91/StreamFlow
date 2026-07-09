@@ -10,7 +10,7 @@ name: release
 # are always Python-only; use "Run workflow" with bundle_r=true for an R-enabled build.
 #
 # Triggers:
-#   * push a tag like v2.0.0      -> Python-only release named after the tag
+#   * push a tag like v1.2.0      -> Python-only release named after the tag
 #   * manual "Run workflow"       -> provide the version; optionally bundle_r=true for an R build
 
 on:
@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'App version to build and release (e.g. 2.0.1)'
+        description: 'App version to build and release (e.g. 1.2.1)'
         required: true
-        default: '2.0.0'
+        default: '1.2.0'
       bundle_r:
         description: 'Also bundle R-Portable + R plugins (FlowMagic/PeacoQC)? Leave false for a Python-only build.'
         type: boolean
@@ -36,6 +36,8 @@ on:
 env:
   # Default R-Portable release tag — used only when bundle_r=true. Update after running stage-r-portable.
   R_PORTABLE_TAG: r-portable-2026-07-04
+  # Run all JavaScript actions on Node 24 — Node 20 is deprecated on the runners.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write          # required to create the release and upload assets
@@ -68,6 +70,15 @@ jobs:
           distribution: 'microsoft'
           java-version: '25'
           cache: maven
+
+      # Gate: if the app doesn't compile or a test fails, the job stops here and NO release is
+      # published (later steps, including "Publish GitHub Release", only run on success).
+      # Deliberately no `clean` — a later step stages the engine into app\target.
+      # Tests needing R or large FCS fixtures self-skip via JUnit assumptions.
+      - name: Build + test (release gate)
+        working-directory: app
+        shell: cmd
+        run: mvn -B test
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -139,7 +150,9 @@ jobs:
           path: app/target/dist/*.exe
           if-no-files-found: warn
 
+      # Only publishes when every prior step succeeded (build, tests, jpackage, installer located).
       - name: Publish GitHub Release
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           name: StreamFLOW ${{ steps.ver.outputs.version }}

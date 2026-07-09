@@ -6,7 +6,7 @@
 
   <groupId>org.streamflow</groupId>
   <artifactId>streamflow</artifactId>
-  <version>2.0.0</version>
+  <version>1.2.0</version>
   <packaging>jar</packaging>
   <name>StreamFLOW</name>
   <description>Native Java desktop UI for the StreamFLOW flow-cytometry suite (R compute engine in background)</description>

@@ -772,7 +772,7 @@ public class MainController implements JobRunner {
             iv.setFitWidth(120); iv.setFitHeight(120); iv.setPreserveRatio(true);
             box.getChildren().add(iv);
         }
-        Label name = new Label("StreamFLOW 2.0"); name.getStyleClass().add("title");
+        Label name = new Label("StreamFLOW 1.2.0"); name.getStyleClass().add("title");
         Label desc = new Label("Native JavaFX flow-cytometry analysis with a Python / FlowKit engine.\n"
                 + "FlowJo-class gating, compensation, and analysis — open and reproducible.");
         desc.getStyleClass().add("subtitle"); desc.setWrapText(true);
