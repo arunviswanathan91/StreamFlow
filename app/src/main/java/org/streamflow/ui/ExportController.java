@@ -78,6 +78,21 @@ public class ExportController implements ContextAware, Refreshable {
     @FXML private ScrollPane gsScrollPane;
     @FXML private Label gsStatusLabel;
 
+    // ---- Layout Editor tab (drag-drop plot tiles + batch multi-page PDF) ----
+    @FXML private javafx.scene.control.ComboBox<String> layoutSampleCombo;
+    @FXML private javafx.scene.control.TreeView<PopNode> layoutTree;
+    @FXML private javafx.scene.control.Spinner<Integer> layoutColsSpinner, layoutRowsSpinner;
+    @FXML private CheckBox layoutPaginateCheck;
+    @FXML private Button layoutSavePdfButton, layoutBatchButton, layoutClearButton;
+    @FXML private Pane layoutCanvas;
+    @FXML private ScrollPane layoutScroll;
+    @FXML private Label layoutStatusLabel;
+    /** Each dropped tile is a blueprint: the population's name-path from root, re-resolved per sample
+     *  at render/batch time. Tiles are auto-arranged into the Cols×Rows grid. */
+    private final List<java.util.List<String>> layoutTiles = new ArrayList<>();
+    private static final javafx.scene.input.DataFormat POP_PATH = new javafx.scene.input.DataFormat("streamflow/pop-path");
+    private static final double L_CELL_W = 240, L_CELL_H = 270, L_GAP = 18, L_MARGIN = 24;
+
     // canvas state
     private final List<VBox> gsCells = new ArrayList<>();
     private final java.util.IdentityHashMap<VBox, PopNode> cellPopMap = new java.util.IdentityHashMap<>();
@@ -162,6 +177,7 @@ public class ExportController implements ContextAware, Refreshable {
         gsCanvas.setOnMousePressed(e -> { if (e.getTarget() == gsCanvas) { clearGsSelection(); clearArrowSelection(); hideGsPopup(); } });
         gsScrollPane.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, this::onGsKeyPressed);
 
+        initLayoutTab();
         setDisabled(true);
     }
 
@@ -232,6 +248,226 @@ public class ExportController implements ContextAware, Refreshable {
         gsSampleCombo.setItems(FXCollections.observableArrayList(ctx.workspace().sampleNames()));
         if (keepGs != null && ctx.workspace().sampleNames().contains(keepGs)) gsSampleCombo.getSelectionModel().select(keepGs);
         else if (!ctx.workspace().sampleNames().isEmpty()) gsSampleCombo.getSelectionModel().selectFirst();
+
+        // ---- Layout tab: sample picker (drives the source population tree) ----
+        String keepLay = layoutSampleCombo.getValue();
+        layoutSampleCombo.setItems(FXCollections.observableArrayList(ctx.workspace().sampleNames()));
+        if (keepLay != null && ctx.workspace().sampleNames().contains(keepLay)) layoutSampleCombo.getSelectionModel().select(keepLay);
+        else if (!ctx.workspace().sampleNames().isEmpty()) layoutSampleCombo.getSelectionModel().selectFirst();
+        rebuildLayoutTree();
+    }
+
+    // ==== Layout Editor tab (drag-drop tiles + batch multi-page PDF) ===========
+
+    private void initLayoutTab() {
+        layoutColsSpinner.setValueFactory(new javafx.scene.control.SpinnerValueFactory.IntegerSpinnerValueFactory(1, 6, 2));
+        layoutRowsSpinner.setValueFactory(new javafx.scene.control.SpinnerValueFactory.IntegerSpinnerValueFactory(1, 6, 2));
+        layoutColsSpinner.valueProperty().addListener((o, a, b) -> renderLayoutForCurrentSample());
+        layoutSampleCombo.setOnAction(e -> { rebuildLayoutTree(); renderLayoutForCurrentSample(); });
+        layoutTree.setShowRoot(true);
+        layoutTree.setCellFactory(tv -> new javafx.scene.control.TreeCell<>() {
+            @Override protected void updateItem(PopNode n, boolean empty) {
+                super.updateItem(n, empty);
+                setText(empty || n == null ? null : (n.isRoot() ? "All Events" : n.name()));
+            }
+        });
+        // Drag a population out of the tree…
+        layoutTree.setOnDragDetected(e -> {
+            javafx.scene.control.TreeItem<PopNode> it = layoutTree.getSelectionModel().getSelectedItem();
+            if (it == null || it.getValue() == null) return;
+            javafx.scene.input.Dragboard db = layoutTree.startDragAndDrop(javafx.scene.input.TransferMode.COPY);
+            javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
+            cc.put(POP_PATH, new ArrayList<>(namePath(it.getValue())));
+            db.setContent(cc);
+            e.consume();
+        });
+        // …and drop it onto the canvas.
+        layoutCanvas.setOnDragOver(e -> {
+            if (e.getDragboard().hasContent(POP_PATH)) e.acceptTransferModes(javafx.scene.input.TransferMode.COPY);
+            e.consume();
+        });
+        layoutCanvas.setOnDragDropped(e -> {
+            javafx.scene.input.Dragboard db = e.getDragboard();
+            boolean ok = false;
+            if (db.hasContent(POP_PATH)) {
+                @SuppressWarnings("unchecked")
+                java.util.List<String> path = (java.util.List<String>) db.getContent(POP_PATH);
+                layoutTiles.add(new ArrayList<>(path));
+                renderLayoutForCurrentSample();
+                ok = true;
+            }
+            e.setDropCompleted(ok);
+            e.consume();
+        });
+    }
+
+    private void rebuildLayoutTree() {
+        if (ctx == null) return;
+        String sample = layoutSampleCombo.getValue();
+        if (sample == null || !ctx.workspace().hasTree(sample)) { layoutTree.setRoot(null); return; }
+        layoutTree.setRoot(buildLayoutItem(ctx.workspace().treeFor(sample)));
+        if (layoutTree.getRoot() != null) layoutTree.getRoot().setExpanded(true);
+    }
+    private javafx.scene.control.TreeItem<PopNode> buildLayoutItem(PopNode n) {
+        javafx.scene.control.TreeItem<PopNode> it = new javafx.scene.control.TreeItem<>(n);
+        for (PopNode c : n.children) it.getChildren().add(buildLayoutItem(c));
+        return it;
+    }
+
+    /** Name-path from root (root excluded) — lets the same population be re-resolved in another sample. */
+    private static java.util.List<String> namePath(PopNode p) {
+        java.util.ArrayList<String> path = new java.util.ArrayList<>();
+        for (PopNode n = p; n != null && !n.isRoot(); n = n.parent) path.add(0, n.name());
+        return path;
+    }
+    private static PopNode resolvePath(PopNode root, java.util.List<String> path) {
+        PopNode cur = root;
+        for (String name : path) {
+            PopNode next = null;
+            for (PopNode c : cur.children) if (name.equals(c.name())) { next = c; break; }
+            if (next == null) return null;
+            cur = next;
+        }
+        return cur;
+    }
+
+    private void renderLayoutForCurrentSample() {
+        String sample = layoutSampleCombo.getValue();
+        if (sample == null) return;
+        if (ctx.workspace().data(sample) == null) {
+            layoutStatusLabel.setText("Loading " + shortName(sample) + "…");
+            EventLoader.ensureLoaded(ctx, List.of(sample), layoutStatusLabel::setText, () -> renderTiles(sample, layoutCanvas, true));
+        } else {
+            renderTiles(sample, layoutCanvas, true);
+        }
+    }
+
+    /** Render every blueprint tile for one sample onto a canvas, arranged in the Cols grid. Populations
+     *  that don't exist in this sample are skipped. Returns the number of tiles placed. */
+    private int renderTiles(String sample, Pane canvas, boolean interactive) {
+        canvas.getChildren().clear();
+        EventData root = ctx.workspace().data(sample);
+        if (root == null) return 0;
+        PopNode rootNode = ctx.workspace().treeFor(sample);
+        int cols = Math.max(1, layoutColsSpinner.getValue());
+        int placed = 0;
+        for (java.util.List<String> path : layoutTiles) {
+            PopNode node = path.isEmpty() ? rootNode : resolvePath(rootNode, path);
+            if (node == null) continue;
+            VBox cell;
+            try { cell = makeStepCell(root, node); } catch (Exception ex) { continue; }
+            int col = placed % cols, row = placed / cols;
+            cell.setLayoutX(L_MARGIN + col * (L_CELL_W + L_GAP));
+            cell.setLayoutY(L_MARGIN + row * (L_CELL_H + L_GAP));
+            canvas.getChildren().add(cell);
+            placed++;
+        }
+        if (interactive) layoutStatusLabel.setText(placed + " tile(s) · " + shortName(sample)
+                + ". Drag more populations from the tree; Batch renders every sample.");
+        return placed;
+    }
+
+    @FXML private void onLayoutClear() {
+        layoutTiles.clear();
+        layoutCanvas.getChildren().clear();
+        layoutStatusLabel.setText("Canvas cleared.");
+    }
+
+    @FXML private void onLayoutSavePdf() {
+        if (layoutCanvas.getChildren().isEmpty()) { layoutStatusLabel.setText("Drop at least one population first."); return; }
+        File f = choosePdf("layout.pdf");
+        if (f == null) return;
+        javafx.scene.image.WritableImage img = snapPane(layoutCanvas);
+        new Thread(() -> {
+            try { writePdf(List.of(img), f); javafx.application.Platform.runLater(() -> layoutStatusLabel.setText("Saved " + f.getName() + ".")); }
+            catch (Exception ex) { javafx.application.Platform.runLater(() -> layoutStatusLabel.setText("PDF failed: " + ex.getMessage())); }
+        }, "layout-pdf").start();
+    }
+
+    /** Batch: render the tile template for EVERY sample (locked axes) → one page per sample → multi-page PDF. */
+    @FXML private void onLayoutBatch() {
+        if (layoutTiles.isEmpty()) { layoutStatusLabel.setText("Drop at least one population first."); return; }
+        java.util.List<String> allSamples = new ArrayList<>(ctx.workspace().sampleNames());
+        if (allSamples.isEmpty()) { layoutStatusLabel.setText("No samples loaded."); return; }
+        File f = choosePdf("layout_batch.pdf");
+        if (f == null) return;
+        layoutBatchButton.setDisable(true);
+        EventLoader.ensureLoaded(ctx, allSamples, layoutStatusLabel::setText,
+                () -> batchSequence(allSamples, 0, new ArrayList<>(), f));
+    }
+
+    /** Sequentially render each sample onto the live canvas, wait for the async plot render to settle,
+     *  snapshot it as a PDF page, then move on. FX-thread state machine with pauses (never blocks it). */
+    private void batchSequence(java.util.List<String> samples, int idx,
+                               java.util.List<javafx.scene.image.WritableImage> pages, File out) {
+        if (idx >= samples.size()) {
+            new Thread(() -> {
+                try {
+                    writePdf(pages, out);
+                    javafx.application.Platform.runLater(() -> {
+                        layoutStatusLabel.setText("Saved " + pages.size() + " page(s) → " + out.getName());
+                        layoutBatchButton.setDisable(false); renderLayoutForCurrentSample();
+                    });
+                } catch (Exception ex) {
+                    javafx.application.Platform.runLater(() -> {
+                        layoutStatusLabel.setText("PDF failed: " + ex.getMessage()); layoutBatchButton.setDisable(false);
+                    });
+                }
+            }, "layout-batch-pdf").start();
+            return;
+        }
+        String sample = samples.get(idx);
+        layoutStatusLabel.setText("Rendering " + (idx + 1) + "/" + samples.size() + " — " + shortName(sample) + "…");
+        int placed = renderTiles(sample, layoutCanvas, false);
+        // Let the async CytoPlot renders paint before snapshotting (50ms debounce + off-thread compute).
+        javafx.animation.PauseTransition pause = new javafx.animation.PauseTransition(javafx.util.Duration.millis(650));
+        pause.setOnFinished(e -> {
+            if (placed > 0) pages.add(snapPane(layoutCanvas));
+            batchSequence(samples, idx + 1, pages, out);
+        });
+        pause.play();
+    }
+
+    private File choosePdf(String defaultName) {
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Save layout as PDF");
+        fc.setInitialFileName(defaultName);
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("PDF document (*.pdf)", "*.pdf"));
+        return fc.showSaveDialog(layoutCanvas.getScene().getWindow());
+    }
+
+    /** Snapshot a canvas Pane at export DPI, cropped tight (white bg). */
+    private javafx.scene.image.WritableImage snapPane(Pane canvas) {
+        double scale = Math.max(1.0, (ctx != null ? ctx.settings().exportDpi() : 300) / 96.0);
+        javafx.scene.SnapshotParameters sp = new javafx.scene.SnapshotParameters();
+        sp.setFill(javafx.scene.paint.Color.WHITE);
+        sp.setTransform(javafx.scene.transform.Transform.scale(scale, scale));
+        double maxX = L_MARGIN, maxY = L_MARGIN;
+        for (javafx.scene.Node n : canvas.getChildren()) {
+            maxX = Math.max(maxX, n.getLayoutX() + n.getBoundsInParent().getWidth());
+            maxY = Math.max(maxY, n.getLayoutY() + n.getBoundsInParent().getHeight());
+        }
+        sp.setViewport(new javafx.geometry.Rectangle2D(0, 0, maxX + L_MARGIN, maxY + L_MARGIN));
+        return canvas.snapshot(sp, null);
+    }
+
+    /** Assemble one PDF page per image via Apache PDFBox. */
+    private static void writePdf(java.util.List<javafx.scene.image.WritableImage> pages, File out) throws Exception {
+        try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
+            for (javafx.scene.image.WritableImage img : pages) {
+                java.awt.image.BufferedImage bi = javafx.embed.swing.SwingFXUtils.fromFXImage(img, null);
+                org.apache.pdfbox.pdmodel.PDPage page = new org.apache.pdfbox.pdmodel.PDPage(
+                        new org.apache.pdfbox.pdmodel.common.PDRectangle(bi.getWidth(), bi.getHeight()));
+                doc.addPage(page);
+                org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject pdImg =
+                        org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory.createFromImage(doc, bi);
+                try (org.apache.pdfbox.pdmodel.PDPageContentStream cs =
+                             new org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page)) {
+                    cs.drawImage(pdImg, 0, 0, bi.getWidth(), bi.getHeight());
+                }
+            }
+            doc.save(out);
+        }
     }
 
     // ---- Gating Strategy canvas ----
@@ -332,6 +568,11 @@ public class ExportController implements ContextAware, Refreshable {
         plot.setLightMode(true);
         plot.setData(ev);
         plot.setView(ax, hist ? null : ay, scaleOf(axs), scaleOf(ays), hist ? "histogram" : "pseudocolor");
+        // Universal per-marker axis range (BUG-17) so panels match the graph window and gates align.
+        double[] xr = ax == null ? null : ctx.workspace().channelRange(ax);
+        if (xr != null) { plot.setXMin(xr[0]); plot.setXMax(xr[1]); }
+        double[] yr = (hist || ay == null) ? null : ctx.workspace().channelRange(ay);
+        if (yr != null) { plot.setYMin(yr[0]); plot.setYMax(yr[1]); }
         for (PopNode c : p.children) if (c.gate != null) {
             double[] off = ctx.workspace().popLabelOffset(c.name());   // BUG-14: universal label position
             if (off != null) { c.gate.lblDx = off[0]; c.gate.lblDy = off[1]; }
@@ -1283,6 +1524,7 @@ public class ExportController implements ContextAware, Refreshable {
     private void info(String title, String msg) {
         Alert a = new Alert(Alert.AlertType.INFORMATION);
         a.setTitle(title); a.setHeaderText(title); a.setContentText(msg);
+        AppIcons.theme(a, null);
         a.showAndWait();
     }
 

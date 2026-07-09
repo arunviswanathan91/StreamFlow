@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.Tab?>
+<?import javafx.scene.control.TabPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.SettingsController"
+      styleClass="content" spacing="12.0" prefWidth="440.0" prefHeight="320.0">
+    <children>
+        <Label text="Settings" styleClass="title"/>
+        <TabPane tabClosingPolicy="UNAVAILABLE" VBox.vgrow="ALWAYS">
+            <tabs>
+                <Tab text="General">
+                    <content>
+                        <VBox spacing="10.0" style="-fx-padding:12;">
+                            <children>
+                                <CheckBox fx:id="autoSaveCheck" text="Auto-save on by default"/>
+                                <CheckBox fx:id="lightBackgroundCheck" text="Light background by default (new Graph Windows)"/>
+                                <CheckBox fx:id="interceptCheck" text="X/Y intercept lines by default (new Graph Windows)"/>
+                                <Label text="These seed the state of a Graph Window when it's opened, and Auto-save when you start a New Workspace. Already-open windows are unaffected."
+                                       styleClass="subtitle" wrapText="true"/>
+                            </children>
+                        </VBox>
+                    </content>
+                </Tab>
+                <Tab text="Export">
+                    <content>
+                        <VBox spacing="10.0" style="-fx-padding:12;">
+                            <children>
+                                <Label text="Point size, fonts, DPI and gate-label export options are all in one place, shared by every Copy across the app:"
+                                       wrapText="true"/>
+                                <Button text="Copy / Export Format…" onAction="#onOpenCopySettings"/>
+                            </children>
+                        </VBox>
+                    </content>
+                </Tab>
+            </tabs>
+        </TabPane>
+        <HBox spacing="8.0" alignment="CENTER_RIGHT">
+            <children>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Button fx:id="closeButton" text="Close" onAction="#onClose" styleClass="primary"/>
+            </children>
+        </HBox>
+    </children>
+</VBox>

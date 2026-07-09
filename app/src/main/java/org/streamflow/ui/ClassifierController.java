@@ -264,6 +264,7 @@ public class ClassifierController implements ContextAware, Refreshable {
         a.setTitle(title);
         a.setHeaderText(title);
         a.setContentText(msg);
+        AppIcons.theme(a, null);
         a.showAndWait();
     }
 

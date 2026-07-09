@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <?import javafx.scene.control.Button?>
-<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.CheckMenuItem?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ListView?>
 <?import javafx.scene.control.Menu?>
@@ -12,11 +12,8 @@
 <?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.layout.BorderPane?>
 <?import javafx.scene.layout.HBox?>
-<?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
-<?import org.controlsfx.control.ToggleSwitch?>
-<?import org.kordamp.ikonli.javafx.FontIcon?>
 
 <BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
             fx:controller="org.streamflow.ui.MainController" styleClass="app-root">
@@ -32,6 +29,8 @@
                         <MenuItem text="Open Workspace…" onAction="#onOpenWorkspace"/>
                         <MenuItem text="Save Workspace" onAction="#onSaveWorkspace"/>
                         <MenuItem text="Save Workspace As…" onAction="#onSaveWorkspaceAs"/>
+                        <SeparatorMenuItem/>
+                        <CheckMenuItem fx:id="autoSaveMenuItem" text="Auto-save" selected="true"/>
                         <SeparatorMenuItem/>
                         <MenuItem text="Settings…" onAction="#onSettings"/>
                         <SeparatorMenuItem/>
@@ -51,37 +50,60 @@
     </top>
 
     <left>
-        <VBox styleClass="sidebar" prefWidth="220.0">
+        <!-- Collapsible sidebar: sidebarBox's width is what animates (220 <-> 20). Inside it, exactly
+             ONE of sidebarContent (full nav) / sidebarRibbon (thin re-expand tab) is visible at a time —
+             see MainController.collapseSidebar()/expandSidebar(). Global, applies to every tab, since
+             this whole region lives outside contentPane (which only the tab content occupies). -->
+        <VBox fx:id="sidebarBox" styleClass="sidebar" prefWidth="220.0" minWidth="220.0" maxWidth="220.0">
             <children>
-                <Label text="StreamFLOW" styleClass="brand"/>
-                <ListView fx:id="navList" VBox.vgrow="ALWAYS"/>
+                <StackPane VBox.vgrow="ALWAYS">
+                    <children>
+                        <VBox fx:id="sidebarContent" spacing="0">
+                            <children>
+                                <HBox alignment="CENTER_LEFT" spacing="6.0" styleClass="sidebar-header">
+                                    <children>
+                                        <Button fx:id="sidebarToggleButton" styleClass="sidebar-toggle">
+                                            <tooltip><Tooltip text="Collapse sidebar"/></tooltip>
+                                        </Button>
+                                        <Label text="StreamFLOW" styleClass="brand"/>
+                                    </children>
+                                </HBox>
+                                <ListView fx:id="navList" VBox.vgrow="ALWAYS"/>
+                            </children>
+                        </VBox>
+                        <VBox fx:id="sidebarRibbon" alignment="TOP_CENTER" visible="false" managed="false"
+                              styleClass="sidebar-ribbon">
+                            <children>
+                                <Button fx:id="ribbonExpandButton" styleClass="sidebar-toggle">
+                                    <tooltip><Tooltip text="Expand sidebar"/></tooltip>
+                                </Button>
+                            </children>
+                        </VBox>
+                    </children>
+                </StackPane>
             </children>
         </VBox>
     </left>
 
     <center>
-        <StackPane fx:id="contentPane"/>
+        <!-- The active module is swapped into moduleHost (showModule replaces ONLY moduleHost's child).
+             Toasts + the job chip are added as direct children of contentPane alongside moduleHost, so
+             they survive a tab switch (moduleHost is what gets wiped, not contentPane) WITHOUT a full-
+             size overlay on top — a full-size Region overlay intercepts every click regardless of
+             pickOnBounds, which is what made the whole content area unclickable. The toast/chip nodes
+             are small, bottom-anchored, and content-sized, so they never cover the module's click area. -->
+        <StackPane fx:id="contentPane">
+            <children>
+                <StackPane fx:id="moduleHost"/>
+            </children>
+        </StackPane>
     </center>
 
     <bottom>
-        <HBox styleClass="statusbar" spacing="10.0">
-            <children>
-                <ToggleSwitch fx:id="autoSaveToggle" text="Auto-save" selected="true">
-                    <tooltip><Tooltip text="Slide on to save the workspace automatically every few minutes. Turning it on asks you to choose a file if the workspace hasn't been saved yet."/></tooltip>
-                </ToggleSwitch>
-                <Label fx:id="statusLabel" text="Idle"/>
-                <Region HBox.hgrow="ALWAYS"/>
-                <Label fx:id="compBadge" text="Comp applied" visible="false" managed="false"
-                       style="-fx-text-fill:#2ECC71; -fx-font-size:11; -fx-cursor:hand;"
-                       onMouseClicked="#onCompBadgeClick">
-                    <graphic><FontIcon iconLiteral="fas-check-circle" iconSize="13" iconColor="#2ECC71"/></graphic>
-                    <tooltip><Tooltip text="Compensation is applied. Double-click to open Compensation module."/></tooltip>
-                </Label>
-                <ProgressBar fx:id="progressBar" prefWidth="180.0" progress="0.0"/>
-                <Button fx:id="cancelButton" text="Cancel"/>
-                <Label fx:id="engineLabel" text="Engine: starting…" styleClass="engine-status"/>
-            </children>
-        </HBox>
+        <!-- Extremely thin (3px), full-width ambient progress line — visible ONLY while a job is
+             running (collapses to zero height, invisible, when idle). Not a persistent status bar. -->
+        <ProgressBar fx:id="globalProgressBar" progress="0.0" maxHeight="3.0" prefHeight="3.0"
+                     maxWidth="Infinity" visible="false" managed="false" styleClass="thin-progress"/>
     </bottom>
 
 </BorderPane>

@@ -15,6 +15,18 @@ public final class AppSettings {
     private double chartTitleFontSize = 14.0; // title line font size (px at screen res)
     private double chartLegendFontSize = 11.0; // legend label + key swatch font size (px at screen res)
 
+    // Settings window "General" tab — defaults applied at startup / New Workspace / new Graph Window.
+    // Changing one of these does not retroactively touch already-open windows; it seeds new ones.
+    private boolean defaultAutoSave = true;
+    private boolean defaultLightBackground = false;
+    private boolean defaultInterceptLines = false;
+    public boolean defaultAutoSave() { return defaultAutoSave; }
+    public void setDefaultAutoSave(boolean b) { defaultAutoSave = b; fireChanged(); }
+    public boolean defaultLightBackground() { return defaultLightBackground; }
+    public void setDefaultLightBackground(boolean b) { defaultLightBackground = b; fireChanged(); }
+    public boolean defaultInterceptLines() { return defaultInterceptLines; }
+    public void setDefaultInterceptLines(boolean b) { defaultInterceptLines = b; fireChanged(); }
+
     // App-wide format: changing any of these notifies every open plot so Copy is consistent everywhere.
     private final java.util.List<Runnable> listeners = new java.util.ArrayList<>();
     public void addChangeListener(Runnable r) { listeners.add(r); }

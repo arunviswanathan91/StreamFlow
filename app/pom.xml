@@ -70,6 +70,13 @@
       <version>${jackson.version}</version>
     </dependency>
 
+    <!-- PDF output for the Layout Editor batch export (multi-page figures) -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.3</version>
+    </dependency>
+
     <!-- Logging -->
     <dependency>
       <groupId>org.slf4j</groupId>

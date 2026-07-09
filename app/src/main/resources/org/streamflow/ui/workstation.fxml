@@ -34,6 +34,9 @@
                 <Button fx:id="exportGatingMlButton" text="Export GatingML…" onAction="#onExportGatingMl">
                     <tooltip><Tooltip text="Export all gates as GatingML 2.0"/></tooltip>
                 </Button>
+                <Button fx:id="computeCountsButton" text="Compute counts" onAction="#onComputeAllCounts">
+                    <tooltip><Tooltip text="Compute event counts and %-of-parent for every gate on every sample, so the tree shows them without opening each sample. Saved with the workspace."/></tooltip>
+                </Button>
                 <Region HBox.hgrow="ALWAYS"/>
                 <Label fx:id="statusLabel" text="Load FCS (File ▸ Load FCS…) to begin. Right-click a sample or population for actions."/>
             </items>
