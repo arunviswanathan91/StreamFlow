@@ -43,6 +43,7 @@ public class CompensationController implements ContextAware, Refreshable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @FXML private Button extractButton, computeButton, applyButton, residualButton, previewButton, helpButton;
+    @FXML private Button stainIndexButton;
     @FXML private CheckBox nnlsCheckBox;
     @FXML private Label statusLabel;
     @FXML private TableView<Row> matrixTable;
@@ -260,6 +261,81 @@ public class CompensationController implements ContextAware, Refreshable {
         if (sampleCombo.getValue() != null) args.put("sample", sampleCombo.getValue());
         ctx.jobs().run(ctx.bridge().command("comp_residual", args), this::showResidual);
     }
+
+    /** Panel-wide Stain Index report: separation of each fluorochrome's positive population from the
+     *  universal negative, SI = (median_pos − median_neg) / (2 × SD_neg) [Reed et al.]. Reuses the
+     *  existing engine math — omitting "controls" lets the engine auto-assign the single-stain
+     *  controls (every non-unstained sample), so this works without running the wizard first. */
+    @FXML
+    private void onStainIndex() {
+        if (ctx == null) return;
+        statusLabel.setText("Computing stain index from single-stain controls…");
+        ctx.jobs().run(ctx.bridge().command("compute_spillover_from_controls", JSON.createObjectNode()),
+                this::showStainIndexReport);
+    }
+
+    private void showStainIndexReport(JsonNode result) {
+        JsonNode reports = result.path("controls");
+        if (!reports.isArray() || reports.isEmpty()) {
+            statusLabel.setText("No single-stain controls detected — cannot compute stain index.");
+            return;
+        }
+        // Sort brightest-separating first so weak fluorochromes surface at the bottom.
+        List<JsonNode> rows = new ArrayList<>();
+        reports.forEach(rows::add);
+        rows.sort((a, b) -> Double.compare(b.path("stain_index").asDouble(-1), a.path("stain_index").asDouble(-1)));
+
+        javafx.scene.control.TableView<JsonNode> table = new javafx.scene.control.TableView<>();
+        table.setItems(FXCollections.observableArrayList(rows));
+        table.setPrefSize(640, 360);
+        table.getColumns().addAll(java.util.List.of(
+                strCol("Detector", n -> {
+                    String d = n.path("channel").asText("");   // engine key is "channel", not "detector"
+                    String alias = ctx.aliases().target(d);
+                    return (alias == null || alias.isBlank()) ? d : d + "  (" + alias + ")";
+                }),
+                strCol("Control sample", n -> shortName(n.path("sample").asText(""))),
+                strCol("Stain index", n -> {
+                    double si = n.path("stain_index").asDouble(-1);
+                    return si < 0 ? "—" : String.format("%.1f", si);
+                }),
+                strCol("% positive", n -> String.format("%.1f%%", n.path("pct_pos").asDouble())),
+                strCol("Events (pos)", n -> String.format("%,d", n.path("n_pos").asInt())),
+                strCol("Verdict", n -> {
+                    double si = n.path("stain_index").asDouble(-1);
+                    if (!n.path("ok").asBoolean(true)) return "⚠ weak separation";
+                    if (si < 0) return "—";
+                    return si >= 5 ? "Good" : (si >= 2 ? "Moderate" : "Weak");
+                })));
+
+        VBox box = new VBox(10,
+                new Label("Stain index = (median positive − median negative) / (2 × SD negative)  [Reed et al.].\n"
+                        + "Good ≥ 5   ·   Moderate 2–5   ·   Weak < 2. Low values mean that fluorochrome "
+                        + "separates poorly — consider a brighter dye or more antibody."),
+                table);
+        box.setStyle("-fx-padding:14;");
+
+        javafx.scene.control.Dialog<javafx.scene.control.ButtonType> dlg = new javafx.scene.control.Dialog<>();
+        dlg.setTitle("Panel Stain Index report");
+        dlg.setHeaderText(null);
+        dlg.getDialogPane().setContent(box);
+        dlg.getDialogPane().getButtonTypes().add(javafx.scene.control.ButtonType.CLOSE);
+        dlg.setResizable(true);
+        AppIcons.theme(dlg, statusLabel.getScene() == null ? null : statusLabel.getScene().getWindow());
+        statusLabel.setText("Stain index computed for " + rows.size() + " control(s).");
+        dlg.showAndWait();
+    }
+
+    /** A read-only string column driven by a value extractor over the raw JSON row. */
+    private static javafx.scene.control.TableColumn<JsonNode, String> strCol(
+            String title, java.util.function.Function<JsonNode, String> f) {
+        javafx.scene.control.TableColumn<JsonNode, String> c = new javafx.scene.control.TableColumn<>(title);
+        c.setCellValueFactory(cd -> new ReadOnlyStringWrapper(f.apply(cd.getValue())));
+        c.setPrefWidth(title.equals("Detector") ? 200 : 105);
+        return c;
+    }
+
+    private static String shortName(String s) { return s == null ? "" : s.replaceAll("(?i)\\.fcs$", ""); }
 
     private void showResidual(JsonNode result) {
         flaggedRows.clear();

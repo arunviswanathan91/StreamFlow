@@ -224,6 +224,11 @@
                 <TitledPane fx:id="contourGroup" text="Contour plot" expanded="false" animated="true">
                     <VBox spacing="5.0" style="-fx-padding:6;">
                         <CheckBox fx:id="contourSmoothCheck" text="Contour smooth" selected="true"/>
+                        <Label fx:id="contourSmoothLabel" text="Contour smoothness: 3" minWidth="140.0"/>
+                        <Slider fx:id="contourSmoothSlider" min="1" max="8" value="3" majorTickUnit="1"
+                                showTickMarks="true" snapToTicks="true">
+                            <tooltip><Tooltip text="Blur radius used to smooth the contour density field (independent of Density smoothing)"/></tooltip>
+                        </Slider>
                         <Label fx:id="contourLevelsLabel" text="Contour lines: 10" minWidth="140.0"/>
                         <Slider fx:id="contourLevelsSlider" min="3" max="30" value="10" majorTickUnit="9" showTickMarks="true">
                             <tooltip><Tooltip text="Number of iso-density contour lines — more lines = finer detail"/></tooltip>
