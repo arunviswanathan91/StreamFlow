@@ -11,6 +11,7 @@ import javafx.fxml.FXML;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
@@ -23,15 +24,13 @@ import org.streamflow.bridge.RJobException;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * Application shell: left-nav module switching, the shared status bar, the File
+ * Application shell: left-nav module switching, floating toast/job-chip notifications, the File
  * menu (workspace save/open), and the {@link JobRunner} that all modules use to
  * run engine commands with shared progress + cancel. Module views are loaded
  * from FXML and handed an {@link AppContext} once the engine is ready.
@@ -39,16 +38,31 @@ import java.util.function.Consumer;
 public class MainController implements JobRunner {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     @FXML private ListView<String> navList;
     @FXML private StackPane contentPane;
-    @FXML private Label statusLabel;
-    @FXML private Label engineLabel;
-    @FXML private Label compBadge;
-    @FXML private ProgressBar progressBar;
-    @FXML private Button cancelButton;
-    @FXML private org.controlsfx.control.ToggleSwitch autoSaveToggle;
+    @FXML private StackPane moduleHost;
+    @FXML private ProgressBar globalProgressBar;
+    @FXML private CheckMenuItem autoSaveMenuItem;
+
+    // ---- collapsible sidebar (global — same behaviour from every tab, since this whole region
+    // lives outside contentPane) ----
+    @FXML private javafx.scene.layout.VBox sidebarBox;
+    @FXML private javafx.scene.layout.VBox sidebarContent;
+    @FXML private javafx.scene.layout.VBox sidebarRibbon;
+    @FXML private Button sidebarToggleButton;
+    @FXML private Button ribbonExpandButton;
+    private boolean sidebarCollapsed = false;
+    // Collapsed strip is wide enough that the expand arrow sits fully inside it with margin on both
+    // sides, so it reads as a slim clickable edge tab rather than a button clipped by too-narrow a strip.
+    private static final double SIDEBAR_EXPANDED_W = 220, SIDEBAR_COLLAPSED_W = 32;
+
+    // Floating overlay UI (replaces the old persistent bottom status bar): toasts for one-off
+    // messages, and a job chip (spin icon + cancel) that only exists while a task is running.
+    // Overall progress shows on the thin globalProgressBar strip instead of inside the chip.
+    private javafx.scene.layout.HBox jobChip;
+    private Button chipCancelButton;
+    private javafx.animation.RotateTransition jobChipSpin;
 
     // module name -> view node and controller
     private final Map<String, Node> views = new LinkedHashMap<>();
@@ -106,14 +120,128 @@ public class MainController implements JobRunner {
         navList.getSelectionModel().selectedItemProperty().addListener((o, prev, sel) -> showModule(sel));
         navList.getSelectionModel().select("Workstation");
 
-        progressBar.setProgress(0);
-        cancelButton.setDisable(true);
-        cancelButton.setOnAction(e -> { if (currentTask != null && currentTask.isRunning()) currentTask.cancel(); });
+        // AutoSave starts ON by default (per user preference) — the menu item's FXML selected="true"
+        // matches this so no spurious onAutoSaveChanged fires here (no value change occurs).
+        autoSaveMenuItem.setSelected(true);
+        autoSaveEnabled = true;
+        autoSaveMenuItem.selectedProperty().addListener((o, was, on) -> onAutoSaveChanged(on));
 
-        // AutoSave starts OFF — turns on automatically after the first manual workspace save.
-        autoSaveToggle.setSelected(false);
-        autoSaveEnabled = false;
-        autoSaveToggle.selectedProperty().addListener((o, was, on) -> onAutoSaveChanged(on));
+        setupSidebarToggle();
+    }
+
+    /** Global collapsible-sidebar toggle (works identically from every tab, since {@code sidebarBox}
+     *  lives outside {@code contentPane}). Collapsing shrinks the sidebar to a thin edge ribbon so the
+     *  active tab can use the full window width; the ribbon re-expands it. */
+    private void setupSidebarToggle() {
+        iconOnlyButton(sidebarToggleButton, "fas-angle-left");
+        iconOnlyButton(ribbonExpandButton, "fas-angle-right");
+        UiFx.hoverPulse(sidebarToggleButton);
+        UiFx.hoverPulse(ribbonExpandButton);
+        sidebarToggleButton.setOnAction(e -> collapseSidebar());
+        ribbonExpandButton.setOnAction(e -> expandSidebar());
+        // The whole collapsed strip is clickable (it lights up on hover), not just the arrow glyph —
+        // a bigger, more forgiving target that matches the "click the edge tab to expand" affordance.
+        sidebarRibbon.setOnMouseClicked(e -> expandSidebar());
+    }
+
+    private static void iconOnlyButton(Button b, String iconLiteral) {
+        org.kordamp.ikonli.javafx.FontIcon fi = new org.kordamp.ikonli.javafx.FontIcon(iconLiteral);
+        fi.setIconSize(14);
+        fi.setIconColor(javafx.scene.paint.Color.web("#CFE3F2"));
+        b.setGraphic(fi);
+    }
+
+    /** Animate the sidebar down to a thin ribbon: fade the nav content out, shrink the width, then
+     *  swap in the ribbon tab (faded in). */
+    private void collapseSidebar() {
+        if (sidebarCollapsed) return;
+        sidebarCollapsed = true;
+        javafx.animation.FadeTransition fadeOutContent =
+                new javafx.animation.FadeTransition(javafx.util.Duration.millis(120), sidebarContent);
+        fadeOutContent.setFromValue(1); fadeOutContent.setToValue(0);
+        fadeOutContent.setOnFinished(e1 -> {
+            sidebarContent.setVisible(false); sidebarContent.setManaged(false);
+            javafx.animation.Timeline shrink = new javafx.animation.Timeline(
+                    new javafx.animation.KeyFrame(javafx.util.Duration.millis(200),
+                            new javafx.animation.KeyValue(sidebarBox.prefWidthProperty(), SIDEBAR_COLLAPSED_W, javafx.animation.Interpolator.EASE_BOTH),
+                            new javafx.animation.KeyValue(sidebarBox.minWidthProperty(), SIDEBAR_COLLAPSED_W, javafx.animation.Interpolator.EASE_BOTH),
+                            new javafx.animation.KeyValue(sidebarBox.maxWidthProperty(), SIDEBAR_COLLAPSED_W, javafx.animation.Interpolator.EASE_BOTH)));
+            shrink.setOnFinished(e2 -> {
+                sidebarRibbon.setVisible(true); sidebarRibbon.setManaged(true);
+                sidebarRibbon.setOpacity(0);
+                javafx.animation.FadeTransition fadeInRibbon =
+                        new javafx.animation.FadeTransition(javafx.util.Duration.millis(120), sidebarRibbon);
+                fadeInRibbon.setFromValue(0); fadeInRibbon.setToValue(1);
+                fadeInRibbon.play();
+            });
+            shrink.play();
+        });
+        fadeOutContent.play();
+    }
+
+    /** Reverse of {@link #collapseSidebar()}: fade the ribbon out, grow the width back, then fade the
+     *  nav content back in. */
+    private void expandSidebar() {
+        if (!sidebarCollapsed) return;
+        sidebarCollapsed = false;
+        javafx.animation.FadeTransition fadeOutRibbon =
+                new javafx.animation.FadeTransition(javafx.util.Duration.millis(100), sidebarRibbon);
+        fadeOutRibbon.setFromValue(1); fadeOutRibbon.setToValue(0);
+        fadeOutRibbon.setOnFinished(e1 -> {
+            sidebarRibbon.setVisible(false); sidebarRibbon.setManaged(false);
+            javafx.animation.Timeline grow = new javafx.animation.Timeline(
+                    new javafx.animation.KeyFrame(javafx.util.Duration.millis(200),
+                            new javafx.animation.KeyValue(sidebarBox.prefWidthProperty(), SIDEBAR_EXPANDED_W, javafx.animation.Interpolator.EASE_BOTH),
+                            new javafx.animation.KeyValue(sidebarBox.minWidthProperty(), SIDEBAR_EXPANDED_W, javafx.animation.Interpolator.EASE_BOTH),
+                            new javafx.animation.KeyValue(sidebarBox.maxWidthProperty(), SIDEBAR_EXPANDED_W, javafx.animation.Interpolator.EASE_BOTH)));
+            grow.setOnFinished(e2 -> {
+                sidebarContent.setVisible(true); sidebarContent.setManaged(true);
+                sidebarContent.setOpacity(0);
+                javafx.animation.FadeTransition fadeInContent =
+                        new javafx.animation.FadeTransition(javafx.util.Duration.millis(140), sidebarContent);
+                fadeInContent.setFromValue(0); fadeInContent.setToValue(1);
+                fadeInContent.play();
+            });
+            grow.play();
+        });
+        fadeOutRibbon.play();
+    }
+
+    /** Lazily build the floating job-cancel chip (shown only while a task is running). Compact —
+     *  no internal ProgressBar; overall progress now shows as the extremely thin {@code
+     *  globalProgressBar} strip at the very bottom of the window instead. */
+    private void ensureJobChip() {
+        if (jobChip != null) return;
+        chipCancelButton = new Button("Cancel");
+        chipCancelButton.setStyle("-fx-font-size: 11px; -fx-padding: 2 8 2 8;");
+        chipCancelButton.setOnAction(e -> { if (currentTask != null && currentTask.isRunning()) currentTask.cancel(); });
+        org.kordamp.ikonli.javafx.FontIcon spinnerIcon = new org.kordamp.ikonli.javafx.FontIcon("fas-sync-alt");
+        spinnerIcon.setIconSize(12);
+        spinnerIcon.setIconColor(javafx.scene.paint.Color.web("#8FD3FF"));
+        jobChipSpin = UiFx.spin(spinnerIcon);
+        Label working = new Label("Working…");
+        working.setStyle("-fx-text-fill: white; -fx-font-size: 11px;");
+        jobChip = new javafx.scene.layout.HBox(6, spinnerIcon, working, chipCancelButton);
+        jobChip.setStyle("-fx-background-color: rgba(20,30,45,0.92); -fx-padding: 4 10 4 10; -fx-background-radius: 5;");
+        jobChip.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        StackPane.setAlignment(jobChip, javafx.geometry.Pos.BOTTOM_LEFT);
+        StackPane.setMargin(jobChip, new javafx.geometry.Insets(0, 0, 16, 16));
+    }
+
+    /** Show/hide the floating job chip AND the thin global progress strip — the only trace of
+     *  "something is running" now that the persistent status bar is gone. Bound to the engine-wide
+     *  busy signal, not any single task. */
+    private void setJobChipVisible(boolean visible) {
+        ensureJobChip();
+        if (visible) {
+            if (!contentPane.getChildren().contains(jobChip)) contentPane.getChildren().add(jobChip);
+            jobChipSpin.play();
+        } else {
+            contentPane.getChildren().remove(jobChip);
+            jobChipSpin.pause();
+        }
+        globalProgressBar.setVisible(visible);
+        globalProgressBar.setManaged(visible);
     }
 
     private void loadModule(String name, String fxml) {
@@ -129,7 +257,8 @@ public class MainController implements JobRunner {
 
     private void showModule(String name) {
         Node node = (name == null) ? null : views.get(name);
-        contentPane.getChildren().setAll(node != null ? node : placeholder);
+        // Swap ONLY the module host's child — contentPane's other children (toasts, job chip) persist.
+        moduleHost.getChildren().setAll(node != null ? node : placeholder);
     }
 
     /** Called once the engine is ready; distributes the context to all modules. */
@@ -140,15 +269,12 @@ public class MainController implements JobRunner {
         AppContext ctx = new AppContext(bridge, this, new ChannelAliases(), workspace, settings, new AuditLog(), new FmoStore(),
                 name -> Platform.runLater(() -> navList.getSelectionModel().select(name)));
         this.appCtx = ctx;
-        compBadge.visibleProperty().bind(workspace.compApplied());
-        compBadge.managedProperty().bind(workspace.compApplied());
+        // Compensation applied is now a one-time toast instead of a persistent badge.
+        workspace.compApplied().addListener((o, was, applied) -> { if (applied) toast("Compensation applied.", "#2E7D32"); });
         for (Object c : controllers.values()) {
             if (c instanceof ContextAware ca) ca.init(ctx);
         }
-        bridge.busyProperty().addListener((o, was, busy) -> {
-            cancelButton.setDisable(!busy);
-            statusLabel.setText(busy ? "Working…" : "Idle");
-        });
+        bridge.busyProperty().addListener((o, was, busy) -> setJobChipVisible(busy));
         startAutoSave();
     }
 
@@ -186,6 +312,7 @@ public class MainController implements JobRunner {
                 javafx.scene.control.Alert.AlertType.CONFIRMATION, msg,
                 javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
         a.setTitle("Save workspace?"); a.setHeaderText(header);
+        AppIcons.theme(a, window());
         if (a.showAndWait().orElse(javafx.scene.control.ButtonType.NO) == javafx.scene.control.ButtonType.YES) {
             onSaveWorkspace();
         }
@@ -204,6 +331,7 @@ public class MainController implements JobRunner {
                     "Auto-save needs a file to write to. Save this workspace now?",
                     javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
             a.setTitle("Auto-save"); a.setHeaderText("Save the workspace?");
+            AppIcons.theme(a, window());
             if (a.showAndWait().orElse(javafx.scene.control.ButtonType.NO) == javafx.scene.control.ButtonType.YES) {
                 onSaveWorkspace();
             }
@@ -224,6 +352,7 @@ public class MainController implements JobRunner {
                 "You have unsaved gating changes.",
                 save, discard, javafx.scene.control.ButtonType.CANCEL);
         a.setTitle("Close StreamFLOW"); a.setHeaderText("Save before closing?");
+        AppIcons.theme(a, window());
         javafx.scene.control.ButtonType r = a.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
         if (r == javafx.scene.control.ButtonType.CANCEL) { if (ev != null) ev.consume(); return; }
         if (r == discard) { Platform.exit(); return; }
@@ -234,7 +363,7 @@ public class MainController implements JobRunner {
     }
 
     public void setEngineStatus(String text) {
-        Platform.runLater(() -> engineLabel.setText(text));
+        Platform.runLater(() -> toast(text, "#243447"));
     }
 
     // ---- JobRunner ----------------------------------------------------------
@@ -242,14 +371,15 @@ public class MainController implements JobRunner {
     @Override
     public <T> void run(Task<T> task, Consumer<T> onSuccess) {
         currentTask = task;
+        ensureJobChip();
         // Never let the bar go indeterminate (-1): the animated indeterminate
         // ProgressBar forces continuous scene repaints (the whole-window "shimmer").
         // Show determinate progress when a task reports it, else a static 0.
-        progressBar.progressProperty().unbind();
-        progressBar.setProgress(0);
+        globalProgressBar.progressProperty().unbind();
+        globalProgressBar.setProgress(0);
         task.progressProperty().addListener((o, ov, nv) -> {
             double p = nv.doubleValue();
-            progressBar.setProgress(p < 0 ? 0 : p);
+            globalProgressBar.setProgress(p < 0 ? 0 : p);
         });
 
         task.setOnSucceeded(e -> {
@@ -274,13 +404,50 @@ public class MainController implements JobRunner {
 
     @Override
     public void status(String message) {
-        String line = "[" + LocalTime.now().format(TS) + "] " + message;
-        if (Platform.isFxApplicationThread()) statusLabel.setText(line);
-        else Platform.runLater(() -> statusLabel.setText(line));
+        if (message == null || message.isBlank()) return;
+        boolean error = message.startsWith("ERROR") || message.startsWith("FAILED");
+        if (Platform.isFxApplicationThread()) toast(message, error ? "#B00020" : "#243447");
+        else Platform.runLater(() -> toast(message, error ? "#B00020" : "#243447"));
     }
 
     private void resetProgress() {
-        progressBar.setProgress(0);
+        if (globalProgressBar != null) globalProgressBar.setProgress(0);
+    }
+
+    // Bottom-right stack of active toasts, so simultaneous notifications (e.g. a save confirmation
+    // and an error) appear one above the other instead of exactly overlapping. Lazily created.
+    private javafx.scene.layout.VBox toastStack;
+
+    private void ensureToastStack() {
+        if (toastStack != null) return;
+        toastStack = new javafx.scene.layout.VBox(6);
+        toastStack.setAlignment(javafx.geometry.Pos.BOTTOM_RIGHT);
+        toastStack.setPickOnBounds(false);   // empty gaps between toasts never intercept clicks
+        StackPane.setAlignment(toastStack, javafx.geometry.Pos.BOTTOM_RIGHT);
+        StackPane.setMargin(toastStack, new javafx.geometry.Insets(0, 20, 20, 0));
+        contentPane.getChildren().add(toastStack);
+    }
+
+    /** Floating, auto-dismissing notification — replaces the removed persistent status bar for
+     *  one-off messages (save/load confirmations, errors, engine status). Bottom-right, ~3.5s total.
+     *  Stacks with any other currently-visible toasts instead of overlapping them. */
+    private void toast(String message, String colorHex) {
+        ensureToastStack();
+        Label t = new Label(message);
+        t.setStyle(
+                "-fx-background-color: " + colorHex + ";" +
+                "-fx-text-fill: white;" +
+                "-fx-padding: 6 14 6 14;" +
+                "-fx-background-radius: 6;" +
+                "-fx-font-size: 12px;");
+        toastStack.getChildren().add(t);
+        javafx.animation.FadeTransition fade = new javafx.animation.FadeTransition(
+                javafx.util.Duration.seconds(2.0), t);
+        fade.setFromValue(1.0);
+        fade.setToValue(0.0);
+        fade.setDelay(javafx.util.Duration.seconds(1.5));
+        fade.setOnFinished(e -> toastStack.getChildren().remove(t));
+        fade.play();
     }
 
     // ---- File menu: workspace ----------------------------------------------
@@ -297,6 +464,7 @@ public class MainController implements JobRunner {
                     "You have unsaved gating changes. Save before opening another workspace?",
                     save, discard, javafx.scene.control.ButtonType.CANCEL);
             ask.setTitle("Unsaved changes"); ask.setHeaderText("Save current workspace?");
+            AppIcons.theme(ask, window());
             javafx.scene.control.ButtonType r = ask.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
             if (r == javafx.scene.control.ButtonType.CANCEL) return;
             if (r == save) {
@@ -326,7 +494,7 @@ public class MainController implements JobRunner {
             refreshModules();
             lastWorkspaceFile = f;
             if (workspace != null) workspace.markClean();
-            if (!autoSaveEnabled) { autoSaveEnabled = true; autoSaveToggle.setSelected(true); }
+            if (!autoSaveEnabled) { autoSaveEnabled = true; autoSaveMenuItem.setSelected(true); }
             asked10 = asked30 = false; sessionStartMs = System.currentTimeMillis();
             navList.getSelectionModel().select("Workstation");
             status("Workspace loaded: " + f.getName());
@@ -344,6 +512,7 @@ public class MainController implements JobRunner {
                     "You have unsaved gating changes.",
                     save, discard, javafx.scene.control.ButtonType.CANCEL);
             ask.setTitle("New Workspace"); ask.setHeaderText("Save before starting fresh?");
+            AppIcons.theme(ask, window());
             javafx.scene.control.ButtonType r = ask.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
             if (r == javafx.scene.control.ButtonType.CANCEL) return;
             if (r == save) { smartSave(); return; }   // user starts New Workspace again after save
@@ -374,6 +543,7 @@ public class MainController implements JobRunner {
                 "Search sub-folders for .fcs files too?",
                 javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
         ask.setHeaderText("Include sub-folders?");
+        AppIcons.theme(ask, window());
         boolean recursive = ask.showAndWait().orElse(javafx.scene.control.ButtonType.NO)
                 == javafx.scene.control.ButtonType.YES;
         ObjectNode args = JSON.createObjectNode();
@@ -395,8 +565,9 @@ public class MainController implements JobRunner {
         if (workspace != null) workspace.clearAll();
         if (appCtx != null) appCtx.fmo().clearAll();
         lastWorkspaceFile = null;
-        autoSaveEnabled = false;
-        autoSaveToggle.setSelected(false);
+        // Auto-save follows the Settings ▸ General default (ON unless the user changed it this session).
+        autoSaveEnabled = settings == null || settings.defaultAutoSave();
+        autoSaveMenuItem.setSelected(autoSaveEnabled);
         asked10 = asked30 = false;
         sessionStartMs = System.currentTimeMillis();
         refreshModules();   // update all UI panels to reflect the now-empty workspace
@@ -459,32 +630,16 @@ public class MainController implements JobRunner {
                 // First manual save → turn autosave on automatically
                 if (!autoSaveEnabled) {
                     autoSaveEnabled = true;
-                    autoSaveToggle.setSelected(true);
+                    autoSaveMenuItem.setSelected(true);
                 }
             }
             if (onDone != null) onDone.run();
         });
     }
 
-    /** Floating toast shown after a silent auto-save — fades out after ~3.5 s. */
+    /** Floating toast shown after a silent auto-save. */
     private void showAutoSaveToast(String filename) {
-        javafx.scene.control.Label toast = new javafx.scene.control.Label("✓  Auto-saved · " + filename);
-        toast.setStyle(
-                "-fx-background-color: #2E7D32;" +
-                "-fx-text-fill: white;" +
-                "-fx-padding: 6 14 6 14;" +
-                "-fx-background-radius: 6;" +
-                "-fx-font-size: 12px;");
-        javafx.scene.layout.StackPane.setAlignment(toast, javafx.geometry.Pos.BOTTOM_RIGHT);
-        javafx.scene.layout.StackPane.setMargin(toast, new javafx.geometry.Insets(0, 20, 20, 0));
-        contentPane.getChildren().add(toast);
-        javafx.animation.FadeTransition fade = new javafx.animation.FadeTransition(
-                javafx.util.Duration.seconds(2.0), toast);
-        fade.setFromValue(1.0);
-        fade.setToValue(0.0);
-        fade.setDelay(javafx.util.Duration.seconds(1.5));
-        fade.setOnFinished(e -> contentPane.getChildren().remove(toast));
-        fade.play();
+        toast("✓  Auto-saved · " + filename, "#2E7D32");
     }
 
     // ---- workspace gate (de)serialization -----------------------------------
@@ -507,6 +662,7 @@ public class MainController implements JobRunner {
                 if (n.parent != null && !n.parent.isRoot()) gn.put("parent_id", ids.get(n.parent));
                 gn.put("name", g.name);
                 gn.put("type", g.type);
+                if ("subsample".equals(g.type)) { gn.put("sub_n", g.subN); gn.put("sub_seed", g.subSeed); }
                 gn.put("x_channel", g.xChan);
                 if (g.yChan != null && !g.yChan.isBlank()) gn.put("y_channel", g.yChan);
                 gn.put("angle", g.angle);
@@ -521,6 +677,10 @@ public class MainController implements JobRunner {
                 if (n.viewXScale != null) gn.put("view_x_scale", n.viewXScale);
                 if (n.viewYScale != null) gn.put("view_y_scale", n.viewYScale);
                 if (g.lblDx != 0 || g.lblDy != -4) { gn.put("lbl_dx", g.lblDx); gn.put("lbl_dy", g.lblDy); }
+                // Persist computed counts so the Workstation tree shows %/counts for EVERY sample on
+                // reopen without needing to open each one (BUG-16).
+                if (n.count >= 0) gn.put("count", n.count);
+                if (!Double.isNaN(n.parentPct)) gn.put("parent_pct", n.parentPct);
                 arr.add(gn);
             }
             if (!arr.isEmpty()) out.set(sample, arr);
@@ -544,6 +704,7 @@ public class MainController implements JobRunner {
                         gn.path("x_channel").asText(null),
                         gn.path("y_channel").asText(null), xs, ys);
                 g.angle = gn.path("angle").asDouble(0);
+                if ("subsample".equals(g.type)) { g.subN = gn.path("sub_n").asInt(-1); g.subSeed = gn.path("sub_seed").asLong(0); }
                 PopNode pn = new PopNode(g, null);
                 // Restore the per-node view (axes + scales) saved by serializeGates. See ui-bug-log BUG-09.
                 pn.viewX      = gn.path("view_x").asText(null);
@@ -552,6 +713,8 @@ public class MainController implements JobRunner {
                 pn.viewYScale = gn.path("view_y_scale").asText(null);
                 if (gn.has("lbl_dx")) g.lblDx = gn.path("lbl_dx").asDouble(0);
                 if (gn.has("lbl_dy")) g.lblDy = gn.path("lbl_dy").asDouble(-4);
+                pn.count = gn.path("count").asInt(-1);                      // BUG-16: restore saved counts
+                if (gn.has("parent_pct")) pn.parentPct = gn.path("parent_pct").asDouble();
                 byId.put(gn.path("id").asText(), pn);
             }
             for (JsonNode gn : arr) {                       // pass 2: link parents
@@ -590,37 +753,13 @@ public class MainController implements JobRunner {
     @FXML
     private void onSettings() {
         if (settings == null) { status("Engine not ready."); return; }
-        javafx.scene.control.Spinner<Integer> dpi = new javafx.scene.control.Spinner<>(72, 1200, settings.exportDpi(), 50);
-        dpi.setEditable(true);
-        javafx.scene.layout.GridPane export = new javafx.scene.layout.GridPane();
-        export.setHgap(10); export.setVgap(8); export.setStyle("-fx-padding:14;");
-        export.addRow(0, new Label("Export DPI:"), dpi);
-        export.add(new Label("Used by Copy and Save-as-SVG (300 = publication)."), 0, 1, 2, 1);
-
-        Label about = new Label("StreamFLOW 2.0\nNative JavaFX flow-cytometry analysis.\nPython/FlowKit engine.");
-        about.setStyle("-fx-padding:14;");
-
-        javafx.scene.control.TabPane tabs = new javafx.scene.control.TabPane(
-                new javafx.scene.control.Tab("Export", export),
-                new javafx.scene.control.Tab("About", about));
-        tabs.setTabClosingPolicy(javafx.scene.control.TabPane.TabClosingPolicy.UNAVAILABLE);
-
-        javafx.scene.control.Dialog<javafx.scene.control.ButtonType> dlg = new javafx.scene.control.Dialog<>();
-        dlg.setTitle("Settings"); dlg.setHeaderText(null);
-        dlg.getDialogPane().setContent(tabs);
-        dlg.getDialogPane().getButtonTypes().addAll(javafx.scene.control.ButtonType.OK, javafx.scene.control.ButtonType.CANCEL);
-        if (dlg.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL) == javafx.scene.control.ButtonType.OK) {
-            settings.setExportDpi(dpi.getValue());
-            status("Export DPI set to " + settings.exportDpi() + ".");
-        }
+        SettingsController.open(settings);
     }
 
     // ---- help + about -------------------------------------------------------
 
     @FXML private void onUserGuide()        { showHelpWindow("StreamFLOW — User Guide", USER_GUIDE); }
     @FXML private void onCompensationHelp() { showHelpWindow("StreamFLOW — Compensation Help", COMPENSATION_HELP); }
-
-    @FXML private void onCompBadgeClick() { navList.getSelectionModel().select("Compensation"); }
 
     @FXML
     private void onAbout() {

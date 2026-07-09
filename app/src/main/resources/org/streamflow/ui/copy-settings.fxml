@@ -4,6 +4,7 @@
 <?import javafx.scene.control.CheckBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.Slider?>
+<?import javafx.scene.control.TextField?>
 <?import javafx.scene.layout.GridPane?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.Region?>
@@ -12,44 +13,74 @@
 
 <VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
       fx:controller="org.streamflow.ui.CopySettingsController"
-      styleClass="content" spacing="12.0" prefWidth="460.0">
+      styleClass="content" spacing="12.0" prefWidth="500.0">
     <children>
         <Label text="Copy / Export Format" styleClass="title"/>
-        <Label text="These apply to every plot's Copy across the whole app — set the format once and every Copy follows it until you change it here again."
+        <Label text="These apply to every plot's Copy across the whole app — set the format once and every Copy follows it until you change it here again. Drag a slider or type an exact number (Tab/click away to apply — values outside the allowed range snap to the nearest limit)."
                styleClass="subtitle" wrapText="true"/>
 
         <GridPane hgap="12.0" vgap="12.0">
             <columnConstraints>
                 <ColumnConstraints minWidth="150.0"/>
                 <ColumnConstraints minWidth="180.0" hgrow="ALWAYS"/>
-                <ColumnConstraints minWidth="60.0"/>
+                <ColumnConstraints minWidth="90.0"/>
             </columnConstraints>
             <children>
-                <Label text="Point size (pseudocolor):" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+                <Label text="Point size:" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
                 <Slider fx:id="pointSlider" min="0" max="4" majorTickUnit="1" minorTickCount="0"
                         snapToTicks="true" showTickMarks="true" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
-                <Label fx:id="pointVal" text="" GridPane.rowIndex="0" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="0" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="pointField" prefWidth="46.0"/>
+                        <Label text="px"/>
+                    </children>
+                </HBox>
 
                 <Label text="Axis font:" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
                 <Slider fx:id="axisSlider" min="8" max="24" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
-                <Label fx:id="axisVal" text="" GridPane.rowIndex="1" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="1" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="axisField" prefWidth="46.0"/>
+                        <Label text="px"/>
+                    </children>
+                </HBox>
 
                 <Label text="Gate-label font:" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
                 <Slider fx:id="labelSlider" min="8" max="24" GridPane.rowIndex="2" GridPane.columnIndex="1"/>
-                <Label fx:id="labelVal" text="" GridPane.rowIndex="2" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="2" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="labelField" prefWidth="46.0"/>
+                        <Label text="px"/>
+                    </children>
+                </HBox>
 
                 <Label text="Chart title font:" GridPane.rowIndex="3" GridPane.columnIndex="0"/>
                 <Slider fx:id="chartTitleSlider" min="8" max="32" GridPane.rowIndex="3" GridPane.columnIndex="1"/>
-                <Label fx:id="chartTitleVal" text="" GridPane.rowIndex="3" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="3" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="chartTitleField" prefWidth="46.0"/>
+                        <Label text="px"/>
+                    </children>
+                </HBox>
 
                 <Label text="Legend / key font:" GridPane.rowIndex="4" GridPane.columnIndex="0"/>
                 <Slider fx:id="chartLegendSlider" min="6" max="24" GridPane.rowIndex="4" GridPane.columnIndex="1"/>
-                <Label fx:id="chartLegendVal" text="" GridPane.rowIndex="4" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="4" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="chartLegendField" prefWidth="46.0"/>
+                        <Label text="px"/>
+                    </children>
+                </HBox>
 
                 <Label text="Export DPI:" GridPane.rowIndex="5" GridPane.columnIndex="0"/>
                 <Slider fx:id="dpiSlider" min="72" max="1200" majorTickUnit="200" minorTickCount="0"
                         GridPane.rowIndex="5" GridPane.columnIndex="1"/>
-                <Label fx:id="dpiVal" text="" GridPane.rowIndex="5" GridPane.columnIndex="2"/>
+                <HBox spacing="4.0" alignment="CENTER_LEFT" GridPane.rowIndex="5" GridPane.columnIndex="2">
+                    <children>
+                        <TextField fx:id="dpiField" prefWidth="52.0"/>
+                        <Label text="dpi"/>
+                    </children>
+                </HBox>
 
                 <CheckBox fx:id="gateLabelsCheck" text="Show gate labels &amp; statistics"
                           GridPane.rowIndex="6" GridPane.columnIndex="0" GridPane.columnSpan="2"/>

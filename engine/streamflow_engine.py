@@ -218,6 +218,31 @@ def _get_events(i, a):
     return {"file": path, "channels": chans, "rows": int(sub.shape[0]),
             "cols": len(chans), "total": int(n), "ranges": ranges}
 
+@command("subsample")
+def _subsample(i, a):
+    """Uniform random-without-replacement subsample of a sample's events (standard flow-cytometry
+    downsampling). Returns the selected ROW INDICES so Java applies them to its already-cached
+    EventData with no event re-transfer. Selection uses numpy's seeded RNG — the same mechanism
+    flowkit.Sample.subsample_events uses internally — so it's reproducible for a given (n, seed).
+
+    Args: {sample, n, seed, total?}. `total` is Java's EventData row count; when given we select over
+    exactly those rows so the indices always line up with what Java holds (handles the >cap case where
+    Java's EventData is itself a capped subset of the full sample). Falls back to the sample's own
+    event_count when total is absent."""
+    import numpy as np
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    a = a or {}
+    seed = int(a.get("seed", 12345))
+    total = int(a.get("total", 0))
+    if total <= 0:
+        s = _sample_by_name(a.get("sample"))
+        total = int(s.event_count)
+    n = max(0, min(int(a.get("n", 10000)), total))
+    idx = np.random.RandomState(seed).permutation(total)[:n]
+    idx.sort()  # ascending → stable row order when Java materializes the subset
+    return {"indices": idx.astype("int64").tolist(), "n": int(n), "total": int(total)}
+
 # ---- visualization: render a plot to PNG (matplotlib) ----------------------
 def _sample_by_name(name):
     """Lazily build (and cache) the full flowkit.Sample for a file on first use.

@@ -57,6 +57,7 @@ public class WorkstationController implements ContextAware {
     @FXML private Button helpButton;
     @FXML private Button panelCheckButton;
     @FXML private Button exportGatingMlButton;
+    @FXML private Button computeCountsButton;
     @FXML private TreeView<Object> tree;
 
     // §9 overview tab
@@ -77,7 +78,7 @@ public class WorkstationController implements ContextAware {
         tree.setCellFactory(tv -> new TreeCell<>() {
             @Override protected void updateItem(Object v, boolean empty) {
                 super.updateItem(v, empty);
-                if (empty || v == null) { setText(null); setContextMenu(null); return; }
+                if (empty || v == null) { setText(null); setGraphic(null); setContextMenu(null); return; }
                 if (v instanceof String sample) {            // sample row
                     setText(sampleLabel(sample));
                     setGraphic(qcDot(sample));
@@ -115,7 +116,10 @@ public class WorkstationController implements ContextAware {
         ctx.workspace().sampleNames().addListener(
                 (javafx.collections.ListChangeListener<String>) c -> rebuild());
         ctx.workspace().addTreeChangeListener(this::rebuild);
-        ctx.workspace().addDataChangeListener(s -> rebuild());
+        // A data load only changes counts/labels, not tree STRUCTURE — refresh cells in place (no
+        // root swap) so opening a graph window or clicking Next to a not-yet-loaded sample doesn't
+        // flicker the whole tree. Structural changes still go through rebuild() above.
+        ctx.workspace().addDataChangeListener(s -> refreshCells());
         // §9: refresh overview when the Overview tab is selected
         if (mainTabs != null) {
             mainTabs.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> {
@@ -127,7 +131,28 @@ public class WorkstationController implements ContextAware {
 
     // ---- tree construction ---------------------------------------------------
 
+    private boolean rebuildScheduled = false;
+    private boolean refreshScheduled = false;
+
+    /** Lightweight, coalesced cell refresh (no root swap) — updates counts/QC labels in place without
+     *  the flicker of a full rebuild. Used for data-load changes, which never alter tree structure. */
+    private void refreshCells() {
+        if (refreshScheduled || tree == null) return;
+        refreshScheduled = true;
+        javafx.application.Platform.runLater(() -> { refreshScheduled = false; if (tree != null) tree.refresh(); });
+    }
+
+    /** Coalesce rebuilds: sample-list changes, tree changes AND data-load changes all request a
+     *  rebuild, and a single user action (load workspace, open a graph window, click Next) fires
+     *  several in the same pulse. Without coalescing each did a full {@code tree.setRoot(...)} swap,
+     *  so the Workstation tree visibly flickered. Collapse a burst into ONE rebuild on the next frame. */
     private void rebuild() {
+        if (ctx == null || rebuildScheduled) return;
+        rebuildScheduled = true;
+        javafx.application.Platform.runLater(() -> { rebuildScheduled = false; rebuildNow(); });
+    }
+
+    private void rebuildNow() {
         if (ctx == null) return;
         // capture currently-expanded sample names
         TreeItem<Object> oldRoot = tree.getRoot();
@@ -217,11 +242,13 @@ public class WorkstationController implements ContextAware {
         stats.setOnAction(e -> computeSampleStats(sample));
         MenuItem applyAll = new MenuItem("Apply gates → all samples");
         applyAll.setOnAction(e -> applyAll(sample));
+        MenuItem sub = new MenuItem("Sub sample…");
+        sub.setOnAction(e -> onSubsample(sample));
         MenuItem kw = new MenuItem("FCS keywords…");
         kw.setOnAction(e -> showKeywords(sample));
         MenuItem exp = new MenuItem("Export FCS…");
         exp.setOnAction(e -> exportFcs(sample));
-        m.getItems().addAll(open, stats, new SeparatorMenuItem(), applyAll);
+        m.getItems().addAll(open, stats, new SeparatorMenuItem(), applyAll, sub);
         if (ctx.workspace().gateClipboard() != null) {
             MenuItem paste = new MenuItem("Paste gate (under All Events)");
             paste.setOnAction(e -> pasteGate(sample, ctx.workspace().treeFor(sample)));
@@ -242,6 +269,15 @@ public class WorkstationController implements ContextAware {
         MenuItem cc = new MenuItem("Cell cycle analysis…");
         cc.setOnAction(e -> runCellCycle(sample, n));
         m.getItems().addAll(open, stats, cc);
+        if (!n.isRoot() && "subsample".equals(n.gate.type)) {
+            // A subsample is a population, not a gate — only apply-to-all + remove make sense.
+            MenuItem applyAll = new MenuItem("Apply subsample → all samples");
+            applyAll.setOnAction(e -> applyGateToAll(sample, n));
+            MenuItem rm = new MenuItem("Remove subsample");
+            rm.setOnAction(e -> removePopulation(sample, n));
+            m.getItems().addAll(new SeparatorMenuItem(), applyAll, rm);
+            return m;
+        }
         if (!n.isRoot()) {
             MenuItem copy = new MenuItem("Copy gate");
             copy.setOnAction(e -> copyGate(n));
@@ -378,6 +414,7 @@ public class WorkstationController implements ContextAware {
         c.setTitle("Apply gates to all samples");
         c.setHeaderText("Apply all gates from '" + sample + "' to " + others.size() + " other sample(s)?");
         c.setContentText("Replaces the gating tree on those samples. Counts recompute when each opens.");
+        AppIcons.theme(c, null);
         if (c.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         PopNode src = ctx.workspace().treeFor(sample);
         for (String o : others) ctx.workspace().replaceTree(o, src.cloneTree(null));
@@ -421,6 +458,51 @@ public class WorkstationController implements ContextAware {
         }
         ctx.workspace().notifyTreeChanged();
         statusLabel.setText("Applied gate '" + n.name() + "' to " + others.size() + " other sample(s).");
+        computeAllCounts();   // BUG-16: fill in %/counts for the samples we just applied gates to
+    }
+
+    /** Compute event counts + %-of-parent for every gate on every sample (loading events as needed),
+     *  so the tree shows them without opening each sample. Runs in the background; persists on next save. */
+    @FXML
+    private void onComputeAllCounts() { computeAllCounts(); }
+
+    private void computeAllCounts() {
+        if (ctx == null) return;
+        List<String> withGates = ctx.workspace().sampleNames().stream()
+                .filter(s -> ctx.workspace().hasTree(s)
+                        && !ctx.workspace().treeFor(s).children.isEmpty()).toList();
+        if (withGates.isEmpty()) { statusLabel.setText("No gates to count yet."); return; }
+        statusLabel.setText("Computing counts…");
+        EventLoader.ensureLoaded(ctx, withGates, statusLabel::setText, () -> {
+            for (String s : withGates) computeCountsFor(s);
+            ctx.workspace().markDirty();   // counts changed → savable
+            rebuild();
+            statusLabel.setText("Counts computed for " + withGates.size() + " sample(s). Save to keep them.");
+        });
+    }
+
+    /** Compute count + %-of-parent for every population in one sample's tree from its loaded events. */
+    private void computeCountsFor(String sample) {
+        EventData d = ctx.workspace().data(sample);
+        if (d == null || !ctx.workspace().hasTree(sample)) return;
+        PopNode root = ctx.workspace().treeFor(sample);
+        root.count = d.rows();
+        for (PopNode n : root.selfAndDescendants()) {
+            if (n.isRoot()) continue;
+            boolean[] keep = new boolean[d.rows()];
+            java.util.Arrays.fill(keep, true);
+            for (CytoPlot.Gate g : n.chain()) {
+                boolean[] m = CytoPlot.mask(d, g);
+                for (int i = 0; i < keep.length && i < m.length; i++) keep[i] &= m[i];
+            }
+            int c = 0; for (boolean b : keep) if (b) c++;
+            n.count = c;
+        }
+        for (PopNode n : root.selfAndDescendants()) {
+            if (n.isRoot()) continue;
+            int pc = (n.parent == null || n.parent.isRoot()) ? root.count : n.parent.count;
+            n.parentPct = pc <= 0 ? 0 : 100.0 * n.count / pc;
+        }
     }
 
     /** Toggle a gate between inclusion and exclusion (NOT-gate). Counts recompute when the sample opens. */
@@ -507,6 +589,7 @@ public class WorkstationController implements ContextAware {
             dlg.setTitle("Cell cycle analysis");
             dlg.setHeaderText("Select the DNA-content channel (PI / DAPI / 7-AAD / Hoechst)");
             dlg.setContentText("Channel:");
+            AppIcons.theme(dlg, null);
             var pick = dlg.showAndWait();
             if (pick.isEmpty()) return;
             dna = pick.get();
@@ -742,6 +825,7 @@ public class WorkstationController implements ContextAware {
         TextArea ta = new TextArea(msg);
         ta.setEditable(false); ta.setWrapText(true); ta.setPrefSize(560, 360);
         a.getDialogPane().setContent(ta);
+        AppIcons.theme(a, null);
         a.showAndWait();
     }
 
@@ -767,6 +851,70 @@ public class WorkstationController implements ContextAware {
                 statusLabel.setText("Could not load events: " + ex.getMessage());
             }
         });
+    }
+
+    /** Right-click sample → "Sub sample…": suggest N (standard practice = smallest sample, for
+     *  comparability), let the user override, then add a random Subsample population under All-Events.
+     *  Selection is done by the engine (FlowKit) — Java only applies the returned row indices. */
+    private void onSubsample(String sample) {
+        if (ctx == null) return;
+        int thisTotal = ctx.workspace().eventCount(sample);
+        int minN = Integer.MAX_VALUE, maxN = 0; String minS = sample, maxS = sample;
+        for (String s : ctx.workspace().sampleNames()) {
+            int c = ctx.workspace().eventCount(s);
+            if (c <= 0) continue;
+            if (c < minN) { minN = c; minS = s; }
+            if (c > maxN) { maxN = c; maxS = s; }
+        }
+        if (minN == Integer.MAX_VALUE) minN = thisTotal > 0 ? thisTotal : 10000;
+        final int suggested = minN;
+        javafx.scene.control.TextField field = new javafx.scene.control.TextField(String.valueOf(suggested));
+        javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(8,
+                new javafx.scene.control.Label("Randomly subsample " + shortName(sample) + " ("
+                        + thisTotal + " events) to N events — a new 'Subsample' population."),
+                new javafx.scene.control.Label("Highest: " + shortName(maxS) + " — " + maxN + " events"),
+                new javafx.scene.control.Label("Lowest: " + shortName(minS) + " — " + minN + " events"),
+                new javafx.scene.control.Label("Suggested N = " + suggested
+                        + "  (the smallest sample, so every sample is directly comparable)."),
+                new javafx.scene.layout.HBox(8, new javafx.scene.control.Label("Events (N):"), field));
+        box.setStyle("-fx-padding:14;");
+        javafx.scene.control.Dialog<ButtonType> dlg = new javafx.scene.control.Dialog<>();
+        dlg.setTitle("Sub sample — " + shortName(sample));
+        dlg.setHeaderText(null);
+        dlg.getDialogPane().setContent(box);
+        dlg.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        AppIcons.theme(dlg, window());
+        if (dlg.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        int parsed; try { parsed = Integer.parseInt(field.getText().trim()); } catch (Exception ex) { parsed = suggested; }
+        final int nWanted = Math.max(1, parsed);
+        ensureData(sample, () -> {
+            EventData d = ctx.workspace().data(sample);
+            int total = d != null ? d.rows() : thisTotal;
+            int n = Math.min(nWanted, Math.max(1, total));
+            ObjectNode args = JSON.createObjectNode();
+            args.put("sample", sample); args.put("n", n); args.put("seed", 12345); args.put("total", total);
+            ctx.jobs().run(ctx.bridge().command("subsample", args), r -> {
+                int[] idx = toIntArray(r.path("indices"));
+                CytoPlot.Gate g = new CytoPlot.Gate("Subsample " + idx.length, "subsample", null, null, null, null);
+                g.subN = n; g.subSeed = 12345L;
+                g.subBySample.put(sample, idx); g.subSelected = idx;
+                PopNode root = ctx.workspace().treeFor(sample);
+                PopNode node = new PopNode(g, root);
+                node.count = idx.length;
+                node.parentPct = total > 0 ? 100.0 * idx.length / total : 0;
+                root.children.add(node);
+                ctx.workspace().notifyTreeChanged();
+                statusLabel.setText("Subsample of " + idx.length + " events added to " + shortName(sample)
+                        + ". Right-click it to apply to all samples.");
+            });
+        });
+    }
+
+    private static int[] toIntArray(com.fasterxml.jackson.databind.JsonNode arr) {
+        if (arr == null || !arr.isArray()) return new int[0];
+        int[] out = new int[arr.size()];
+        for (int i = 0; i < out.length; i++) out[i] = arr.get(i).asInt();
+        return out;
     }
 
     private ObjectNode serializeGates(WorkspaceModel ws) {

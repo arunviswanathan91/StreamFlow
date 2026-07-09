@@ -39,12 +39,23 @@ public class CytoPlot extends Region {
         public double[] xs, ys;
         public Color border = GATE_C;                 // outline colour
         public Color fill = Color.color(GATE_C.getRed(), GATE_C.getGreen(), GATE_C.getBlue(), 0.12); // translucent interior
+        public Color textColor = null;                // gate-name label color; null = follow border color
+        public boolean textShadow = false;             // drop shadow behind the gate-name label
+        public Color shadowColor = Color.BLACK;        // gate-name shadow color (when textShadow on)
+        public double shadowOpacity = 0.6;             // gate-name shadow opacity 0..1 (when textShadow on)
         public double lblDx = 0, lblDy = -4;          // label offset (pixels) from its anchor
         public double angle = 0;                      // ellipse rotation (radians, data-space CCW from +X)
         public boolean invert = false;                // exclusion ("NOT") gate: keep events OUTSIDE the shape
         // statistics shown on the label: keys "parent","total","count","mfi:<chan>","geomean","cv"
         public final java.util.List<String> statKeys = new java.util.ArrayList<>(java.util.List.of("parent", "count"));
         public String statLine = "";                  // formatted stats (set by the controller)
+        // Subsample population (type="subsample"): a random N-of-parent selection, NOT a geometric gate.
+        // subN/subSeed persist (universal across samples via apply-to-all); the actual row indices are
+        // resolved per-sample from the engine and stashed in subSelected right before a render/count pass.
+        public int subN = -1;                         // >=0 marks a subsample; target event count
+        public long subSeed = 0;                       // seed for reproducible selection
+        public transient int[] subSelected = null;     // row indices of the subset for the current sample
+        public final transient java.util.Map<String, int[]> subBySample = new java.util.HashMap<>(); // per-sample cache
         public Gate(String name, String type, String xChan, String yChan, double[] xs, double[] ys) {
             this.name = name; this.type = type; this.xChan = xChan; this.yChan = yChan;
             this.xs = xs; this.ys = ys;
@@ -55,7 +66,26 @@ public class CytoPlot extends Region {
     private double ML = 64, MR = 14, MT = 14, MB = 46;
     private static final Color GATE_C = Color.web("#D7261E");
     private static final Color DRAW_C = Color.web("#0A7CFF");
-    private static final Color[] LUT = buildLut();
+
+    // ---- editable appearance: density palette + accent colors (per-plot, user-adjustable) ----
+    private String paletteName = "Jet";
+    private Color[] lut = buildLut(paletteName);
+    private int[] lutArgb = buildLutArgb(lut);
+    private Color contourColor = Color.web("#0B3D91");
+    private Color dotColor     = Color.web("#08306B");
+    private Color backgateColor = Color.web("#FF8C00");
+    private Color fmoColor      = Color.web("#7B1FA2");
+    public void setPalette(String name) { this.paletteName = name; this.lut = buildLut(name); this.lutArgb = buildLutArgb(this.lut); invalidate(); }
+    public String palette() { return paletteName; }
+    public static java.util.List<String> paletteNames() { return java.util.List.of("Jet", "Viridis", "Turbo", "Fire", "Ice", "Grayscale"); }
+    public void setContourColor(Color c) { if (c != null) { this.contourColor = c; invalidate(); } }
+    public Color contourColor() { return contourColor; }
+    public void setDotColor(Color c) { if (c != null) { this.dotColor = c; invalidate(); } }
+    public Color dotColor() { return dotColor; }
+    public void setBackgateColor(Color c) { if (c != null) { this.backgateColor = c; invalidate(); } }
+    public Color backgateColor() { return backgateColor; }
+    public void setFmoColor(Color c) { if (c != null) { this.fmoColor = c; invalidate(); } }
+    public Color fmoColor() { return fmoColor; }
 
     private final Canvas canvas = new Canvas();
     private final Pane overlay = new Pane();        // hosts interactive gate Labels above the canvas
@@ -74,7 +104,13 @@ public class CytoPlot extends Region {
     private double[] histHeights;           // cached normalised histogram (0..1), null for 2D
     private double histMaxCount = 0;        // raw peak count of the current histogram (for Y-axis labels)
     private Consumer<Boolean> onBusy;       // notify controller to disable axis controls while busy
-    private boolean smooth = true;          // KDE/blur smoothing toggle
+    // Smoothing is split three ways: smoothDensity feeds densityField() for dot/density/zebra;
+    // smoothContour feeds it for contour (independent, so a contour can be smoothed without touching
+    // density and vice-versa); smoothHistogram gates the 1-D KDE blur in computeHistogram(). Formerly
+    // one shared flag, which meant unchecking histogram smoothing also silently flattened contours.
+    private boolean smoothDensity = true;
+    private boolean smoothContour = true;
+    private boolean smoothHistogram = true;
     private boolean lightExport = false;     // white bg + dark axes for publication export
     private String histMode = "Filled Smooth"; // "Filled Smooth" | "Raw Bars" | "Line Only"
     private double histBandwidth = 0.5;     // 0..1 KDE bandwidth fraction
@@ -116,16 +152,36 @@ public class CytoPlot extends Region {
 
     // ---- backgating highlight (differentiator #9) ---------------------------
     private boolean[] highlightMask;           // rows (over current data) to overlay as dots
-    private static final Color BACKGATE_C = Color.web("#FF8C00"); // orange overlay
     private static final int BACKGATE_CAP = 20000;                // max dots drawn
 
     // ---- FMO reference line (differentiator #5) -----------------------------
     private double fmoX = Double.NaN, fmoY = Double.NaN;  // data-space FMO p95 for current axes
     private boolean fmoVisible = true;                    // hide FMO lines without losing the stored level
-    private static final Color FMO_C = Color.web("#7B1FA2"); // purple dashed reference
+
+    // ---- X/Y intercept reference lines (FlowJo-style draggable crosshair) ---
+    private boolean interceptVisible = false;
+    private double interceptX = 0, interceptY = 0;        // data-space crosshair position
+    private static final Color INTERCEPT_C = Color.web("#9AA7B5");
+    private java.util.function.BiConsumer<Double, Double> onInterceptChanged;   // (x,y) when a line is dragged
+    public void setInterceptVisible(boolean b) { this.interceptVisible = b; paint(); }
+    public boolean isInterceptVisible() { return interceptVisible; }
+    public void setInterceptX(double x) { this.interceptX = x; paint(); }
+    public void setInterceptY(double y) { this.interceptY = y; paint(); }
+    public double interceptX() { return interceptX; }
+    public double interceptY() { return interceptY; }
+    /** Notified with the new (x,y) data-space intercept when the user drags a crosshair line. */
+    public void setOnInterceptChanged(java.util.function.BiConsumer<Double, Double> c) { this.onInterceptChanged = c; }
+    /** Place the crosshair at the VISUAL centre of the current view, mapped back through the active
+     *  scale — so on logicle/log it lands at a sensible data value rather than a raw clamped number. */
+    public void centerIntercept() {
+        if (data == null || xChan == null) return;
+        interceptX = dataX(plotLeft() + plotW() / 2);
+        if (!isHistogram()) interceptY = dataY(plotTop() + plotH() / 2);
+        paint();
+    }
 
     // ---- editing state (tool == "None") -------------------------------------
-    private enum Drag { NONE, MOVE_GATE, MOVE_VERTEX, ROTATE_GATE, MOVE_FMO_X, MOVE_FMO_Y, MOVE_QUADRANT }
+    private enum Drag { NONE, MOVE_GATE, MOVE_VERTEX, ROTATE_GATE, MOVE_FMO_X, MOVE_FMO_Y, MOVE_QUADRANT, MOVE_INTERCEPT_X, MOVE_INTERCEPT_Y }
     private Gate selected;
     private Drag dragMode = Drag.NONE;
     private int dragVertex = -1;
@@ -175,13 +231,16 @@ public class CytoPlot extends Region {
         spinner.setVisible(false);
         spinner.setMouseTransparent(true);
         getChildren().add(spinner);
-        widthProperty().addListener((o, a, b) -> { canvas.setWidth(getWidth()); invalidate(); });
-        heightProperty().addListener((o, a, b) -> { canvas.setHeight(getHeight()); invalidate(); });
+        // Guard: Canvas.setWidth/setHeight clears its pixel buffer immediately, synchronously — only call
+        // it when the size actually changed, so an unrelated layout pulse (e.g. a sibling panel's label
+        // text changing length) can never blank this canvas. See ui-bug-log (Options-slider flicker).
+        widthProperty().addListener((o, a, b) -> { if (canvas.getWidth() != getWidth()) canvas.setWidth(getWidth()); invalidate(); });
+        heightProperty().addListener((o, a, b) -> { if (canvas.getHeight() != getHeight()) canvas.setHeight(getHeight()); invalidate(); });
     }
 
     @Override protected void layoutChildren() {
-        canvas.setWidth(getWidth());
-        canvas.setHeight(getHeight());
+        if (canvas.getWidth() != getWidth()) canvas.setWidth(getWidth());
+        if (canvas.getHeight() != getHeight()) canvas.setHeight(getHeight());
         overlay.resizeRelocate(0, 0, getWidth(), getHeight());
         spinner.resizeRelocate(plotLeft() + plotW() - 36, plotTop() + 8, 28, 28); // top-right of plot area
     }
@@ -223,8 +282,27 @@ public class CytoPlot extends Region {
         invalidate();
     }
     public void setOnBusy(Consumer<Boolean> c) { this.onBusy = c; }
-    public void setSmooth(boolean s) { this.smooth = s; invalidate(); }
-    public boolean smooth() { return smooth; }
+    /** Density/zebra/dot smoothing (Density Options group). */
+    public void setSmoothDensity(boolean s) { this.smoothDensity = s; invalidate(); }
+    public boolean smoothDensity() { return smoothDensity; }
+    /** Contour smoothing (Contour Options group) — independent of density smoothing. */
+    public void setSmoothContour(boolean s) { this.smoothContour = s; invalidate(); }
+    public boolean smoothContour() { return smoothContour; }
+    /** Histogram KDE smoothing (Histogram Options group) — independent of density smoothing. */
+    public void setSmoothHistogram(boolean s) { this.smoothHistogram = s; if (isHistogram()) invalidate(); }
+    public boolean smoothHistogram() { return smoothHistogram; }
+    private int contourLevels = 10;   // number of iso-density contour lines (more = finer)
+    private boolean contourOutliers = false;   // draw individual events below the lowest contour
+    private int outlierSize = 0;      // outlier dot stamp radius in pixels (0 = single pixel); only used when contourOutliers is on
+    private int smoothStrength = 3;   // Gaussian blur radius for density/contour/zebra smoothing (1-8)
+    public void setContourLevels(int n) { this.contourLevels = Math.max(3, Math.min(30, n)); invalidate(); }
+    public int contourLevels() { return contourLevels; }
+    public void setContourOutliers(boolean b) { this.contourOutliers = b; invalidate(); }
+    public boolean contourOutliers() { return contourOutliers; }
+    public void setOutlierSize(int r) { this.outlierSize = Math.max(0, Math.min(6, r)); invalidate(); }
+    public int outlierSize() { return outlierSize; }
+    public void setSmoothStrength(int s) { this.smoothStrength = Math.max(1, Math.min(8, s)); invalidate(); }
+    public int smoothStrength() { return smoothStrength; }
     public void setHistMode(String m) { this.histMode = m; invalidate(); }
     public void setHistBandwidth(double b) { this.histBandwidth = b; if (isHistogram()) invalidate(); }
     public double histBandwidth() { return histBandwidth; }
@@ -235,6 +313,7 @@ public class CytoPlot extends Region {
 
     /** Membership of a gate over an arbitrary population's events (for the gating tree). */
     public static boolean[] mask(EventData d, Gate g) {
+        if ("subsample".equals(g.type)) return subsampleMask(d, g);
         boolean[] keep = new boolean[d.rows()];
         int xc = d.indexOf(g.xChan);
         int yc = g.yChan == null ? -1 : d.indexOf(g.yChan);
@@ -244,6 +323,17 @@ public class CytoPlot extends Region {
             double y = yc < 0 ? 0 : d.get(r, yc);
             keep[r] = pointInGate(g, x, y) ^ g.invert;   // exclusion gate flips membership
         }
+        return keep;
+    }
+
+    /** Membership for a subsample "gate": the rows whose indices the engine selected (stashed in
+     *  {@code subSelected} for the current sample). Until resolved (subSelected null), keep NOTHING —
+     *  the controller resolves indices before rendering and re-renders when they arrive. The indices
+     *  are defined over the full sample (root), which is the intended parent (subsample-under-root). */
+    private static boolean[] subsampleMask(EventData d, Gate g) {
+        boolean[] keep = new boolean[d.rows()];
+        if (g.subSelected == null) return keep;
+        for (int idx : g.subSelected) if (idx >= 0 && idx < keep.length) keep[idx] = true;
         return keep;
     }
 
@@ -262,6 +352,10 @@ public class CytoPlot extends Region {
     public void setOnColorRequest(Consumer<Gate> c) { this.onColorRequest = c; }
     public Gate selectedGate() { return selected; }
     public void selectGate(Gate g) { selected = g; paint(); }
+    private Gate lastNotifiedSelected;
+    private Consumer<Gate> onSelectionChanged;   // fired (possibly with null) whenever the selected gate changes
+    /** Notified with the newly selected gate (or null) — e.g. so an Options panel can show its color. */
+    public void setOnSelectionChanged(Consumer<Gate> c) { this.onSelectionChanged = c; }
 
     /** Insert a vertex into a polygon gate — on the edge nearest the click (or the longest edge). */
     public void addNodeToPolygon(Gate g, double localX, double localY) {
@@ -340,6 +434,7 @@ public class CytoPlot extends Region {
 
     /** Boolean membership over the current data rows for a gate (drill-down + counts). */
     public boolean[] membership(Gate g) {
+        if ("subsample".equals(g.type)) return subsampleMask(data, g);
         boolean[] keep = new boolean[data.rows()];
         int xc = data.indexOf(g.xChan);
         int yc = g.yChan == null ? -1 : data.indexOf(g.yChan);
@@ -547,8 +642,10 @@ public class CytoPlot extends Region {
     private double plotSide() { return Math.max(1, Math.min(getWidth() - ML - MR, getHeight() - MT - MB)); }
     private double plotW() { return plotSide(); }
     private double plotH() { return plotSide(); }
-    // Anchor the square plot at the top-left so the Y-axis labels (drawn in the ML margin) always sit
-    // right next to the data area — centring it left a large gap between the axis and the plot.
+    // Anchor the square plot at the top-left margin so the Y-axis title/ticks always sit right next to
+    // the data area (centring detached them and, in light mode, produced a big white overhang beside
+    // the plot). The "vacant space" on a non-square/maximised window is handled in paint() by keeping
+    // the surround dark and whiting ONLY the plot+axis box — not by moving the plot.
     private double plotLeft() { return ML; }
     private double plotTop() { return MT; }
     private double pxX(double dx) { return plotLeft() + (sxv(dx) - sxMin) / (sxMax - sxMin) * plotW(); }
@@ -601,7 +698,6 @@ public class CytoPlot extends Region {
 
     private long renderGen = 0;
     private static final int WHITE_ARGB = 0xFFFFFFFF;
-    private static final int[] LUT_ARGB = buildLutArgb();
     private static final Color HIST_FG = Color.web("#1F6FEB");
 
     /** Kick a debounced background raster/histogram build. Does NOT do any FX-thread computation.
@@ -691,35 +787,79 @@ public class CytoPlot extends Region {
 
     /** Cheap FX-thread paint from cached raster/histogram + gate overlay. */
     private void paint() {
+        if (selected != lastNotifiedSelected) {
+            lastNotifiedSelected = selected;
+            if (onSelectionChanged != null) onSelectionChanged.accept(selected);
+        }
         GraphicsContext g = canvas.getGraphicsContext2D();
         g.clearRect(0, 0, getWidth(), getHeight());
-        g.setFill(lightExport ? Color.WHITE : Color.web("#0D1B2A"));
+        // Surround is ALWAYS the dark app colour — never white the whole canvas, or a non-square /
+        // maximised window leaves a big "vacant" white slab beside the square plot. In light mode we
+        // white ONLY the plot+axis box below; everything outside it stays dark.
+        g.setFill(Color.web("#0D1B2A"));
         g.fillRect(0, 0, getWidth(), getHeight());
         if (data == null || xChan == null) return;
 
         double px = plotLeft(), py = plotTop(), pw = plotW(), ph = plotH();
+        // Light mode: white the plot plus its axis margins only (exactly the region Copy/export crops
+        // to), so there is no white overhang. Dark mode keeps navy margins with light axis text.
+        if (lightExport) {
+            g.setFill(Color.WHITE);
+            g.fillRect(px - ML, py - MT, ML + pw + MR, MT + ph + MB);
+        }
         g.setFill(Color.WHITE);
         g.fillRect(px, py, pw, ph);
 
         if (isHistogram()) {
             drawHistogram(g, px, py, pw, ph);
         } else if (plotImg != null) {
-            g.setImageSmoothing("dot".equals(plotType) ? false : true);
+            // Smoothing softens density/contour, but it also blurs single-pixel contour OUTLIERS into
+            // fat blobs — so keep it OFF for dot plots and whenever outliers are being drawn, so the
+            // smallest outlier size stays a crisp single pixel.
+            boolean crisp = "dot".equals(plotType) || contourOutliers;
+            g.setImageSmoothing(!crisp);
             g.drawImage(plotImg, px, py, pw, ph);
         }
         drawAxes(g, px, py, pw, ph);
         drawHighlight(g);
+        drawIntercept(g);
         drawFmo(g);
         drawGates(g);
         drawInProgress(g);
+    }
+
+    /** FlowJo-style dashed crosshair at a fixed data-space (X,Y) reference point. Draggable — small
+     *  end handles show it can be grabbed (see the intercept grab in onPressed). */
+    private void drawIntercept(GraphicsContext g) {
+        if (!interceptVisible || data == null) return;
+        double left = plotLeft(), top = plotTop(), w = plotW(), h = plotH();
+        g.setStroke(INTERCEPT_C); g.setLineWidth(1.2); g.setLineDashes(4, 4);
+        g.setFill(INTERCEPT_C);
+        double x = pxX(interceptX);
+        if (x >= left && x <= left + w) {
+            g.strokeLine(x, top, x, top + h);
+            g.setLineDashes((double[]) null);
+            g.fillRect(x - 4, top - 1, 8, 8); g.fillRect(x - 4, top + h - 7, 8, 8);   // top + bottom handles
+            g.setLineDashes(4, 4);
+        }
+        if (!isHistogram()) {
+            double y = pxY(interceptY);
+            if (y >= top && y <= top + h) {
+                g.strokeLine(left, y, left + w, y);
+                g.setLineDashes((double[]) null);
+                g.fillRect(left - 1, y - 4, 8, 8); g.fillRect(left + w - 7, y - 4, 8, 8);   // left + right handles
+                g.setLineDashes(4, 4);
+            }
+        }
+        g.setLineDashes((double[]) null);
     }
 
     /** Dashed FMO reference line(s) at the stored 95th-percentile level for the current channel(s). */
     private void drawFmo(GraphicsContext g) {
         if (data == null || !fmoVisible) return;
         double left = plotLeft(), top = plotTop(), w = plotW(), h = plotH();
-        g.setStroke(FMO_C); g.setLineWidth(1.4); g.setLineDashes(6, 4);
-        g.setFill(FMO_C); g.setFont(Font.font(10));
+        g.setStroke(fmoColor); g.setLineWidth(1.4); g.setLineDashes(6, 4);
+        g.setFill(fmoColor); g.setFont(Font.font(10));
         if (!Double.isNaN(fmoX)) {
             double x = pxX(fmoX);
             if (x >= left && x <= left + w) {
@@ -737,10 +877,11 @@ public class CytoPlot extends Region {
         g.setLineDashes((double[]) null);
     }
 
-    /** A small solid square handle at an FMO line end, so users see the line is draggable. */
+    /** A solid square handle at an FMO line end, so users see the line is draggable. Sized to match
+     *  the (generous) grab tolerance in onPressed so the visual target and the hit area agree. */
     private void fmoHandle(GraphicsContext g, double x, double y) {
         g.setLineDashes((double[]) null);
-        g.fillRect(x - 3, y - 3, 6, 6);
+        g.fillRect(x - 5, y - 5, 10, 10);
     }
 
     /** Backgating: draw the highlighted descendant events as orange dots over the current plot. */
@@ -749,7 +890,7 @@ public class CytoPlot extends Region {
         int xc = data.indexOf(xChan), yc = (yChan == null) ? -1 : data.indexOf(yChan);
         if (xc < 0 || yc < 0) return;
         double left = plotLeft(), top = plotTop(), w = plotW(), h = plotH();
-        g.setFill(BACKGATE_C);
+        g.setFill(backgateColor);
         int drawn = 0, rows = Math.min(highlightMask.length, data.rows());
         for (int r = 0; r < rows && drawn < BACKGATE_CAP; r++) {
             if (!highlightMask[r]) continue;
@@ -796,11 +937,11 @@ public class CytoPlot extends Region {
 
         switch (type) {
             case "dot" -> {
-                int dotArgb = colorArgb(Color.web("#08306B"));
+                int dotArgb = colorArgb(dotColor);
                 for (int p = 0; p < grid.length; p++) if (grid[p] > 0) argb[p] = dotArgb;
             }
             case "density" -> {
-                double[] dens = densityField(grid, w, h);
+                double[] dens = densityField(grid, w, h, smoothDensity);
                 double dmax = arrayMax(dens);
                 for (int p = 0; p < dens.length; p++) {
                     if (dens[p] <= 0) continue;
@@ -810,9 +951,27 @@ public class CytoPlot extends Region {
                 }
             }
             case "contour" -> {
-                double[] dens = densityField(grid, w, h);
-                double[] lv = equalProbLevels(dens, 10);
-                int line = colorArgb(Color.web("#0B3D91"));
+                double[] dens = densityField(grid, w, h, smoothContour);
+                double[] lv = equalProbLevels(dens, contourLevels);
+                int line = colorArgb(contourColor);
+                // Outlier dots: events sitting BELOW the lowest contour band (sparse tails FlowJo shows).
+                if (contourOutliers && lv.length > 0) {
+                    // equalProbLevels() fills lv[] scanning density DESCENDING, so lv[0] is the
+                    // highest (innermost) threshold and lv[length-1] is the true lowest/outermost one.
+                    double lowest = lv[lv.length - 1];
+                    for (int p = 0; p < grid.length; p++) {
+                        if (grid[p] <= 0 || dens[p] >= lowest) continue;
+                        if (outlierSize <= 0) { argb[p] = line; continue; }
+                        int ox = p % w, oy = p / w;
+                        for (int dy = -outlierSize; dy <= outlierSize; dy++) {
+                            int yy = oy + dy; if (yy < 0 || yy >= h) continue;
+                            for (int dx = -outlierSize; dx <= outlierSize; dx++) {
+                                int xx = ox + dx; if (xx < 0 || xx >= w) continue;
+                                argb[yy * w + xx] = line;
+                            }
+                        }
+                    }
+                }
                 for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
                     int b = bandOf(dens[y * w + x], lv);
                     int br = x + 1 < w ? bandOf(dens[y * w + x + 1], lv) : b;
@@ -821,13 +980,13 @@ public class CytoPlot extends Region {
                 }
             }
             case "zebra" -> {
-                double[] dens = densityField(grid, w, h);
+                double[] dens = densityField(grid, w, h, smoothDensity);
                 int n = 20;
                 double[] lv = equalProbLevels(dens, n);
                 for (int p = 0; p < dens.length; p++) {
                     if (dens[p] <= 0) continue;
                     int b = bandOf(dens[p], lv);
-                    int base = LUT_ARGB[(int) Math.min(255, (double) b / n * 255)];
+                    int base = lutArgb[(int) Math.min(255, (double) b / n * 255)];
                     argb[p] = (b % 2 == 0) ? base : shade(base, 0.78); // alternating stripe
                 }
             }
@@ -835,7 +994,7 @@ public class CytoPlot extends Region {
                 double logMax = Math.log(max + 1);
                 for (int p = 0; p < grid.length; p++) {
                     int c = grid[p];
-                    if (c > 0) argb[p] = LUT_ARGB[(int) Math.min(255, Math.log(c + 1) / logMax * 255)];
+                    if (c > 0) argb[p] = lutArgb[(int) Math.min(255, Math.log(c + 1) / logMax * 255)];
                 }
             }
         }
@@ -861,7 +1020,7 @@ public class CytoPlot extends Region {
             histMaxCount = 0;   // CDF axis uses 0–100% labels, not raw counts
             return h;
         }
-        if (!"Raw Bars".equals(histMode)) {
+        if (!"Raw Bars".equals(histMode) && smoothHistogram) {
             int radius = Math.max(1, (int) (histBandwidth * 24)); // bandwidth slider -> blur radius
             h = blur1d(h, radius);
         }
@@ -1190,7 +1349,7 @@ public class CytoPlot extends Region {
     /** Smooth density field for contour/zebra/density: coarse-bin → Gaussian blur → bilinear
      *  upsample. Coarse binning + interpolation removes the pixel-level noise that made contours
      *  jagged, giving FlowJo-like smooth iso-lines. (Raw pixel grid when Smooth is off.) */
-    private double[] densityField(int[] grid, int w, int h) {
+    private double[] densityField(int[] grid, int w, int h, boolean smooth) {
         if (!smooth) {
             double[] a = new double[grid.length];
             for (int i = 0; i < grid.length; i++) a[i] = grid[i];
@@ -1202,7 +1361,7 @@ public class CytoPlot extends Region {
             int cy = Math.min(G - 1, y * G / h);
             for (int x = 0; x < w; x++) c[cy * G + Math.min(G - 1, x * G / w)] += grid[y * w + x];
         }
-        c = blur2d(c, G, G, 3);                              // stronger blur on the coarse field
+        c = blur2d(c, G, G, smoothStrength);                 // adjustable blur on the coarse field
         double[] out = new double[w * h];
         for (int y = 0; y < h; y++) {
             double gy = (double) y / h * (G - 1); int y0 = (int) gy, y1 = Math.min(G - 1, y0 + 1); double fy = gy - y0;
@@ -1285,9 +1444,9 @@ public class CytoPlot extends Region {
         int r = (int) (((argb >> 16) & 0xFF) * f), g = (int) (((argb >> 8) & 0xFF) * f), b = (int) ((argb & 0xFF) * f);
         return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
-    private static int[] buildLutArgb() {
+    private static int[] buildLutArgb(Color[] lut) {
         int[] a = new int[256];
-        for (int i = 0; i < 256; i++) a[i] = colorArgb(LUT[i]);
+        for (int i = 0; i < 256; i++) a[i] = colorArgb(lut[i]);
         return a;
     }
 
@@ -1326,14 +1485,15 @@ public class CytoPlot extends Region {
             g.strokeLine(xp, py + ph, xp, py + ph + 3);
             g.fillText(fmt(tv), xp, py + ph + 5);
         }
-        // Y-axis ticks: short horizontal notch + right-aligned label left of the axis.
-        // minGapY is generous (2× font height) so logicle decade labels near zero never collide.
+        // Y-axis ticks: short horizontal notch + right-aligned label left of the axis. On logicle/log
+        // the decades compress hard near zero, so drop any label whose centre is within minGapY of the
+        // last DRAWN one (a full label height + padding) — prevents the near-zero decade pile-up.
         g.setTextAlign(javafx.scene.text.TextAlignment.RIGHT);
         g.setTextBaseline(javafx.geometry.VPos.CENTER);
         if (!isHistogram()) {
             java.util.List<Double> yt = new ArrayList<>(axisTicks(ymin, ymax, yScale));
             yt.sort(java.util.Comparator.comparingDouble(this::pxY));
-            double lastYp = -1e9, minGapY = tickFont * 2.0;
+            double lastYp = -1e9, minGapY = tickFont * 2.6;
             for (double tv : yt) {
                 double yp = pxY(tv);
                 if (yp - lastYp < minGapY) continue;
@@ -1533,7 +1693,8 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
     public double confidenceOf(Gate g) { return gateBoundaryConfidence(g); }
 
     private boolean visible(Gate g) {
-        if (!g.xChan.equals(xChan)) return false;
+        if ("subsample".equals(g.type)) return false;   // subsample is a tree population, not a drawn shape
+        if (g.xChan == null || !g.xChan.equals(xChan)) return false;
         return "interval".equals(g.type) || "line".equals(g.type)
                 || (yChan != null && g.yChan != null && g.yChan.equals(yChan));
     }
@@ -1559,7 +1720,12 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
             Label lbl = gateLabels.computeIfAbsent(gt, this::makeGateLabel);
             lbl.setStyle("-fx-font-size:" + (int) labelFontSize + "; -fx-font-weight:bold; -fx-cursor:hand;");
             lbl.setText(labelText(gt));
-            lbl.setTextFill(gt.border);
+            lbl.setTextFill(gt.textColor != null ? gt.textColor : gt.border);
+            lbl.setEffect(gt.textShadow
+                    ? new javafx.scene.effect.DropShadow(3, Color.color(
+                        gt.shadowColor.getRed(), gt.shadowColor.getGreen(), gt.shadowColor.getBlue(),
+                        Math.max(0, Math.min(1, gt.shadowOpacity))))
+                    : null);
             lbl.setVisible(labelsVisible);
             double[] a = labelAnchorPx(gt);
             lbl.relocate(a[0] + 3 + gt.lblDx, a[1] + gt.lblDy);
@@ -1599,11 +1765,15 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
             e.consume();
         });
         lbl.setOnMouseClicked(e -> {
-            if (e.getClickCount() == 2 && onRenameRequest != null) onRenameRequest.accept(gt);
+            // Match the gate BODY's double-click behaviour (open child) so it doesn't matter whether
+            // the user double-clicks the label or the gate itself. Rename stays on the right-click menu.
+            if (e.getClickCount() == 2 && onOpenChild != null) onOpenChild.accept(gt);
             e.consume();
         });
         lbl.setOnContextMenuRequested(e -> {
-            showGateMenu(gt, lbl, e.getScreenX(), e.getScreenY(), Double.NaN, Double.NaN);
+            // Anchor the menu to the canvas, NOT the label: a context menu inherits its owner node's
+            // font, and the label's font = the (large) export label size, which bloated the menu text.
+            showGateMenu(gt, canvas, e.getScreenX(), e.getScreenY(), Double.NaN, Double.NaN);
             e.consume();
         });
         overlay.getChildren().add(lbl);
@@ -1773,10 +1943,16 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         }
         if (e.getButton() != MouseButton.PRIMARY) return;     // right-click handled by context menu
 
-        // 0a. grab an FMO reference line to reposition it (tight 4px tolerance so gates still win)
+        // 0a. grab an FMO reference line to reposition it. 8px tolerance (matches the 10px end handles)
+        // so the thin dashed line is easy to grab; still narrow enough that gate edges elsewhere win.
         if (fmoVisible && inPlot(mx, my)) {
-            if (!Double.isNaN(fmoX) && Math.abs(mx - pxX(fmoX)) <= 4) { dragMode = Drag.MOVE_FMO_X; return; }
-            if (!isHistogram() && !Double.isNaN(fmoY) && Math.abs(my - pxY(fmoY)) <= 4) { dragMode = Drag.MOVE_FMO_Y; return; }
+            if (!Double.isNaN(fmoX) && Math.abs(mx - pxX(fmoX)) <= 8) { dragMode = Drag.MOVE_FMO_X; return; }
+            if (!isHistogram() && !Double.isNaN(fmoY) && Math.abs(my - pxY(fmoY)) <= 8) { dragMode = Drag.MOVE_FMO_Y; return; }
+        }
+        // 0a2. grab an X/Y intercept crosshair line to reposition it (same 8px grab as the FMO lines).
+        if (interceptVisible && inPlot(mx, my)) {
+            if (Math.abs(mx - pxX(interceptX)) <= 8) { dragMode = Drag.MOVE_INTERCEPT_X; return; }
+            if (!isHistogram() && Math.abs(my - pxY(interceptY)) <= 8) { dragMode = Drag.MOVE_INTERCEPT_Y; return; }
         }
         // 0b. grab the quadrant crosshair centre (moves all four gates) or an arm endpoint
         Gate q = quadrantGate();
@@ -1851,6 +2027,8 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
             }
             case MOVE_FMO_X -> { fmoX = dataX(clampX(mx)); paint(); }
             case MOVE_FMO_Y -> { fmoY = dataY(clampY(my)); paint(); }
+            case MOVE_INTERCEPT_X -> { interceptX = dataX(clampX(mx)); if (onInterceptChanged != null) onInterceptChanged.accept(interceptX, interceptY); paint(); }
+            case MOVE_INTERCEPT_Y -> { interceptY = dataY(clampY(my)); if (onInterceptChanged != null) onInterceptChanged.accept(interceptX, interceptY); paint(); }
             case MOVE_QUADRANT -> {
                 double nx = dataX(clampX(mx)), ny = dataY(clampY(my));
                 for (Gate g : gates) if (isQuadrant(g)) {
@@ -1905,7 +2083,19 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
 
     private void onClicked(MouseEvent e) {
         if (data == null) return;
-        if ("Polygon".equals(tool)) {
+        // A double-click is a rare, discrete user action (unlike invalidate()'s 60-120Hz slider-drag
+        // calls) — safe to force the axis ranges current synchronously so gate hit-testing below never
+        // uses stale sxMin/sxMax/syMin/syMax from a still-pending debounce (e.g. right after Prev/Next
+        // or an axis change). See ui-bug-log "double-click gate open" fixes.
+        if (e.getClickCount() >= 2 && renderDebounce != null
+                && renderDebounce.getStatus() == javafx.animation.Animation.Status.RUNNING) {
+            recomputeRanges();
+        }
+        // Only take the polygon-drawing path while a draw is ACTUALLY in progress (polyPx non-empty).
+        // Previously this fired for the Polygon tool unconditionally, so double-clicking an existing
+        // gate while Polygon was merely SELECTED (no draw started) silently added a point instead of
+        // opening the gate — see ui-bug-log "double-click gate open" fixes.
+        if ("Polygon".equals(tool) && !polyPx.isEmpty()) {
             if (e.getClickCount() == 2 && polyPx.size() >= 3) {
                 double[] xs = new double[polyPx.size()], ys = new double[polyPx.size()];
                 for (int k = 0; k < polyPx.size(); k++) { xs[k] = dataX(polyPx.get(k)[0]); ys[k] = dataY(polyPx.get(k)[1]); }
@@ -1916,7 +2106,12 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
             }
             return;
         }
-        // edit mode: double-click inside a gate body opens it in a new window (child population)
+        if ("Polygon".equals(tool) && e.getClickCount() == 1 && inPlot(e.getX(), e.getY())) {
+            polyPx.add(new double[]{snapPxX(e.getX()), snapPxY(e.getY())}); paint();   // start a new draw
+            return;
+        }
+        // edit mode: double-click inside a gate body (or, with no draw in progress, anywhere while
+        // Polygon is selected) opens it in a new window (child population)
         if (e.getClickCount() == 2) {
             Gate g = gateAt(e.getX(), e.getY());
             if (g != null) { selected = g; paint(); if (onOpenChild != null) onOpenChild.accept(g); }
@@ -1967,7 +2162,9 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         double dx = dataX(px), dy = dataY(py);
         for (int i = gates.size() - 1; i >= 0; i--) {
             Gate g = gates.get(i);
-            if (g.type.length() == 2 && g.type.charAt(0) == 'q' && Character.isDigit(g.type.charAt(1))) continue;
+            // Quadrant sectors (q1-q4) ARE hit-testable — pointInGate already dispatches them to
+            // inQuadrantSector. They used to be skipped here, making quadrant children unopenable by
+            // double-click. See ui-bug-log "double-click gate open" fixes.
             if (visible(g) && pointInGate(g, dx, dy)) return g;
         }
         return null;
@@ -2174,9 +2371,21 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         return String.format("%.0f", v);
     }
 
-    private static Color[] buildLut() {
-        Color[] stops = {Color.web("#0000CC"), Color.web("#00CCFF"), Color.web("#00CC44"),
-                Color.web("#FFFF00"), Color.web("#FF9900"), Color.web("#FF0000")};
+    /** Build a 256-entry colour ramp for the named density palette (interpolated between stops). */
+    private static Color[] buildLut(String palette) {
+        Color[] stops = switch (palette == null ? "Jet" : palette) {
+            case "Viridis"   -> new Color[]{Color.web("#440154"), Color.web("#414487"), Color.web("#2A788E"),
+                                            Color.web("#22A884"), Color.web("#7AD151"), Color.web("#FDE725")};
+            case "Turbo"     -> new Color[]{Color.web("#30123B"), Color.web("#4067E2"), Color.web("#1AC7C2"),
+                                            Color.web("#A2FC3C"), Color.web("#FB8022"), Color.web("#7A0403")};
+            case "Fire"      -> new Color[]{Color.web("#000000"), Color.web("#7F0000"), Color.web("#FF3300"),
+                                            Color.web("#FF9900"), Color.web("#FFFF66"), Color.web("#FFFFFF")};
+            case "Ice"       -> new Color[]{Color.web("#00111F"), Color.web("#003A63"), Color.web("#0077B6"),
+                                            Color.web("#48CAE4"), Color.web("#ADE8F4"), Color.web("#FFFFFF")};
+            case "Grayscale" -> new Color[]{Color.web("#F5F5F5"), Color.web("#111111")};
+            default          -> new Color[]{Color.web("#0000CC"), Color.web("#00CCFF"), Color.web("#00CC44"),   // Jet
+                                            Color.web("#FFFF00"), Color.web("#FF9900"), Color.web("#FF0000")};
+        };
         Color[] lut = new Color[256];
         for (int i = 0; i < 256; i++) {
             double t = i / 255.0 * (stops.length - 1);
