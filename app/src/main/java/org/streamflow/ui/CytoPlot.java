@@ -294,7 +294,10 @@ public class CytoPlot extends Region {
     private int contourLevels = 10;   // number of iso-density contour lines (more = finer)
     private boolean contourOutliers = false;   // draw individual events below the lowest contour
     private int outlierSize = 0;      // outlier dot stamp radius in pixels (0 = single pixel); only used when contourOutliers is on
-    private int smoothStrength = 3;   // Gaussian blur radius for density/contour/zebra smoothing (1-8)
+    private int smoothStrength = 3;   // Gaussian blur radius for density/zebra smoothing (1-8)
+    // Contour keeps its OWN blur radius, independent of density/zebra — the Density group is disabled
+    // while contour is the active plot type, so contour needs its own reachable smoothness control.
+    private int contourSmoothStrength = 3;
     public void setContourLevels(int n) { this.contourLevels = Math.max(3, Math.min(30, n)); invalidate(); }
     public int contourLevels() { return contourLevels; }
     public void setContourOutliers(boolean b) { this.contourOutliers = b; invalidate(); }
@@ -303,6 +306,8 @@ public class CytoPlot extends Region {
     public int outlierSize() { return outlierSize; }
     public void setSmoothStrength(int s) { this.smoothStrength = Math.max(1, Math.min(8, s)); invalidate(); }
     public int smoothStrength() { return smoothStrength; }
+    public void setContourSmoothStrength(int s) { this.contourSmoothStrength = Math.max(1, Math.min(8, s)); invalidate(); }
+    public int contourSmoothStrength() { return contourSmoothStrength; }
     public void setHistMode(String m) { this.histMode = m; invalidate(); }
     public void setHistBandwidth(double b) { this.histBandwidth = b; if (isHistogram()) invalidate(); }
     public double histBandwidth() { return histBandwidth; }
@@ -941,7 +946,7 @@ public class CytoPlot extends Region {
                 for (int p = 0; p < grid.length; p++) if (grid[p] > 0) argb[p] = dotArgb;
             }
             case "density" -> {
-                double[] dens = densityField(grid, w, h, smoothDensity);
+                double[] dens = densityField(grid, w, h, smoothDensity, smoothStrength);
                 double dmax = arrayMax(dens);
                 for (int p = 0; p < dens.length; p++) {
                     if (dens[p] <= 0) continue;
@@ -951,7 +956,7 @@ public class CytoPlot extends Region {
                 }
             }
             case "contour" -> {
-                double[] dens = densityField(grid, w, h, smoothContour);
+                double[] dens = densityField(grid, w, h, smoothContour, contourSmoothStrength);
                 double[] lv = equalProbLevels(dens, contourLevels);
                 int line = colorArgb(contourColor);
                 // Outlier dots: events sitting BELOW the lowest contour band (sparse tails FlowJo shows).
@@ -980,7 +985,7 @@ public class CytoPlot extends Region {
                 }
             }
             case "zebra" -> {
-                double[] dens = densityField(grid, w, h, smoothDensity);
+                double[] dens = densityField(grid, w, h, smoothDensity, smoothStrength);
                 int n = 20;
                 double[] lv = equalProbLevels(dens, n);
                 for (int p = 0; p < dens.length; p++) {
@@ -1349,7 +1354,7 @@ public class CytoPlot extends Region {
     /** Smooth density field for contour/zebra/density: coarse-bin → Gaussian blur → bilinear
      *  upsample. Coarse binning + interpolation removes the pixel-level noise that made contours
      *  jagged, giving FlowJo-like smooth iso-lines. (Raw pixel grid when Smooth is off.) */
-    private double[] densityField(int[] grid, int w, int h, boolean smooth) {
+    private double[] densityField(int[] grid, int w, int h, boolean smooth, int strength) {
         if (!smooth) {
             double[] a = new double[grid.length];
             for (int i = 0; i < grid.length; i++) a[i] = grid[i];
@@ -1361,7 +1366,7 @@ public class CytoPlot extends Region {
             int cy = Math.min(G - 1, y * G / h);
             for (int x = 0; x < w; x++) c[cy * G + Math.min(G - 1, x * G / w)] += grid[y * w + x];
         }
-        c = blur2d(c, G, G, smoothStrength);                 // adjustable blur on the coarse field
+        c = blur2d(c, G, G, Math.max(1, strength));          // caller's blur radius (density vs contour)
         double[] out = new double[w * h];
         for (int y = 0; y < h; y++) {
             double gy = (double) y / h * (G - 1); int y0 = (int) gy, y1 = Math.min(G - 1, y0 + 1); double fy = gy - y0;

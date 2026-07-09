@@ -46,6 +46,10 @@
                 <Button fx:id="residualButton" text="Residual diagnostic" onAction="#onResidual">
                     <graphic><FontIcon iconLiteral="fas-th"/></graphic>
                 </Button>
+                <Button fx:id="stainIndexButton" text="Stain Index…" onAction="#onStainIndex">
+                    <graphic><FontIcon iconLiteral="fas-ruler-horizontal"/></graphic>
+                    <tooltip><Tooltip text="Panel-wide stain index (separation) per fluorochrome, from the single-stain controls"/></tooltip>
+                </Button>
                 <Region HBox.hgrow="ALWAYS"/>
                 <Button fx:id="helpButton" text="Help" onAction="#onHelp">
                     <graphic><FontIcon iconLiteral="fas-question-circle"/></graphic>

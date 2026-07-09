@@ -14,11 +14,11 @@
 #
 #   -Installer        build a Windows .exe installer (needs WiX 3.x on PATH) instead of an app-image
 #   -SkipR            build a Python-only fat binary (omit the bundled R runtime / R plugins)
-#   -Version <x.y.z>  app version stamped into the package (default 2.0.0)
+#   -Version <x.y.z>  app version stamped into the package (default 1.2.0)
 #
 # CI-friendly: if the repo-bundled JDK/Maven are absent it falls back to JAVA_HOME / the `mvn`
 # on PATH, and R is skipped automatically when R-Portable has not been staged.
-param([switch]$Installer, [switch]$SkipR, [string]$Version = "2.0.0")
+param([switch]$Installer, [switch]$SkipR, [string]$Version = "1.2.0")
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path     # app\
@@ -54,8 +54,19 @@ if (-not (Test-Path (Join-Path $pyportable "python.exe"))) {
 }
 
 # 1) Build the jar + collect runtime dependencies into target\libs.
+# NOTE: deliberately NOT `mvn clean` — target\python (stage-python.ps1) and target\R-Portable
+# (the release workflow) are staged INTO target before this runs, and `clean` would delete them,
+# producing an installer with no engine. Remove only the Maven build outputs instead.
+foreach ($d in @("classes", "test-classes", "libs", "content", "dist",
+                 "generated-sources", "maven-status", "surefire-reports")) {
+    $p = Join-Path $here "target\$d"
+    if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+}
+Get-ChildItem (Join-Path $here "target") -Filter "streamflow-*.jar" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 Write-Host "Building jar + collecting dependencies…"
-& $mvn -B -f (Join-Path $here "pom.xml") clean package `
+& $mvn -B -f (Join-Path $here "pom.xml") package `
     dependency:copy-dependencies "-DoutputDirectory=target/libs" "-DincludeScope=runtime" "-DskipTests=true"
 if ($LASTEXITCODE -ne 0) { throw "Maven build failed (exit $LASTEXITCODE)." }
 # Resolve the built jar by pattern so the script isn't tied to a hard-coded version string.
