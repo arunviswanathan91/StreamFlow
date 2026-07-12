@@ -104,18 +104,22 @@ public class MainController implements JobRunner {
         loadModule("Longitudinal", "/org/streamflow/ui/longitudinal.fxml");
         loadModule("3D Scatter", "/org/streamflow/ui/scatter3d.fxml");
         loadModule("Export", "/org/streamflow/ui/export.fxml");
+        loadModule("Plugins", "/org/streamflow/ui/plugins.fxml");
         loadModule("Analysis Log", "/org/streamflow/ui/analysis-log.fxml");
         loadModule("Developer / Engine", "/org/streamflow/ui/devconsole.fxml");
         setupController = (SetupController) controllers.get("Setup");
 
         // Setup is merged into Workstation (the home); FCS import lives in File ▸ Load FCS….
         // Visualization (server-side matplotlib) is redundant with the native Graph Window.
+        // Transformation is no longer its own tab — the transform is chosen inside Dim Reduction (where
+        // it is almost always used) and stored globally, so Clustering still reads it. The module is
+        // still loaded above so nothing that references it breaks; it just isn't in the nav.
         var names = FXCollections.observableArrayList(
-                "Workstation", "Compensation", "Transformation",
+                "Workstation", "Compensation",
                 "Dim. Reduction", "Clustering", "Statistics",
                 "Cell Cycle", "Proliferation", "Apoptosis", "Stats Comparison",
                 "Kinetic", "Classifier", "Cross-Sample", "Longitudinal", "3D Scatter",
-                "Export", "Analysis Log", "Developer / Engine");
+                "Export", "Plugins", "Analysis Log", "Developer / Engine");
         navList.setItems(names);
         navList.getSelectionModel().selectedItemProperty().addListener((o, prev, sel) -> showModule(sel));
         navList.getSelectionModel().select("Workstation");
@@ -489,6 +493,11 @@ public class MainController implements JobRunner {
             if (workspace != null) {
                 workspace.seedChannelScalesFromTrees();       // BUG-11: restore per-marker scales
                 workspace.seedPopLabelOffsetsFromTrees();     // BUG-14: restore per-population label positions
+                workspace.clearGroups();
+                JsonNode groups = summary.path("groups");
+                groups.fieldNames().forEachRemaining(s -> workspace.setGroup(s, groups.path(s).asText()));
+                // Restore the saved map so Dim Reduction reopens on the SAME coordinates.
+                workspace.setEmbeddingSnapshot(summary.path("embedding"));
             }
             if (appCtx != null) appCtx.auditLog().restore(summary.path("audit_log"));
             refreshModules();
@@ -498,6 +507,52 @@ public class MainController implements JobRunner {
             asked10 = asked30 = false; sessionStartMs = System.currentTimeMillis();
             navList.getSelectionModel().select("Workstation");
             status("Workspace loaded: " + f.getName());
+        });
+    }
+
+    /**
+     * File ▸ Import FlowJo Workspace — read a .wsp, load its FCS, and translate every gate to an
+     * index-defined population. Membership comes from FlowKit's gating engine, not from re-evaluating
+     * the polygons on raw data (their coordinates are in comp+transform space, which would misplace
+     * every gate). See engine command import_flowjo_wsp.
+     */
+    @FXML
+    private void onImportFlowJo() {
+        if (bridge == null) return;
+        if (workspace != null && workspace.isDirty()) {
+            javafx.scene.control.ButtonType proceed = new javafx.scene.control.ButtonType("Import anyway");
+            javafx.scene.control.Alert ask = new javafx.scene.control.Alert(
+                    javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                    "Importing a FlowJo workspace replaces the current session. Continue?",
+                    proceed, javafx.scene.control.ButtonType.CANCEL);
+            ask.setTitle("Import FlowJo workspace"); ask.setHeaderText("Replace current session?");
+            AppIcons.theme(ask, window());
+            if (ask.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL) != proceed) return;
+        }
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Import FlowJo workspace");
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("FlowJo workspace (*.wsp)", "*.wsp"));
+        File f = fc.showOpenDialog(window());
+        if (f == null) return;
+        purgeWorkspaceState();
+        ObjectNode args = JSON.createObjectNode();
+        args.put("file", f.getAbsolutePath().replace('\\', '/'));
+        status("Importing " + f.getName() + "…");
+        run(bridge.command("import_flowjo_wsp", args), summary -> {
+            if (setupController != null) setupController.populate(summary);
+            restoreGates(summary.path("gates"));
+            if (workspace != null) {
+                workspace.seedChannelScalesFromTrees();
+                workspace.seedPopLabelOffsetsFromTrees();
+            }
+            refreshModules();
+            lastWorkspaceFile = null;    // a .wsp import is a NEW StreamFLOW workspace; Save As on first save
+            if (workspace != null) workspace.markDirty();
+            navList.getSelectionModel().select("Workstation");
+            int skipped = summary.path("skipped_samples").asInt();
+            status("Imported " + summary.path("n_gates").asInt() + " gate(s) from " + f.getName()
+                    + (skipped > 0 ? " (" + skipped + " sample(s) skipped — FCS not found)" : "")
+                    + ". Save As to keep it as a StreamFLOW workspace.");
         });
     }
 
@@ -617,6 +672,13 @@ public class MainController implements JobRunner {
         args.put("file", f.getAbsolutePath().replace('\\', '/'));
         args.set("gates", serializeGates());   // gates live on the Java side; ship them to the .sfw
         if (appCtx != null) args.set("audit_log", appCtx.auditLog().toJson(JSON));   // #32b persist the log
+        if (workspace != null) {
+            ObjectNode groups = JSON.createObjectNode();
+            workspace.sampleGroups().forEach(groups::put);
+            args.set("groups", groups);
+            // The embedding's coordinates, not a recipe: re-running t-SNE gives a different layout.
+            if (workspace.embeddingSnapshot() != null) args.set("embedding", workspace.embeddingSnapshot());
+        }
         if (!silent) status("Saving " + f.getName() + "…");
         run(bridge.command("save_workspace", args), r -> {
             lastWorkspaceFile = f;
@@ -663,6 +725,13 @@ public class MainController implements JobRunner {
                 gn.put("name", g.name);
                 gn.put("type", g.type);
                 if ("subsample".equals(g.type)) { gn.put("sub_n", g.subN); gn.put("sub_seed", g.subSeed); }
+                // A plugin population's rows come from an R plugin (e.g. PeacoQC's kept_indices) and
+                // CANNOT be recomputed from a seed, so the index set itself must be persisted.
+                else if (("plugin".equals(g.type) || "embedding".equals(g.type) || "flowjo".equals(g.type))
+                         && g.subSelected != null) {
+                    ArrayNode ix = gn.putArray("plugin_indices");
+                    for (int v : g.subSelected) ix.add(v);
+                }
                 gn.put("x_channel", g.xChan);
                 if (g.yChan != null && !g.yChan.isBlank()) gn.put("y_channel", g.yChan);
                 gn.put("angle", g.angle);
@@ -705,6 +774,15 @@ public class MainController implements JobRunner {
                         gn.path("y_channel").asText(null), xs, ys);
                 g.angle = gn.path("angle").asDouble(0);
                 if ("subsample".equals(g.type)) { g.subN = gn.path("sub_n").asInt(-1); g.subSeed = gn.path("sub_seed").asLong(0); }
+                else if ("plugin".equals(g.type) || "embedding".equals(g.type) || "flowjo".equals(g.type)) {
+                    JsonNode ix = gn.path("plugin_indices");
+                    if (ix.isArray()) {
+                        int[] pidx = new int[ix.size()];
+                        for (int k = 0; k < pidx.length; k++) pidx[k] = ix.get(k).asInt();
+                        g.subSelected = pidx;
+                        g.subBySample.put(sample, pidx);   // per-sample cache, keyed by this tree's sample
+                    }
+                }
                 PopNode pn = new PopNode(g, null);
                 // Restore the per-node view (axes + scales) saved by serializeGates. See ui-bug-log BUG-09.
                 pn.viewX      = gn.path("view_x").asText(null);

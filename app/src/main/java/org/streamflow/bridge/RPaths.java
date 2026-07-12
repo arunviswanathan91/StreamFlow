@@ -70,7 +70,32 @@ public final class RPaths {
             Path exe = Paths.get(envHome, "bin", RSCRIPT);
             if (Files.exists(exe)) return exe;
         }
+        // A normal Windows R install ("C:\Program Files\R\R-4.4.2") puts Rscript in bin\ but does NOT
+        // add it to PATH, so without this the R plugins would be invisible on a machine that has R.
+        // Prefer the highest version found.
+        Path sys = newestSystemR();
+        if (sys != null) return sys;
         return Paths.get(RSCRIPT); // fall back to PATH lookup
+    }
+
+    /** Newest {@code <ProgramFiles>\R\R-x.y.z\bin\Rscript.exe} on Windows, or null. */
+    private static Path newestSystemR() {
+        if (!IS_WINDOWS) return null;
+        Path best = null; String bestVer = null;
+        for (String base : new String[]{System.getenv("ProgramFiles"), System.getenv("ProgramW6432"), "C:\\R"}) {
+            if (base == null || base.isBlank()) continue;
+            Path rRoot = Paths.get(base, "R");
+            if (!Files.isDirectory(rRoot)) continue;
+            try (java.util.stream.Stream<Path> s = Files.list(rRoot)) {
+                for (Path dir : s.toList()) {
+                    Path exe = dir.resolve("bin").resolve(RSCRIPT);
+                    if (!Files.exists(exe)) continue;
+                    String ver = dir.getFileName().toString();   // e.g. "R-4.4.2"
+                    if (bestVer == null || ver.compareTo(bestVer) > 0) { bestVer = ver; best = exe; }
+                }
+            } catch (java.io.IOException ignored) { }
+        }
+        return best;
     }
 
     /** Absolute path to streamflow_engine.R. */

@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<?import javafx.scene.canvas.Canvas?>
 <?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Separator?>
 <?import javafx.scene.control.Spinner?>
+<?import javafx.scene.control.TextField?>
+<?import javafx.scene.control.ToggleButton?>
+<?import javafx.scene.control.Tooltip?>
+<?import javafx.scene.layout.FlowPane?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
@@ -12,39 +19,259 @@
 
 <VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
       fx:controller="org.streamflow.ui.DimReductionController"
-      styleClass="content" spacing="12.0">
+      styleClass="content" spacing="8.0">
     <children>
         <Label text="Dimensionality Reduction" styleClass="title"/>
-        <Label text="UMAP / t-SNE on a sample's fluorescence channels. Runs in the background — the UI stays responsive."
+        <Label text="UMAP / t-SNE. All samples are pooled into ONE embedding with an equal number of events each, so islands are comparable across files — a separate run per file would give each its own coordinate system. Draw a gate on an island to turn it into a population."
                styleClass="subtitle" wrapText="true"/>
-        <VBox fx:id="hintPane" styleClass="workflow-hints" managed="false" visible="false" spacing="6.0"/>
-        <HBox spacing="8.0" alignment="CENTER_LEFT">
+
+        <FlowPane hgap="8.0" vgap="6.0" alignment="CENTER_LEFT">
             <children>
+                <Label text="Mode:"/>
+                <ComboBox fx:id="modeCombo" prefWidth="220.0">
+                    <tooltip><Tooltip text="Discovery: run on whole samples (auto-cleaned). Targeted: run only on an existing gated population."/></tooltip>
+                </ComboBox>
+                <Label fx:id="populationLabel" text="Population:"/>
+                <ComboBox fx:id="populationCombo" prefWidth="180.0"/>
+                <Separator orientation="VERTICAL"/>
                 <Label text="Method:"/>
-                <ComboBox fx:id="methodCombo"/>
-                <Label text="Sample:"/>
-                <ComboBox fx:id="sampleCombo" prefWidth="220.0"/>
-                <Label text="Events:"/>
-                <Spinner fx:id="eventsSpinner" editable="true" prefWidth="120.0"/>
-                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
-                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
-                </Button>
+                <ComboBox fx:id="methodCombo" prefWidth="96.0"/>
+                <Label text="Transform:"/>
+                <ComboBox fx:id="transformCombo" prefWidth="96.0">
+                    <tooltip><Tooltip text="Applied to marker values before the embedding and clustering. logicle/arcsinh spread the low-signal region; this is the app-wide transform setting (there is no separate Transformation tab)."/></tooltip>
+                </ComboBox>
+                <Label text="Cofactor:"/>
+                <TextField fx:id="cofactorField" prefWidth="56.0" text="150"/>
+                <Label text="Events/sample:"/>
+                <Spinner fx:id="eventsSpinner" editable="true" prefWidth="100.0"/>
+                <Label text="Seed:"/>
+                <Spinner fx:id="seedSpinner" editable="true" prefWidth="80.0"/>
                 <Button fx:id="runButton" text="Run" onAction="#onRun" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-project-diagram"/></graphic>
                 </Button>
+                <Button fx:id="refreshButton" text="Refresh" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-sync"/></graphic>
+                </Button>
+            </children>
+        </FlowPane>
+
+        <FlowPane hgap="8.0" vgap="6.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Colour by:"/>
+                <ComboBox fx:id="colorByCombo" prefWidth="190.0">
+                    <tooltip><Tooltip text="Colour events by a marker's intensity (hot vs cold), by sample, or fall back to event density."/></tooltip>
+                </ComboBox>
+                <Button fx:id="coloursButton" text="Colours…" onAction="#onEditColours">
+                    <tooltip><Tooltip text="Change each population's colour (when colouring by populations), or the intensity gradient. Colours are used app-wide."/></tooltip>
+                </Button>
+                <Separator orientation="VERTICAL"/>
+                <ToggleButton fx:id="gateToggle" text="Draw gate">
+                    <graphic><FontIcon iconLiteral="fas-draw-polygon"/></graphic>
+                    <tooltip><Tooltip text="Draw a polygon around an island. Draw as many as you like; each becomes its own population."/></tooltip>
+                </ToggleButton>
+                <Button fx:id="addPopButton" text="Add gate as population" onAction="#onAddPopulation" disable="true">
+                    <graphic><FontIcon iconLiteral="fas-plus"/></graphic>
+                    <tooltip><Tooltip text="Adds the gate selected in the list on the left."/></tooltip>
+                </Button>
+                <Separator orientation="VERTICAL"/>
+                <ToggleButton fx:id="gridToggle" text="Preview grid" onAction="#onToggleGrid">
+                    <graphic><FontIcon iconLiteral="fas-th"/></graphic>
+                    <tooltip><Tooltip text="Facet the same embedding per sample, sharing axes and colours. Click a tile to focus it."/></tooltip>
+                </ToggleButton>
+                <ToggleButton fx:id="groupToggle" text="By group" onAction="#onToggleGroup">
+                    <tooltip><Tooltip text="Show the groups side by side in the main window, on one shared embedding. Copy and Export capture all panels."/></tooltip>
+                </ToggleButton>
+                <Button fx:id="groupsButton" text="Groups…" onAction="#onEditGroups">
+                    <graphic><FontIcon iconLiteral="fas-layer-group"/></graphic>
+                    <tooltip><Tooltip text="Assign each FCS file to a named group (Control, Treated, …)."/></tooltip>
+                </Button>
+                <Button fx:id="panelsButton" text="Show…" onAction="#onSelectPanels">
+                    <tooltip><Tooltip text="Choose which panels (all samples, groups, or individual samples) are displayed side by side."/></tooltip>
+                </Button>
+                <ToggleButton fx:id="lightBgToggle" text="Light background" onAction="#onToggleLightBg">
+                    <graphic><FontIcon iconLiteral="fas-sun"/></graphic>
+                    <tooltip><Tooltip text="Preview the publication (white) background that Copy and Export always use."/></tooltip>
+                </ToggleButton>
+                <Separator orientation="VERTICAL"/>
                 <Button fx:id="copyButton" text="Copy" onAction="#onCopy">
                     <graphic><FontIcon iconLiteral="fas-copy"/></graphic>
+                    <tooltip><Tooltip text="Copy at the configured export DPI, on a white background."/></tooltip>
                 </Button>
-                <Button fx:id="exportButton" text="Export PNG" onAction="#onExport">
+                <Button fx:id="exportButton" text="Export…" onAction="#onExport">
                     <graphic><FontIcon iconLiteral="fas-download"/></graphic>
+                    <tooltip><Tooltip text="PNG / TIFF at export DPI (300 by default), or vector SVG."/></tooltip>
                 </Button>
+                <Button fx:id="settingsButton" onAction="#onSettings">
+                    <graphic><FontIcon iconLiteral="fas-cog"/></graphic>
+                    <tooltip><Tooltip text="Export format: DPI, fonts, point size (applies app-wide)."/></tooltip>
+                </Button>
+            </children>
+        </FlowPane>
+
+        <Label fx:id="statusLabel" text="" styleClass="subtitle" wrapText="true"/>
+
+        <HBox spacing="10.0" VBox.vgrow="ALWAYS">
+            <children>
+                <ScrollPane fitToWidth="true" prefWidth="330.0" minWidth="310.0" maxWidth="330.0"
+                            hbarPolicy="NEVER" styleClass="content">
+                  <content>
+                <VBox spacing="6.0">
+                    <children>
+                        <Label text="Markers used for the embedding" styleClass="subtitle"/>
+                        <Label text="Selected = included. Scatter/Time are de-selected by default; de-select Live/Dead too, or the map wastes resolution separating live from dead cells."
+                               styleClass="subtitle" wrapText="true"/>
+                        <ListView fx:id="markerList" VBox.vgrow="ALWAYS" prefHeight="170.0"/>
+
+                        <Separator/>
+                        <HBox spacing="6.0" alignment="CENTER_LEFT">
+                            <children>
+                                <CheckBox fx:id="debrisCheck" text="Auto-remove debris (FSC/SSC)" selected="true">
+                                    <tooltip><Tooltip text="Central-percentile scatter cleanup — the same routine the Compensation wizard uses. Uncheck to keep every event."/></tooltip>
+                                </CheckBox>
+                                <Button fx:id="debrisInfoButton" text="?" onAction="#onDebrisInfo">
+                                    <tooltip><Tooltip text="What does auto-remove debris actually do?"/></tooltip>
+                                </Button>
+                            </children>
+                        </HBox>
+                        <CheckBox fx:id="qcCheck" text="QC clean (flow-rate) before run">
+                            <tooltip><Tooltip text="Removes events acquired during flow-rate anomalies (clogs, bubbles, restarts), using the Time channel — the core of flowAI/flowClean. Keeps clusters on biology, not technical noise."/></tooltip>
+                        </CheckBox>
+                        <FlowPane hgap="6.0" vgap="4.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="FSC:" minWidth="34"/>
+                                <ComboBox fx:id="fscCombo" prefWidth="100.0"/>
+                                <Label text="SSC:" minWidth="34"/>
+                                <ComboBox fx:id="sscCombo" prefWidth="100.0"/>
+                            </children>
+                        </FlowPane>
+
+                        <Separator/>
+                        <CheckBox fx:id="positivityCheck" text="Drop Live/Dead-positive events">
+                            <tooltip><Tooltip text="Removes dead cells before the embedding, using a positivity threshold you can edit."/></tooltip>
+                        </CheckBox>
+                        <HBox spacing="6.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="Channel:" minWidth="60"/>
+                                <ComboBox fx:id="liveDeadCombo" prefWidth="126.0"/>
+                            </children>
+                        </HBox>
+                        <FlowPane hgap="6.0" vgap="4.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="Threshold:" minWidth="60"/>
+                                <TextField fx:id="thresholdField" prefWidth="72.0"/>
+                                <Button fx:id="autoThresholdButton" text="Auto" onAction="#onAutoThreshold">
+                                    <tooltip><Tooltip text="Automatic positive/negative split from the chosen control sample. The value stays editable."/></tooltip>
+                                </Button>
+                                <Button fx:id="manualThresholdButton" text="Manual…" onAction="#onManualThreshold">
+                                    <tooltip><Tooltip text="Set the threshold against the unstained and single-stain controls (and an FMO, if you have one)."/></tooltip>
+                                </Button>
+                            </children>
+                        </FlowPane>
+                        <HBox spacing="6.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="Control:" minWidth="60"/>
+                                <ComboBox fx:id="controlCombo" prefWidth="126.0"/>
+                            </children>
+                        </HBox>
+
+                        <Separator/>
+                        <Label text="Gates on the map" styleClass="subtitle"/>
+                        <ListView fx:id="gateList" prefHeight="110.0">
+                            <tooltip><Tooltip text="Every polygon you draw. Select one, then 'Add gate as population'."/></tooltip>
+                        </ListView>
+                        <HBox spacing="6.0">
+                            <children>
+                                <Button fx:id="renameGateButton" text="Rename" onAction="#onRenameGate" disable="true"/>
+                                <Button fx:id="removeGateButton" text="Remove" onAction="#onRemoveGate" disable="true"/>
+                            </children>
+                        </HBox>
+
+                        <VBox fx:id="taggedPanel" spacing="6.0" visible="false" managed="false">
+                            <children>
+                                <Separator/>
+                                <Label text="Marker-defined populations" styleClass="subtitle"/>
+                                <Label text="Tag each fluorochrome with its marker, set a threshold per marker, then define populations as combinations (CD45+ CD4+ FoxP3+). Suggestions appear as dashed outlines until you approve them."
+                                       styleClass="subtitle" wrapText="true"/>
+                                <FlowPane hgap="6.0" vgap="6.0">
+                                    <children>
+                                        <Button fx:id="tagsButton" text="Tags…" onAction="#onEditTags"/>
+                                        <Button fx:id="thresholdsButton" text="Thresholds…" onAction="#onMarkerThresholds"/>
+                                    </children>
+                                </FlowPane>
+                                <Label text="Rules — first match decides an event's colour" styleClass="subtitle" wrapText="true"/>
+                                <ListView fx:id="ruleList" prefHeight="90.0"/>
+                                <FlowPane hgap="6.0" vgap="6.0">
+                                    <children>
+                                        <Button fx:id="addRuleButton" text="Add rule…" onAction="#onAddRule"/>
+                                        <Button fx:id="removeRuleButton" text="Remove" onAction="#onRemoveRule"/>
+                                        <Button fx:id="applyRulesButton" text="Apply" onAction="#onApplyRules"/>
+                                    </children>
+                                </FlowPane>
+                                <FlowPane hgap="6.0" vgap="4.0">
+                                    <children>
+                                        <Label text="Cluster with:"/>
+                                        <ComboBox fx:id="clusterMethodCombo" prefWidth="130.0">
+                                            <tooltip><Tooltip text="FlowSOM (fixed k) · PhenoGraph (graph, auto count) · Bayesian (Dirichlet-Process GMM, auto count + confidence) · FlowGrid (density) · k-means."/></tooltip>
+                                        </ComboBox>
+                                        <Label text="Scale:"/>
+                                        <ComboBox fx:id="scaleCombo" prefWidth="96.0">
+                                            <tooltip><Tooltip text="Per-marker scaling before clustering. z-score stops bright wide-range channels dominating — usually the biggest cluster-quality win."/></tooltip>
+                                        </ComboBox>
+                                    </children>
+                                </FlowPane>
+                                <Label text="Name clusters by" styleClass="subtitle"/>
+                                <ComboBox fx:id="namingCombo" maxWidth="Infinity">
+                                    <tooltip><Tooltip text="Thresholds uses your per-marker cuts. The Relative methods name clusters from between-cluster expression, with no hard threshold — they recover a whole high-marker region a control cut would miss."/></tooltip>
+                                </ComboBox>
+                                <FlowPane hgap="6.0" vgap="6.0">
+                                    <children>
+                                        <Label text="Suggest k:"/>
+                                        <Spinner fx:id="kSpinner" editable="true" prefWidth="72.0"/>
+                                        <Button fx:id="suggestButton" text="Suggest" onAction="#onSuggest">
+                                            <tooltip><Tooltip text="Cluster the marker values (not the map coordinates) with the chosen method, proposing candidate populations named by the method above."/></tooltip>
+                                        </Button>
+                                    </children>
+                                </FlowPane>
+                                <Label text="Suggested (dashed) — approve to make real" styleClass="subtitle" wrapText="true"/>
+                                <ListView fx:id="suggestionList" prefHeight="90.0"/>
+                                <FlowPane hgap="6.0" vgap="6.0">
+                                    <children>
+                                        <Button fx:id="inspectButton" text="Inspect…" onAction="#onInspectSuggestion"/>
+                                        <Button fx:id="approveButton" text="Approve" onAction="#onApproveSuggestion"/>
+                                        <Button fx:id="rejectButton" text="Reject" onAction="#onRejectSuggestion"/>
+                                        <Button fx:id="nameSuggestionButton" text="Name…" onAction="#onNameSuggestion"/>
+                                    </children>
+                                </FlowPane>
+                            </children>
+                        </VBox>
+                    </children>
+                </VBox>
+                  </content>
+                </ScrollPane>
+
+                <VBox spacing="4.0" HBox.hgrow="ALWAYS">
+                    <children>
+                        <HBox spacing="6.0" VBox.vgrow="ALWAYS">
+                            <children>
+                                <StackPane fx:id="plotHost" HBox.hgrow="ALWAYS" styleClass="plot-pane"/>
+                                <ScrollPane fx:id="legendScroll" fitToWidth="true" prefWidth="196.0"
+                                            minWidth="196.0" maxWidth="196.0" hbarPolicy="NEVER"
+                                            visible="false" managed="false" styleClass="content">
+                                    <content>
+                                        <VBox fx:id="legendPane" spacing="3.0" style="-fx-padding:4;"/>
+                                    </content>
+                                </ScrollPane>
+                            </children>
+                        </HBox>
+                        <ScrollPane fx:id="gridScroll" fitToWidth="true" prefHeight="190.0"
+                                    visible="false" managed="false">
+                            <content>
+                                <FlowPane fx:id="previewGrid" hgap="8.0" vgap="8.0" style="-fx-padding:6;"/>
+                            </content>
+                        </ScrollPane>
+                    </children>
+                </VBox>
             </children>
         </HBox>
-        <Label fx:id="statusLabel" text="" styleClass="subtitle"/>
-        <StackPane fx:id="mapPane" VBox.vgrow="ALWAYS" styleClass="plot-pane">
-            <children>
-                <Canvas fx:id="mapCanvas"/>
-            </children>
-        </StackPane>
     </children>
 </VBox>

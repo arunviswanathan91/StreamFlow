@@ -268,8 +268,8 @@ public class GraphWindowController {
             if (n == null) { toolNoneBtn.setSelected(true); return; }
             plot.setTool(toolNameOf(n));
         });
-        xScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "ArcSinh"));
-        yScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "ArcSinh"));
+        xScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "Biex", "ArcSinh"));
+        yScaleCombo.setItems(FXCollections.observableArrayList("Linear", "Log", "Logicle", "Biex", "ArcSinh"));
         xScaleCombo.getSelectionModel().select("Linear");
         yScaleCombo.getSelectionModel().select("Linear");
         xAxisOptsButton.setOnAction(e -> showAxisOptions(true, xAxisOptsButton));
@@ -774,7 +774,7 @@ public class GraphWindowController {
         currentData = dataForNode(node);
         plot.setData(currentData);                 // also clears any backgate highlight
         // Subsample children are tree populations, not drawn shapes (no geometry) — don't add them as gates.
-        for (PopNode ch : node.children) if (!"subsample".equals(ch.gate.type)) plot.addGate(ch.gate);
+        for (PopNode ch : node.children) if (!CytoPlot.isIndexGate(ch.gate)) plot.addGate(ch.gate);
         applyAxes();
         // keep the tree selection in sync without re-entering the listener loop
         TreeItem<PopNode> item = findItem(gateTree.getRoot(), node);
@@ -852,58 +852,64 @@ public class GraphWindowController {
     private String statLineFor(PopNode node) {
         CytoPlot.Gate g = node.gate;
         if (g == null) return "";
-        EventData nd = null;     // node events, built lazily for MFI/geomean/CV
+        EventData nd = null;     // node events, materialised lazily and only for value-reading stats
         List<String> parts = new ArrayList<>();
         for (String key : g.statKeys) {
-            if (key.equals("parent")) {
-                parts.add(String.format("%.1f%% of parent", Double.isNaN(node.parentPct) ? 0 : node.parentPct));
-            } else if (key.equals("total")) {
-                double pct = rootData.rows() == 0 ? 0 : 100.0 * node.count / rootData.rows();
-                parts.add(String.format("%.1f%% of total", pct));
-            } else if (key.equals("count")) {
-                parts.add(String.format("%,d events", node.count));
-            } else if (key.startsWith("mfi:") || key.startsWith("geomean:") || key.startsWith("cv:")) {
-                String chan = key.substring(key.indexOf(':') + 1);
-                if (nd == null) nd = dataForNode(node);
-                double[] v = channelValues(nd, chan);
-                String cl = ctx.aliases().label(chan);
-                if (key.startsWith("mfi:")) parts.add(cl + " MFI " + fmtStat(median(v)));
-                else if (key.startsWith("geomean:")) parts.add(cl + " gMean " + fmtStat(geomean(v)));
-                else parts.add(cl + " CV " + String.format("%.1f%%", cv(v)));
+            StatKeys.Parsed p = StatKeys.parse(key);
+            switch (p.stat()) {
+                case StatKeys.PARENT ->
+                        parts.add(String.format("%.1f%% of parent", Double.isNaN(node.parentPct) ? 0 : node.parentPct));
+                case StatKeys.GRANDPARENT -> {
+                    PopNode gp = node.parent == null ? null : node.parent.parent;
+                    int denom = gp == null ? rootData.rows() : gp.count;
+                    parts.add(String.format("%.1f%% of grandparent", denom == 0 ? 0 : 100.0 * node.count / denom));
+                }
+                case StatKeys.TOTAL ->
+                        parts.add(String.format("%.1f%% of total",
+                                rootData.rows() == 0 ? 0 : 100.0 * node.count / rootData.rows()));
+                case StatKeys.COUNT -> parts.add(String.format("%,d events", node.count));
+                case StatKeys.FREQ -> {
+                    PopNode ref = nodeByName(p.popRef());
+                    int denom = ref == null ? rootData.rows() : ref.count;
+                    parts.add(String.format("%.1f%% of %s", denom == 0 ? 0 : 100.0 * node.count / denom,
+                            ref == null ? "total" : ref.name()));
+                }
+                default -> {
+                    if (!StatKeys.needsData(p.stat())) break;
+                    if (nd == null) nd = dataForNode(node);
+                    String cl = ctx.aliases().label(p.chanA());
+                    if (StatKeys.CORRELATION.equals(p.stat())) {
+                        parts.add(String.format("r(%s,%s) %.3f", cl, ctx.aliases().label(p.chanB()),
+                                StatKeys.compute(p, nd)));
+                    } else if (StatKeys.PCT.equals(p.stat())) {
+                        parts.add(cl + " P" + StatKeys.trimPct(p.percentile()) + " " + StatKeys.fmt(StatKeys.compute(p, nd)));
+                    } else if (StatKeys.isPercentLike(p.stat())) {
+                        parts.add(cl + " " + StatKeys.shortLabel(p.stat())
+                                + String.format(" %.1f%%", StatKeys.compute(p, nd)));
+                    } else if (StatKeys.GEOMEAN.equals(p.stat())) {
+                        // exp(mean(ln x)) is undefined for the negatives that compensation produces, so
+                        // those events are excluded. Say how many rather than quietly report a gMean
+                        // computed from a subset as if it came from the whole population.
+                        Stats.GeoMean gm = Stats.geoMean(Stats.values(nd, p.chanA()));
+                        parts.add(cl + " gMean " + StatKeys.fmt(gm.value())
+                                + (gm.hasExcluded() ? String.format(" (%,d excl.)", gm.excluded()) : ""));
+                    } else {
+                        parts.add(cl + " " + StatKeys.shortLabel(p.stat()) + " " + StatKeys.fmt(StatKeys.compute(p, nd)));
+                    }
+                }
             }
         }
         return String.join("  |  ", parts);
     }
 
-    private static double[] channelValues(EventData d, String chan) {
-        int c = d.indexOf(chan);
-        if (c < 0) return new double[0];
-        double[] v = new double[d.rows()];
-        for (int r = 0; r < v.length; r++) v[r] = d.get(r, c);
-        return v;
-    }
-    private static double median(double[] v) {
-        if (v.length == 0) return 0;
-        double[] s = v.clone(); java.util.Arrays.sort(s); int n = s.length;
-        return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
-    }
-    private static double geomean(double[] v) {
-        double sum = 0; int n = 0;
-        for (double x : v) if (x > 0) { sum += Math.log(x); n++; }
-        return n == 0 ? 0 : Math.exp(sum / n);
-    }
-    private static double cv(double[] v) {
-        if (v.length == 0) return 0;
-        double m = 0; for (double x : v) m += x; m /= v.length;
-        double s = 0; for (double x : v) s += (x - m) * (x - m); s = Math.sqrt(s / v.length);
-        return m == 0 ? 0 : 100 * s / m;
-    }
-    private static String fmtStat(double v) {
-        double a = Math.abs(v);
-        return (a >= 1e5 || (a > 0 && a < 0.01)) ? String.format("%.2e", v) : String.format("%,.0f", v);
+    /** First population with this name anywhere in the current sample's tree. */
+    private PopNode nodeByName(String name) {
+        if (name == null || rootNode == null) return null;
+        for (PopNode n : rootNode.selfAndDescendants())
+            if (!n.isRoot() && name.equals(n.name())) return n;
+        return null;
     }
 
-    /** Right-click → "Change Statistics Displayed": pick which stats appear on the label. */
     /** Right-click a gate → "Apply gate → all samples": clone this population's subtree onto every other
      *  sample's tree, so a gate drawn/adjusted here propagates everywhere. Clears the "edited" flag. */
     private void applyGateToAllSamples(CytoPlot.Gate g) {
@@ -923,52 +929,36 @@ public class GraphWindowController {
         statusLabel.setText("Applied gate '" + n.name() + "' to " + others.size() + " other sample(s).");
     }
 
+    /** Right-click a gate → "Add Statistic…": FlowJo's Statistic × Population × Parameter window. */
     private void configureStats(CytoPlot.Gate g) {
-        javafx.scene.control.CheckBox parent = new javafx.scene.control.CheckBox("% of parent");
-        javafx.scene.control.CheckBox total = new javafx.scene.control.CheckBox("% of total");
-        javafx.scene.control.CheckBox count = new javafx.scene.control.CheckBox("Event count");
-        javafx.scene.control.CheckBox mfi = new javafx.scene.control.CheckBox("Median (MFI)");
-        javafx.scene.control.CheckBox gmean = new javafx.scene.control.CheckBox("Geometric mean");
-        javafx.scene.control.CheckBox cvBox = new javafx.scene.control.CheckBox("CV");
-        ComboBox<String> chan = new ComboBox<>(FXCollections.observableArrayList(rootData.channels()));
-        chan.getSelectionModel().select(g.xChan);
-        for (String k : g.statKeys) {
-            if (k.equals("parent")) parent.setSelected(true);
-            else if (k.equals("total")) total.setSelected(true);
-            else if (k.equals("count")) count.setSelected(true);
-            else if (k.startsWith("mfi:")) { mfi.setSelected(true); chan.getSelectionModel().select(k.substring(4)); }
-            else if (k.startsWith("geomean:")) gmean.setSelected(true);
-            else if (k.startsWith("cv:")) cvBox.setSelected(true);
+        if (rootNode == null || rootData == null) return;
+
+        List<String> pops = new ArrayList<>();
+        java.util.Map<String, List<String>> current = new java.util.LinkedHashMap<>();
+        for (PopNode n : rootNode.selfAndDescendants()) {
+            if (n.isRoot() || n.gate == null) continue;
+            pops.add(n.name());
+            current.put(n.name(), new ArrayList<>(n.gate.statKeys));
         }
-        GridPane gp = new GridPane(); gp.setHgap(8); gp.setVgap(6);
-        gp.add(parent, 0, 0); gp.add(total, 0, 1); gp.add(count, 0, 2);
-        gp.add(mfi, 0, 3); gp.add(gmean, 0, 4); gp.add(cvBox, 0, 5);
-        gp.add(new Label("Channel:"), 0, 6); gp.add(chan, 1, 6);
+        if (pops.isEmpty()) return;
 
-        Dialog<ButtonType> dlg = new Dialog<>();
-        dlg.setTitle("Statistics — " + g.name); dlg.setHeaderText(null);
-        dlg.getDialogPane().setContent(gp);
-        dlg.getDialogPane().getButtonTypes().addAll(ButtonType.APPLY, ButtonType.CLOSE);
-        dlg.setResultConverter(b -> b);
-        AppIcons.theme(dlg, currentStage());
-        java.util.Optional<ButtonType> res = dlg.showAndWait();
-        if (res.isEmpty() || res.get() != ButtonType.APPLY) return;   // Close/✕ = cancel, don't change
+        boolean defaultOn = ctx.workspace().defaultStatConfig() != null;
+        java.util.Optional<AddStatisticDialog.Result> res = AddStatisticDialog.show(
+                currentStage(), pops, g.name, rootData.channels(), ctx.aliases(), current, defaultOn);
+        if (res.isEmpty()) return;   // Cancel/✕ changes nothing
 
-        List<String> keys = new ArrayList<>();
-        if (parent.isSelected()) keys.add("parent");
-        if (total.isSelected()) keys.add("total");
-        if (count.isSelected()) keys.add("count");
-        String ch = chan.getValue() == null ? g.xChan : chan.getValue();
-        if (mfi.isSelected()) keys.add("mfi:" + ch);
-        if (gmean.isSelected()) keys.add("geomean:" + ch);
-        if (cvBox.isSelected()) keys.add("cv:" + ch);
-        // Allow ZERO stats (label shows just the gate name). Do NOT force "parent" back — that made
-        // "% of parent" impossible to remove and re-checked itself on reopen. See ui-bug-log BUG-12.
-        g.statKeys.clear(); g.statKeys.addAll(keys);
-        ctx.workspace().setPopStatConfig(g.name, keys);      // this gate's own override
-        ctx.workspace().setDefaultStatConfig(keys);          // BUG-18: also the new universal default for all gates
-        PopNode n = nodeForGate(g);
-        if (n != null) g.statLine = statLineFor(n);
+        // Statistics are stored against the population NAME, so they already follow that population onto
+        // every sample. Allow ZERO stats (label = gate name only); never force "parent" back on, which
+        // made "% of parent" impossible to remove. See ui-bug-log BUG-12.
+        for (java.util.Map.Entry<String, List<String>> e : res.get().byPopulation().entrySet())
+            ctx.workspace().setPopStatConfig(e.getKey(), e.getValue());
+
+        // BUG-18 kept: the focused gate's set is the universal fallback, but now only when asked for.
+        if (res.get().setAsDefault())
+            ctx.workspace().setDefaultStatConfig(res.get().byPopulation().get(g.name));
+
+        recomputeCounts();    // re-reads popStatConfig into every gate and rebuilds each statLine
+        refreshTreeLabels();
         plot.selectGate(g);   // repaint label
         notifyTree();         // sync the label change to the export figure + other windows
     }
@@ -1214,8 +1204,9 @@ public class GraphWindowController {
 
     private static String defaultScale(String channel) {
         if (channel == null) return "Linear";
-        // FlowJo v10: scatter/Time/Width linear; fluorescence defaults to Logicle (biexponential).
-        return channel.matches("(?i).*(FSC|SSC|Time|Width).*") ? "Linear" : "Logicle";
+        // FlowJo v10: scatter/Time/Width linear; fluorescence defaults to Biex (biexponential), which is
+        // what FlowJo does — imported .wsp data then plots the same way it did in FlowJo, in-bounds.
+        return channel.matches("(?i).*(FSC|SSC|Time|Width).*") ? "Linear" : "Biex";
     }
 
     /** UNIVERSAL scale for a marker: the workspace-wide choice for this channel if the user has set
@@ -1230,6 +1221,7 @@ public class GraphWindowController {
     private static CytoPlot.Scale scaleOf(String s) {
         if ("Log".equals(s)) return CytoPlot.Scale.LOG;
         if ("Logicle".equals(s)) return CytoPlot.Scale.LOGICLE;
+        if ("Biex".equals(s)) return CytoPlot.Scale.BIEX;
         if ("ArcSinh".equals(s)) return CytoPlot.Scale.ARCSINH;
         return CytoPlot.Scale.LINEAR;
     }
@@ -1304,7 +1296,7 @@ public class GraphWindowController {
         });
 
         // transform selector (Linear / Log / Logicle / ArcSinh) — switches the axis scale
-        ComboBox<String> tf = new ComboBox<>(FXCollections.observableArrayList("Linear", "Log", "Logicle", "ArcSinh"));
+        ComboBox<String> tf = new ComboBox<>(FXCollections.observableArrayList("Linear", "Log", "Logicle", "Biex", "ArcSinh"));
         tf.getSelectionModel().select(scaleName(scale));
         tf.setOnAction(ev -> {
             (xAxis ? xScaleCombo : yScaleCombo).getSelectionModel().select(tf.getValue()); // -> applyAxes
@@ -1544,7 +1536,7 @@ public class GraphWindowController {
     }
 
     private static String scaleName(CytoPlot.Scale s) {
-        return switch (s) { case LOG -> "Log"; case LOGICLE -> "Logicle"; case ARCSINH -> "ArcSinh"; default -> "Linear"; };
+        return switch (s) { case LOG -> "Log"; case LOGICLE -> "Logicle"; case BIEX -> "Biex"; case ARCSINH -> "ArcSinh"; default -> "Linear"; };
     }
 
     // ---- gating -------------------------------------------------------------

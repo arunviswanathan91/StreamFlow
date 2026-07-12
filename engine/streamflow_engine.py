@@ -218,6 +218,84 @@ def _get_events(i, a):
     return {"file": path, "channels": chans, "rows": int(sub.shape[0]),
             "cols": len(chans), "total": int(n), "ranges": ranges}
 
+@command("sample_path")
+def _sample_path(i, a):
+    """Absolute FCS path for a sample. R plugins read the FCS themselves (via flowCore), so the app
+    needs the path; only the engine knows it (STATE["files"])."""
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    name = (a or {}).get("sample")
+    metas = STATE["meta"]
+    names = [m["name"] for m in metas]
+    idx = names.index(name) if name in names else 0
+    return {"sample": metas[idx]["name"],
+            "path": os.path.abspath(metas[idx]["file"]).replace("\\", "/")}
+
+@command("bead_calibration")
+def _bead_calibration(i, a):
+    """Bead-based MEF calibration (FlowCal). Fits a standard curve from a calibration-bead sample
+    whose subpopulations have known MEF values (from the bead lot datasheet), then reports the
+    arbitrary-units -> MEF transform for each requested channel.
+
+    Args: {sample, channels: [ch...], mef_values: {ch: [v1, v2, ...]}, beads_sample?}
+      * `mef_values` per channel must list the known MEF of each bead subpopulation, in increasing
+        order; entries may be null for subpopulations to ignore (FlowCal's convention).
+    Returns: {channels: [{channel, ok, n_populations, curve: {x: [...], y: [...]}, error?}]}
+
+    Uses FlowCal's established implementation (FlowCal.mef.get_transform_fxn) — clustering of the
+    bead subpopulations + standard-curve fit — rather than any hand-rolled calibration maths."""
+    import numpy as np
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    a = a or {}
+    try:
+        import FlowCal
+    except ImportError:
+        raise ValueError("FlowCal is not installed. Run: engine\\stage-python.ps1")
+
+    bead_name = a.get("beads_sample") or a.get("sample")
+    # FlowCal reads the FCS itself (FCSData takes a path/buffer — NOT an ndarray), so resolve the
+    # bead sample's file path from the loaded metadata and let FlowCal own the parse.
+    metas = STATE["meta"]
+    names = [m["name"] for m in metas]
+    idx = names.index(bead_name) if bead_name in names else 0
+    beads = FlowCal.io.FCSData(metas[idx]["file"])
+    available = list(beads.channels)
+
+    chans = [c for c in (a.get("channels") or []) if c in available]
+    if not chans:
+        raise ValueError("No valid channels requested for bead calibration.")
+    mef_map = a.get("mef_values") or {}
+
+    out = []
+    for ch in chans:
+        vals = mef_map.get(ch)
+        if not vals:
+            out.append({"channel": ch, "ok": False, "error": "no MEF values supplied"})
+            continue
+        mef_vals = [None if v is None else float(v) for v in vals]
+        n_pop = sum(1 for v in mef_vals if v is not None)
+        # FlowCal's standard-curve model (fit_beads_autofluorescence) needs >= 3 bead populations.
+        if n_pop < 3:
+            out.append({"channel": ch, "ok": False, "n_populations": n_pop,
+                        "error": "standard curve needs at least 3 MEF values (got %d)" % n_pop})
+            continue
+        try:
+            xf = FlowCal.mef.get_transform_fxn(
+                beads, mef_values=[mef_vals], mef_channels=[ch], clustering_channels=[ch],
+                verbose=False, plot=False)
+            # Sample the fitted transform across the observed range to give the UI a standard curve.
+            col = np.asarray(beads[:, ch], dtype=float)
+            lo, hi = float(np.percentile(col, 1)), float(np.percentile(col, 99))
+            xs = np.linspace(lo, hi, 50)
+            ys = np.asarray(xf(xs.reshape(-1, 1), channels=[0])).reshape(-1)
+            out.append({"channel": ch, "ok": True, "n_populations": n_pop,
+                        "curve": {"x": xs.tolist(), "y": [float(v) for v in ys]}})
+        except Exception as ex:  # a bad bead file / wrong MEF count shouldn't kill the whole report
+            out.append({"channel": ch, "ok": False, "error": "%s: %s" % (type(ex).__name__, ex)})
+
+    return {"beads_sample": bead_name, "channels": out}
+
 @command("subsample")
 def _subsample(i, a):
     """Uniform random-without-replacement subsample of a sample's events (standard flow-cytometry
@@ -389,53 +467,416 @@ def _compute_stats(i, a):
 
 
 # ---- dim reduction: UMAP / t-SNE (umap-learn / openTSNE) ------------------
+
+DEFAULT_EXCLUDE_RE = r"FSC|SSC|Time|Width|Event"
+
+@command("dimredux_channels")
+def _dimredux_channels(i, a):
+    """Channels available for dim-reduction, with the ones we PROPOSE excluding flagged.
+
+    Nothing is forced: the UI shows `suggest_exclude` pre-ticked and the user can override. Feeding
+    scatter/Time into t-SNE is meaningless, and a Live/Dead marker makes the embedding waste its
+    resolution separating live from dead cells — but that is the user's call, not ours."""
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    a = a or {}
+    s = _sample_by_name(a.get("sample"))
+    pnn = list(s.pnn_labels)
+    suggest = [c for c in pnn if re.search(DEFAULT_EXCLUDE_RE, c, re.I)]
+    return {"channels": pnn, "suggest_exclude": suggest}
+
+
 @command("run_dimredux")
 def _run_dimredux(i, a):
+    """Pooled UMAP / t-SNE across samples.
+
+    Every sample is downsampled to the SAME `n_per_sample` (seeded) and the events are pooled into ONE
+    embedding. This is deliberate: t-SNE/UMAP are stochastic and each run has its own coordinate
+    system, so per-file embeddings are NOT comparable — the same cell type lands somewhere different
+    in every file. Pooling with equal N (the FlowSOM/CATALYST convention) also stops a large sample
+    from dominating the map. Split/colour by sample afterwards to compare.
+
+    Args:
+      samples: [name]          pooled samples (falls back to `sample`, then the first loaded)
+      n_per_sample: int        equal-N downsample per sample (seeded)
+      seed: int                reproducibility
+      method: "umap"|"tsne"
+      features: [channel]      explicit feature set (default: all minus DEFAULT_EXCLUDE_RE)
+      exclude: [channel]       removed from `features` (e.g. Live/Dead)
+      indices: {sample:[row]}  targeted mode — embed only these rows (a gated population)
+      cleanup: {debris:bool, fsc, ssc, gate}      reuses _scatter_cleanup_mask
+      positivity: [{channel, threshold, drop:"positive"|"negative"}]
+      transform: {type:"arcsinh"|"none", cofactor}
+
+    Returns a float32 blob (like get_events) with columns
+    [<method> 1, <method> 2, *features, SampleIdx, RowIndex] so Java builds an EventData directly and
+    can colour by any marker and map a gate drawn on the embedding back to real events — no JSON of
+    100k x 13 floats, and no second round-trip."""
     import numpy as np
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     if not STATE["meta"]:
         raise ValueError("Load data first.")
     a = a or {}
     method = str(a.get("method", "umap")).lower()
-    n_events = int(a.get("n_events", 5000))
-    s = _sample_by_name(a.get("sample"))
-    pnn = list(s.pnn_labels)
-    fluor = [c for c in pnn if not bool(__import__("re").search(r"FSC|SSC|Time|Width|Event", c, __import__("re").I))]
-    if not fluor:
-        raise ValueError("No fluorescence channels found for dim-reduction.")
+    seed = int(a.get("seed", 42))
+    n_per_sample = int(a.get("n_per_sample", a.get("n_events", 5000)))
 
-    ev = np.asarray(s.get_events(source="raw"))
-    n_total = ev.shape[0]
-    idx = np.random.choice(n_total, min(n_events, n_total), replace=False)
-    cols = [pnn.index(c) for c in fluor]
-    X = ev[np.ix_(idx, cols)].astype("float32")
-    # arcsinh cofactor 150 as a sensible default transform for flow data
-    X = np.arcsinh(X / 150.0)
+    samples = a.get("samples")
+    if not samples:
+        one = a.get("sample")
+        samples = [one] if one else [STATE["meta"][0]["name"]]
 
-    send_progress(i, 0.2, "Running %s on %d events…" % (method.upper(), len(idx)))
+    indices_in = a.get("indices") or {}
+    cleanup = a.get("cleanup") or {}
+    positivity = a.get("positivity") or []
+    # An explicit transform wins; otherwise honour whatever the Transformation tab recorded.
+    xform = a.get("transform") or _default_transform()
+    xtype = str(xform.get("type", "arcsinh")).lower()
+    cofactor = float(xform.get("cofactor") or 150.0)
+
+    # ---- feature selection: user-controlled; the regex is only a fallback proposal
+    pnn0 = list(_sample_by_name(samples[0]).pnn_labels)
+    features = a.get("features") or [c for c in pnn0 if not re.search(DEFAULT_EXCLUDE_RE, c, re.I)]
+    excluded = set(a.get("exclude") or [])
+    features = [c for c in features if c not in excluded]
+    if not features:
+        raise ValueError("No feature channels selected for dim-reduction.")
+
+    rng = np.random.RandomState(seed)
+    blocks, sample_idx, row_idx = [], [], []
+
+    for si, name in enumerate(samples):
+        s = _sample_by_name(name)
+        pnn = list(s.pnn_labels)
+        missing = [c for c in features if c not in pnn]
+        if missing:
+            raise ValueError("Sample '%s' is missing channel(s): %s" % (name, ", ".join(missing)))
+        ev = np.asarray(s.get_events(source="raw"), dtype=float)
+        keep = np.ones(ev.shape[0], dtype=bool)
+
+        # targeted mode: restrict to a gated population's rows
+        if name in indices_in:
+            sel = np.zeros(ev.shape[0], dtype=bool)
+            want = np.asarray(indices_in[name], dtype=int)
+            want = want[(want >= 0) & (want < ev.shape[0])]
+            sel[want] = True
+            keep &= sel
+
+        if cleanup.get("debris"):
+            keep &= _scatter_cleanup_mask(ev, pnn, cleanup.get("fsc"), cleanup.get("ssc"),
+                                          cleanup.get("gate"))
+
+        if cleanup.get("qc"):
+            keep &= _flowrate_qc_mask(ev, pnn)
+
+        for p in positivity:
+            ch = p.get("channel")
+            thr = p.get("threshold")
+            if not ch or ch not in pnn or thr is None:
+                continue
+            v = ev[:, pnn.index(ch)]
+            if str(p.get("drop", "positive")).lower() == "positive":
+                keep &= ~(v >= float(thr))     # e.g. drop Live/Dead-positive (dead) cells
+            else:
+                keep &= ~(v < float(thr))
+
+        rows = np.flatnonzero(keep)
+        if rows.size == 0:
+            continue
+        take = min(n_per_sample, rows.size)
+        pick = np.sort(rows[rng.permutation(rows.size)[:take]])
+
+        cols = [pnn.index(c) for c in features]
+        blocks.append(ev[np.ix_(pick, cols)].astype("float32"))
+        sample_idx.extend([si] * take)
+        row_idx.extend(int(r) for r in pick)
+
+    if not blocks:
+        raise ValueError("No events remain after cleanup / positivity filters.")
+
+    X_raw = np.vstack(blocks)                       # raw feature values, kept for the blob
+    X, actual_xform = _apply_matrix_transform(X_raw, xtype, cofactor)
+
+    send_progress(i, 0.2, "Running %s on %d events from %d sample(s) (%s transform)…"
+                  % (method.upper(), X.shape[0], len(samples), actual_xform))
 
     if method == "tsne":
         try:
             from openTSNE import TSNE
-            emb = TSNE(perplexity=30, n_jobs=4, random_state=42).fit(X)
-            coords = np.array(emb)
+            coords = np.array(TSNE(perplexity=30, n_jobs=4, random_state=seed).fit(X))
         except ImportError:
             from sklearn.manifold import TSNE as skTSNE
-            coords = skTSNE(n_components=2, perplexity=30, random_state=42).fit_transform(X)
+            coords = skTSNE(n_components=2, perplexity=30, random_state=seed).fit_transform(X)
     else:
         try:
             import umap
-            coords = umap.UMAP(n_components=2, random_state=42).fit_transform(X)
+            coords = umap.UMAP(n_components=2, random_state=seed).fit_transform(X)
         except ImportError:
             raise ValueError("umap-learn is not installed. Run: pip install umap-learn")
 
-    send_progress(i, 0.85, "Done.")
-    coords_out = [[round(float(coords[r, 0]), 4), round(float(coords[r, 1]), 4)]
-                  for r in range(len(coords))]
-    return {"coords": coords_out, "method": method, "n": int(len(idx)), "n_features": len(fluor)}
+    send_progress(i, 0.85, "Packing results…")
+
+    lbl = "tSNE" if method == "tsne" else "UMAP"
+    # Export RAW feature values, not the transformed ones. Marker rules and positivity thresholds are
+    # defined in raw space (a single-stain Otsu split is a raw number), and colour-by-marker uses a
+    # robust percentile range that is unaffected by the choice. Exporting transformed values here meant
+    # rules compared transformed data against raw thresholds and produced degenerate populations.
+    out = np.column_stack([
+        np.asarray(coords, dtype="float32"),
+        X_raw,
+        np.asarray(sample_idx, dtype="float32"),
+        np.asarray(row_idx, dtype="float32"),
+    ]).astype("<f4")
+
+    path = os.path.join(CONTROL_DIR, "sfdr_%s_%d.bin" % (i, int(time.time() * 1000)))
+    out.tofile(path)
+    channels = ["%s 1" % lbl, "%s 2" % lbl] + list(features) + ["SampleIdx", "RowIndex"]
+
+    # Keep the TRANSFORMED matrix for cluster_embedding (clustering should run on transformed data),
+    # and the raw one so a phenotype can be read off each cluster against raw thresholds.
+    STATE["dimredux"] = {"X": X, "X_raw": X_raw, "features": list(features), "seed": seed}
+
+    return {"file": path, "channels": channels,
+            "rows": int(out.shape[0]), "cols": int(out.shape[1]),
+            "samples": list(samples), "features": list(features),
+            "method": method, "n_features": len(features), "seed": seed,
+            "transform": actual_xform, "cofactor": cofactor}
+
+
+@command("cluster_embedding")
+def _cluster_embedding(i, a):
+    """Cluster the LAST embedding's events on their MARKER values, not on the 2-D coordinates.
+
+    t-SNE/UMAP distances are non-metric, so a k-means blob drawn on the map is an artefact of the
+    layout rather than of biology. Clustering the markers means a cluster may legitimately appear in
+    two separate islands — that is information, not a bug.
+
+    Returns one label per embedding row, in the embedding's row order. `actual` names the algorithm
+    that really ran, so a legend can never claim FlowSOM when k-means was substituted."""
+    import numpy as np
+
+    cache = STATE.get("dimredux")
+    if not cache:
+        raise ValueError("Run a dimensionality reduction first.")
+    a = a or {}
+    k = max(2, int(a.get("k", 8)))
+    method = str(a.get("method", "flowsom")).lower()
+    seed = int(a.get("seed", cache.get("seed", 42)))
+    scale = str(a.get("scale", "zscore")).lower()
+    X = cache["X"]
+
+    # Per-marker scaling BEFORE clustering. Without it, bright wide-range channels dominate the SOM /
+    # kNN distances and clusters look wrong even with correct markers. Applied only to the clustering
+    # input; the display embedding coordinates are untouched.
+    Xc = X
+    if scale == "zscore":
+        mu = X.mean(axis=0); sd = X.std(axis=0); sd[sd == 0] = 1.0
+        Xc = (X - mu) / sd
+    elif scale == "minmax":
+        lo = X.min(axis=0); hi = X.max(axis=0); rng = hi - lo; rng[rng == 0] = 1.0
+        Xc = (X - lo) / rng
+
+    send_progress(i, 0.2, "Clustering %d events with %s (scale=%s)…" % (Xc.shape[0], method, scale))
+
+    def _kmeans():
+        from sklearn.cluster import MiniBatchKMeans
+        return np.asarray(MiniBatchKMeans(n_clusters=k, random_state=seed, n_init=3).fit_predict(Xc)), None
+
+    def _flowsom():
+        import anndata as ad
+        import flowsom as fs
+        fsom = fs.FlowSOM(ad.AnnData(Xc), n_clusters=k,
+                          cols_to_use=list(range(Xc.shape[1])), seed=seed)
+        raw = list(np.asarray(fsom.metacluster_labels).tolist())
+        remap = {v: j for j, v in enumerate(sorted(set(raw)))}
+        return np.array([remap[v] for v in raw], dtype=int), None
+
+    def _phenograph():
+        import phenograph
+        lab, _g, _Q = phenograph.cluster(Xc, seed=seed)
+        lab = np.asarray(lab, dtype=int)
+        if (lab < 0).any():                        # -1 = unclustered singletons -> own bucket
+            lab[lab < 0] = lab.max() + 1
+        return lab, None
+
+    def _bayesian():
+        from sklearn.mixture import BayesianGaussianMixture
+        bg = BayesianGaussianMixture(
+            n_components=min(2 * k, max(2, Xc.shape[0] // 20)),
+            weight_concentration_prior_type="dirichlet_process",
+            random_state=seed, max_iter=200, reg_covar=1e-4).fit(Xc)
+        raw = bg.predict(Xc)
+        remap = {v: j for j, v in enumerate(sorted(set(int(x) for x in raw)))}  # DP prunes components
+        return np.array([remap[int(v)] for v in raw], dtype=int), bg.predict_proba(Xc).max(axis=1)
+
+    def _flowgrid():
+        # Load _FlowGrid.py directly (numpy + sklearn only) rather than importing the FlowGrid package,
+        # whose __init__ pulls _functions.py (natsort/pandas) which we don't ship.
+        import os as _os, importlib.util as _ilu
+        mod_path = _os.path.join(_os.path.dirname(__file__), "vendor", "FlowGrid-master",
+                                 "FlowGrid-master", "FlowGrid", "_FlowGrid.py")
+        spec = _ilu.spec_from_file_location("sf_flowgrid", mod_path)
+        m = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        # FlowGrid is a GRID method: it needs a low-D projection or the grid is hopelessly sparse in
+        # high-D (14^d empty bins). The tool's own helper clusters on the first 5 PCA components — do
+        # the same, so we still cluster on marker variance, just compactly.
+        from sklearn.decomposition import PCA
+        ncomp = min(5, Xc.shape[1])
+        proj = PCA(n_components=ncomp, random_state=seed).fit_transform(Xc).astype(float)
+        # bin_n=20 (finer than the tool's 14) segments PCA-5 flow data sensibly; the coarse default
+        # merged everything into one cluster. eps/bin_n stay tunable from the UI.
+        fg = m.FlowGrid(proj, bin_n=int(a.get("bin_n", 20)),
+                        eps=float(a.get("eps", 0.5)), MinDenB=3, MinDenC=40)
+        lab = np.asarray(fg.clustering(), dtype=int)
+        if (lab < 0).any():
+            lab[lab < 0] = lab.max() + 1
+        return lab, None
+
+    # Each backend, with an honest fallback to FlowSOM→k-means so a missing library never crashes a run
+    # and `actual` always names what really produced the labels.
+    backends = {"flowsom": _flowsom, "kmeans": _kmeans, "phenograph": _phenograph,
+                "bayesian": _bayesian, "flowgrid": _flowgrid}
+    probs = None
+    actual = method if method in backends else "flowsom"
+    try:
+        labels, probs = backends.get(actual, _flowsom)()
+    except Exception as exc:
+        send_progress(i, 0.5, "%s unavailable (%s) — using FlowSOM." % (actual, type(exc).__name__))
+        try:
+            labels, probs = _flowsom(); actual = "flowsom"
+        except Exception:
+            labels, probs = _kmeans(); actual = "kmeans"
+
+    labels = np.asarray(labels, dtype=int)
+    n_clusters = int(labels.max() + 1) if labels.size else 0
+    features = cache["features"]
+    # Medians in RAW space, so a phenotype can be read off each cluster against the raw thresholds the
+    # user set (a cluster is CD4+ when its raw median CD4 exceeds the raw CD4 threshold).
+    Xr = cache.get("X_raw", X)
+    clusters = []
+    for c in range(n_clusters):
+        m = labels == c
+        clusters.append({
+            "cluster": int(c),
+            "count": int(m.sum()),
+            "percent": round(float(100.0 * m.sum() / max(1, labels.size)), 3),
+            "medians": ([round(float(v), 4) for v in np.median(Xr[m], axis=0)]
+                        if m.sum() else [0.0] * len(features)),
+        })
+
+    out = {"labels": [int(v) for v in labels], "n_clusters": n_clusters,
+           "actual": actual, "requested": method, "k": k, "seed": seed, "scale": scale,
+           "features": features, "clusters": clusters}
+    if probs is not None:                # per-event assignment confidence (Bayesian DP-GMM)
+        out["confidence"] = [round(float(p), 4) for p in probs]
+    return out
+
+
+def _default_transform():
+    """The transform the Transformation tab recorded, or arcsinh(150) if it was never used.
+
+    Before this existed, `apply_transformation` wrote STATE["transforms"] and NOTHING read it, while
+    run_dimredux and run_clustering silently hard-coded arcsinh(x/150) — so choosing logicle in the UI
+    changed nothing. Analyses now start from whatever the user actually chose."""
+    tr = STATE.get("transforms") or {}
+    methods = [v.get("method") for v in tr.values() if v.get("method")]
+    if not methods:
+        return {"type": "arcsinh", "cofactor": 150.0}
+    method = max(set(methods), key=methods.count)      # channels share a method in practice
+    cof = next((v.get("cofactor") for v in tr.values()
+                if v.get("method") == method and v.get("cofactor")), 150.0)
+    return {"type": method, "cofactor": float(cof or 150.0)}
+
+
+def _apply_matrix_transform(X, xtype, cofactor):
+    """Transform a (events x channels) matrix. Returns (X, actual_method).
+
+    `actual` is reported because logicle/log go through FlowKit; if that import fails we fall back to
+    arcsinh, and a run that claims 'logicle' while having computed arcsinh would be unreproducible."""
+    import numpy as np
+    xtype = str(xtype or "arcsinh").lower()
+    if xtype in ("none", "linear"):
+        return X, "none"
+    if xtype == "arcsinh":
+        return np.arcsinh(X / max(1e-9, cofactor)), "arcsinh"
+    if xtype not in ("logicle", "log"):
+        raise ValueError("Unknown transform '%s'. Use logicle, arcsinh, log or none." % xtype)
+    try:
+        import flowkit as fk
+        xf = (fk.transforms.LogTransform(param_t=262144, param_m=4.5) if xtype == "log"
+              else fk.transforms.LogicleTransform(param_t=262144, param_w=0.5, param_m=4.5, param_a=0))
+        return np.asarray(xf.apply(np.asarray(X, dtype=float)), dtype="float32"), xtype
+    except ImportError:
+        return np.arcsinh(X / max(1e-9, cofactor)), "arcsinh"
+
+
+#: Established threshold algorithms, all from scikit-image except our own Otsu (kept as the fallback
+#: so the engine still works if skimage is missing). They differ in what they assume:
+#:   otsu     - two classes of equal-ish spread; the default, and what FlowJo-adjacent tools use.
+#:   yen      - maximises entropic correlation; better when the positive peak is SMALL.
+#:   triangle - geometric; best for a single dominant negative peak with a long positive tail.
+#:   li       - minimum cross-entropy; robust when the two peaks overlap heavily.
+#:   isodata  - iterative intermeans (Ridler-Calvard); close to Otsu, less peak-shape sensitive.
+THRESHOLD_METHODS = ("otsu", "yen", "triangle", "li", "isodata")
+
+
+def _threshold_value(t, method):
+    """Threshold `t` (already in transformed space) by `method`. Returns (value, actual_method)."""
+    method = str(method or "otsu").lower()
+    if method not in THRESHOLD_METHODS:
+        raise ValueError("Unknown threshold method '%s'. Use one of: %s"
+                         % (method, ", ".join(THRESHOLD_METHODS)))
+    try:
+        import skimage.filters as skf
+        fn = {"otsu": skf.threshold_otsu, "yen": skf.threshold_yen,
+              "triangle": skf.threshold_triangle, "li": skf.threshold_li,
+              "isodata": skf.threshold_isodata}[method]
+        return float(fn(t)), method
+    except ImportError:
+        # Only Otsu has a local implementation. Never silently return an Otsu split under another
+        # method's name — the choice of algorithm changes the number, and the report must say which ran.
+        return float(_otsu_threshold(t)), "otsu"
+
+
+@command("positivity_thresholds")
+def _positivity_thresholds(i, a):
+    """Per-channel positive/negative split in arcsinh space, used to drop e.g. Live/Dead+ cells.
+
+    Thresholds are DEFAULTS: the UI shows them and the user can edit or disable each one before they
+    are applied. `sources` lets a channel be thresholded off a specific control (unstained /
+    single-stain / FMO); otherwise the given `sample` is thresholded against itself. `method` picks
+    the algorithm; the response reports the one that actually ran."""
+    import numpy as np
+    if not STATE["meta"]:
+        raise ValueError("Load data first.")
+    a = a or {}
+    cofactor = float(a.get("cofactor", 150.0))
+    channels = a.get("channels") or []
+    default_src = a.get("sample") or STATE["meta"][0]["name"]
+    sources = a.get("sources") or {}
+    method = str(a.get("method", "otsu")).lower()
+
+    out = []
+    for ch in channels:
+        src = sources.get(ch, default_src)
+        try:
+            s = _sample_by_name(src)
+            pnn = list(s.pnn_labels)
+            if ch not in pnn:
+                out.append({"channel": ch, "ok": False, "error": "not present in %s" % src})
+                continue
+            v = np.asarray(s.get_events(source="raw"), dtype=float)[:, pnn.index(ch)]
+            t = np.arcsinh(v / max(1e-9, cofactor))
+            thr_t, actual = _threshold_value(t, method)
+            thr = float(np.sinh(thr_t) * cofactor)
+            out.append({"channel": ch, "ok": True,
+                        "threshold": thr, "threshold_t": thr_t,
+                        "method": actual, "requested": method, "source_sample": src,
+                        "pct_positive": round(float(100.0 * np.mean(v >= thr)), 2)})
+        except Exception as ex:
+            out.append({"channel": ch, "ok": False, "error": "%s: %s" % (type(ex).__name__, ex)})
+    return {"cofactor": cofactor, "channels": out, "methods": list(THRESHOLD_METHODS)}
 
 
 # ---- clustering: FlowSOM / PhenoGraph -------------------------------------
@@ -463,7 +904,9 @@ def _run_clustering(i, a):
     idx = np.random.choice(n_total, min(n_events, n_total), replace=False)
     cols = [pnn.index(c) for c in fluor]
     X = ev[np.ix_(idx, cols)].astype("float32")
-    X = np.arcsinh(X / 150.0)
+    # Honour the Transformation tab rather than silently assuming arcsinh(150).
+    xform = a.get("transform") or _default_transform()
+    X, _actual_xform = _apply_matrix_transform(X, xform.get("type"), float(xform.get("cofactor") or 150.0))
 
     send_progress(i, 0.2, "Clustering %d events with %s…" % (len(idx), method))
 
@@ -831,6 +1274,34 @@ def _otsu_threshold(vals, bins=256):
     return float(mids[int(np.argmax(between))])
 
 
+def _flowrate_qc_mask(ev, pnn):
+    """Flow-rate QC: drop events acquired during flow-rate anomalies (clogs, bubbles, restarts) — the
+    core of flowAI/flowClean. Bins events over the Time channel and removes whole bins whose event
+    density is a robust outlier (median ± 3·MAD). No Time channel -> keep everything (nothing to do).
+    Returns a boolean mask over rows."""
+    import numpy as np
+    tcol = next((j for j, c in enumerate(pnn) if str(c).lower() == "time"
+                 or "time" in str(c).lower()), None)
+    keep = np.ones(ev.shape[0], dtype=bool)
+    if tcol is None or ev.shape[0] < 200:
+        return keep
+    t = ev[:, tcol].astype(float)
+    tmin, tmax = t.min(), t.max()
+    if tmax <= tmin:
+        return keep
+    nbins = max(10, min(100, ev.shape[0] // 200))
+    edges = np.linspace(tmin, tmax, nbins + 1)
+    idx = np.clip(np.digitize(t, edges) - 1, 0, nbins - 1)
+    counts = np.bincount(idx, minlength=nbins).astype(float)
+    med = np.median(counts)
+    mad = np.median(np.abs(counts - med)) or 1.0
+    # A bin is anomalous if its rate is far from the median (both clogs = low, and spikes = high).
+    bad = np.abs(counts - med) > 3.0 * 1.4826 * mad
+    for b in np.flatnonzero(bad):
+        keep[idx == b] = False
+    return keep
+
+
 def _scatter_cleanup_mask(ev, pnn, fsc, ssc, gate=None):
     """FlowJo-style size cleanup: keep the central scatter population (debris/saturation removed).
     Uses an explicit FSC/SSC rectangle {x_min,x_max,y_min,y_max} when the user has drawn one in the
@@ -1054,8 +1525,14 @@ def _list_fluor_channels(i, a):
 @command("apply_transformation")
 def _apply_transformation(i, a):
     """Record the chosen transform for all (or selected) fluorescence channels.
-    JavaFX/CytoPlot applies transforms natively for rendering; this command keeps
-    the engine in sync so GatingML export and future source='xform' get_events work."""
+
+    What this actually drives today: `run_dimredux` and `run_clustering` read it via
+    _default_transform(), so choosing logicle really does change the embedding and the clusters.
+    It also feeds GatingML export.
+
+    What it does NOT drive: plot rendering (CytoPlot applies its own axis scale natively) and the
+    statistics table (computed in Java from raw values). `source='xform'` get_events is still NOT
+    wired — this command records the transform, it does not apply it to the cached samples."""
     import numpy as np
     if not STATE["meta"]:
         raise ValueError("Load data first.")
@@ -1130,11 +1607,17 @@ def _save_workspace(i, a):
                        for k, v in STATE.get("transforms", {}).items()},
         "gates": a.get("gates", {}) or {},
         "audit_log": a.get("audit_log", []) or [],   # session analysis log (owned by the Java side)
+        "groups": a.get("groups", {}) or {},         # {sample: group name}, owned by the Java side
+        # The embedding: coordinates + the args that produced it, so reopening a workspace restores the
+        # map without re-running t-SNE (minutes) and without the coordinates silently changing — a fresh
+        # run is a DIFFERENT stochastic layout even under the same seed if anything else moved.
+        "embedding": a.get("embedding") or None,
     }
     with open(file, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=2, default=str)
     n_gates = sum(len(v) for v in doc["gates"].values()) if isinstance(doc["gates"], dict) else 0
-    return {"file": file, "n_samples": len(doc["files"]), "n_gates": n_gates}
+    return {"file": file, "n_samples": len(doc["files"]), "n_gates": n_gates,
+            "has_embedding": doc["embedding"] is not None}
 
 @command("load_workspace")
 def _load_workspace(i, a):
@@ -1174,7 +1657,120 @@ def _load_workspace(i, a):
     out = _summary(skipped=missing)
     out["gates"] = doc.get("gates", {}) or {}
     out["audit_log"] = doc.get("audit_log", []) or []
+    out["groups"] = doc.get("groups", {}) or {}
+    out["embedding"] = doc.get("embedding") or None
     return out
+
+
+@command("import_flowjo_wsp")
+def _import_flowjo_wsp(i, a):
+    """Import a FlowJo .wsp workspace: load its FCS files and translate every gate into a StreamFLOW
+    index-defined population.
+
+    Why membership and not geometry: FlowJo stores gate vertices in COMPENSATED + TRANSFORMED space.
+    Our populations live in raw data space, and re-evaluating the polygons on raw events gives the
+    wrong counts (measured: 4100 vs FlowJo's 3983 for one gate — the gap is compensation). So we let
+    FlowKit's own gating engine decide membership, then store each gate as the 0-based row indices it
+    selected. The result matches FlowJo exactly and needs no coordinate conversion.
+
+    Returns the same shape as load_workspace's gate output, so the Java side rebuilds the tree with the
+    existing restoreGates path. `gates[sample]` is a flat list of {id, parent_id, name, type:'flowjo',
+    plugin_indices, x_channel, y_channel}."""
+    import numpy as np
+    a = a or {}
+    wsp = a.get("file")
+    if not wsp or not os.path.isfile(wsp):
+        raise ValueError("FlowJo workspace not found: %s" % wsp)
+    fcs_dir = a.get("fcs_dir") or os.path.dirname(wsp)
+
+    try:
+        import flowkit as fk
+    except ImportError:
+        raise ValueError("FlowKit is required to import FlowJo workspaces.")
+
+    send_progress(i, 0.05, "Reading %s…" % os.path.basename(wsp))
+    ws = fk.Workspace(wsp, fcs_samples=fcs_dir)
+    wsp_ids = ws.get_sample_ids()
+    if not wsp_ids:
+        raise ValueError("No samples with matching FCS files were found next to the workspace.")
+
+    # Only import samples whose FCS is actually present next to the workspace (a .wsp routinely
+    # references tubes that were not shipped). Skip the rest rather than fail the whole import.
+    present = [(sid, os.path.join(fcs_dir, sid)) for sid in wsp_ids
+               if os.path.isfile(os.path.join(fcs_dir, sid))]
+    skipped = len(wsp_ids) - len(present)
+    if not present:
+        raise ValueError("None of the workspace's FCS files were found in %s." % fcs_dir)
+
+    metas, sigs = [], set()
+    for _sid, f in present:
+        metas.append(_read_header(f))
+        sigs.add(tuple(metas[-1]["pnn"]))
+    if len(sigs) > 1:
+        raise ValueError("The workspace's FCS files span %d channel layouts; import a single panel."
+                         % len(sigs))
+    STATE["meta"] = metas
+    STATE["files"] = [f for _sid, f in present]
+    STATE["cache"] = {}
+    STATE["gating"] = None
+
+    name_by_sid = {sid: m["name"] for (sid, _f), m in zip(present, metas)}
+
+    gates_out = {}
+    total_gates = 0
+    for k, (sid, _fpath) in enumerate(present):
+        send_progress(i, 0.1 + 0.85 * (k + 1) / len(present), "Gating %s…" % sid)
+        try:
+            ws.analyze_samples(sample_id=sid, verbose=False)
+        except Exception as exc:
+            gates_out[name_by_sid[sid]] = []
+            continue
+
+        # gate_ids are (name, path-tuple); build stable ids and parent links from the path.
+        id_by_path = {("root",): None}
+        gate_list = []
+        seq = 0
+        for gname, gpath in ws.get_gate_ids(sid):
+            seq += 1
+            gid = "F%d" % seq
+            full_path = tuple(gpath) + (gname,)
+            id_by_path[full_path] = gid
+            parent_id = id_by_path.get(tuple(gpath))     # None at root level
+            try:
+                mem = np.asarray(ws.get_gate_membership(sid, gname, gpath), dtype=bool)
+                idx = [int(x) for x in np.flatnonzero(mem)]
+            except Exception:
+                idx = []
+            g = ws.get_gate(sid, gname, gpath)
+            dims = [getattr(dm, "id", None) for dm in getattr(g, "dimensions", [])]
+            gate_list.append({
+                "id": gid, "parent_id": parent_id, "name": gname, "type": "flowjo",
+                "plugin_indices": idx,
+                "x_channel": dims[0] if dims else None,
+                "y_channel": dims[1] if len(dims) > 1 else None,
+                "count": len(idx),
+            })
+            total_gates += 1
+        gates_out[name_by_sid[sid]] = gate_list
+
+    # Compensation: adopt the workspace matrix so downstream analyses can compensate too.
+    try:
+        cm = ws.get_comp_matrix(present[0][0])
+        if cm is not None:
+            STATE["comp_matrix"] = {"channels": list(cm.detectors),
+                                    "matrix": np.asarray(cm.matrix, dtype=float).tolist(),
+                                    "fk_matrix": cm}
+            STATE["comp_applied"] = True
+    except Exception:
+        pass
+
+    out = _summary(skipped=skipped)
+    out["gates"] = gates_out
+    out["n_gates"] = total_gates
+    out["source"] = os.path.basename(wsp)
+    out["skipped_samples"] = skipped
+    return out
+
 
 @command("suggest_transform")
 def _suggest_transform(i, a):
