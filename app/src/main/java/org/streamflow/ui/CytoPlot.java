@@ -44,6 +44,9 @@ public class CytoPlot extends Region {
         public Color shadowColor = Color.BLACK;        // gate-name shadow color (when textShadow on)
         public double shadowOpacity = 0.6;             // gate-name shadow opacity 0..1 (when textShadow on)
         public double lblDx = 0, lblDy = -4;          // label offset (pixels) from its anchor
+        /** A suggested, not-yet-approved gate: drawn dashed and unfilled, defines no population. */
+        public boolean provisional = false;
+        public boolean hidden = false;                 // hidden from the plot (population unticked in a legend)
         public double angle = 0;                      // ellipse rotation (radians, data-space CCW from +X)
         public boolean invert = false;                // exclusion ("NOT") gate: keep events OUTSIDE the shape
         // statistics shown on the label: keys "parent","total","count","mfi:<chan>","geomean","cv"
@@ -66,6 +69,56 @@ public class CytoPlot extends Region {
     private double ML = 64, MR = 14, MT = 14, MB = 46;
     private static final Color GATE_C = Color.web("#D7261E");
     private static final Color DRAW_C = Color.web("#0A7CFF");
+
+    // ---- colour-by-channel (dim-reduction: "where is CD4 hot vs cold", or colour by sample) ------
+    // When set, pixels are coloured by the MEAN value of this channel among the events that fall in
+    // them, instead of by event density. null restores the normal density/pseudocolour rendering.
+    private String colorByChannel = null;
+    private boolean colorByCategorical = false;   // discrete classes (e.g. SampleIdx) vs continuous
+    private double colorMin = 0, colorMax = 1;    // continuous range actually used (for the colour bar)
+    private static final Color[] CAT_COLORS = {
+            Color.web("#1F77B4"), Color.web("#FF7F0E"), Color.web("#2CA02C"), Color.web("#D62728"),
+            Color.web("#9467BD"), Color.web("#8C564B"), Color.web("#E377C2"), Color.web("#7F7F7F"),
+            Color.web("#BCBD22"), Color.web("#17BECF")};
+
+    /** Colour events by a third channel's value. {@code categorical} treats the value as a class
+     *  index (sample / cluster); otherwise it's a continuous heat scale using the current palette. */
+    public void setColorByChannel(String channel, boolean categorical) {
+        this.colorByChannel = (channel == null || channel.isBlank()) ? null : channel;
+        this.colorByCategorical = categorical;
+        invalidate();
+    }
+    public void clearColorByChannel() { setColorByChannel(null, false); }
+    public String colorByChannel() { return colorByChannel; }
+    /** Width reserved for the continuous colour bar (0 when not colouring continuously). */
+    private double colorBarW() { return (colorByChannel != null && !colorByCategorical) ? 54 : 0; }
+
+    // Colour each event by the population it belongs to. Takes precedence over colorByChannel.
+    private int[] popLabels;          // one entry per row of `data`; -1 = belongs to no population
+    private Color[] popColors;        // indexed by label
+    private String[] popNames;        // indexed by label; drawn as the legend
+    private int popHighlight = -1;    // >= 0 dims every population but this one
+    private boolean popLegendInside = true;   // false when the host draws its own legend outside the plot
+
+    /** Suppress the in-plot population key (the host is drawing an external, non-occluding legend). */
+    public void setPopulationLegendInside(boolean b) { this.popLegendInside = b; invalidate(); }
+
+    /**
+     * Paint events by population membership. {@code labels[r]} indexes {@code colors}/{@code names};
+     * -1 means the event is in no population and is drawn as faint grey underneath, so the populations
+     * always read as figure against ground. Pass null to clear.
+     */
+    public void setColorByPopulation(int[] labels, Color[] colors, String[] names) {
+        this.popLabels = labels;
+        this.popColors = colors;
+        this.popNames = names;
+        invalidate();
+    }
+    public void clearColorByPopulation() { setColorByPopulation(null, null, null); }
+    public boolean hasColorByPopulation() { return popLabels != null && popColors != null; }
+
+    /** Dim every population except this label; -1 shows all equally. */
+    public void setPopulationHighlight(int label) { this.popHighlight = label; invalidate(); }
 
     // ---- editable appearance: density palette + accent colors (per-plot, user-adjustable) ----
     private String paletteName = "Jet";
@@ -103,6 +156,16 @@ public class CytoPlot extends Region {
     private Future<?> renderTask;
     private double[] histHeights;           // cached normalised histogram (0..1), null for 2D
     private double histMaxCount = 0;        // raw peak count of the current histogram (for Y-axis labels)
+
+    /**
+     * An extra histogram trace drawn over the main one — controls next to the stained sample, the way
+     * FlowJo overlays them. Each trace is normalised to ITS OWN peak (modal normalisation), so the
+     * shapes are comparable but the heights are NOT counts. Overlays must share the main plot's
+     * X channel; they are binned with the same scale, bins and range.
+     */
+    public record HistOverlay(String name, EventData data, Color color) {}
+    private final List<HistOverlay> histOverlays = new ArrayList<>();
+    private double[][] histOverlayHeights;  // aligned to histOverlays; null until the render lands
     private Consumer<Boolean> onBusy;       // notify controller to disable axis controls while busy
     // Smoothing is split three ways: smoothDensity feeds densityField() for dot/density/zebra;
     // smoothContour feeds it for contour (independent, so a contour can be smoothed without touching
@@ -115,8 +178,12 @@ public class CytoPlot extends Region {
     private String histMode = "Filled Smooth"; // "Filled Smooth" | "Raw Bars" | "Line Only"
     private double histBandwidth = 0.5;     // 0..1 KDE bandwidth fraction
 
-    /** Per-axis display scale (data is stored raw; mapping goes raw -> scaled -> pixel). */
-    public enum Scale { LINEAR, LOG, ARCSINH, LOGICLE }
+    /** Per-axis display scale (data is stored raw; mapping goes raw -> scaled -> pixel).
+     *  BIEX is FlowJo's biexponential; it is the same generalized-logicle math as LOGICLE (a logicle
+     *  IS a biexponential), so it reuses the Logicle engine — the enum value only carries the label. */
+    public enum Scale { LINEAR, LOG, ARCSINH, LOGICLE, BIEX }
+    /** True for the biexponential family (LOGICLE / BIEX), which share the {@link Logicle} engine. */
+    private static boolean logicleLike(Scale s) { return s == Scale.LOGICLE || s == Scale.BIEX; }
     private static final double LG_M = 4.5;       // logicle decades
     private Scale xScale = Scale.LINEAR, yScale = Scale.LINEAR;
     private double xCof = 150, yCof = 150;        // arcsinh cofactors
@@ -264,9 +331,18 @@ public class CytoPlot extends Region {
     public void setOnGateEditStart(Consumer<Gate> c) { this.onGateEditStart = c; }
     /** Toggle live light background (same as export mode but applied to live rendering). */
     public void setLightMode(boolean b) { this.lightExport = b; invalidate(); }
+    public boolean isLightMode() { return lightExport; }
     /** Show/hide gate labels on the plot overlay. */
     public void setLabelsVisible(boolean b) { this.labelsVisible = b; paint(); }
     public boolean labelsVisible() { return labelsVisible; }
+    /** Replace the overlaid histogram traces. Pass an empty list to clear. */
+    public void setHistogramOverlays(List<HistOverlay> overlays) {
+        histOverlays.clear();
+        if (overlays != null) histOverlays.addAll(overlays);
+        histOverlayHeights = null;
+        invalidate();
+    }
+
     public void setTool(String t) { this.tool = t; selected = null; resetDrawing(); }
     public List<Gate> gates() { return gates; }
 
@@ -316,9 +392,20 @@ public class CytoPlot extends Region {
     public void removeGate(String name) { gates.removeIf(g -> g.name.equals(name)); paint(); }
     public void clearGates() { gates.clear(); selected = null; paint(); }
 
+    /** True for populations defined by an explicit ROW-INDEX SET rather than by geometry:
+     *  {@code subsample} (engine-selected), {@code plugin} (e.g. PeacoQC's kept_indices),
+     *  {@code embedding} (a t-SNE island's rows), and {@code flowjo} (a gate imported from a FlowJo
+     *  workspace, stored as membership because its coordinates live in comp+transform space that our
+     *  raw data has not had applied). They carry no channels and no shape, so every geometry path
+     *  must skip them. */
+    public static boolean isIndexGate(Gate g) {
+        return g != null && ("subsample".equals(g.type) || "plugin".equals(g.type)
+                || "embedding".equals(g.type) || "flowjo".equals(g.type));
+    }
+
     /** Membership of a gate over an arbitrary population's events (for the gating tree). */
     public static boolean[] mask(EventData d, Gate g) {
-        if ("subsample".equals(g.type)) return subsampleMask(d, g);
+        if (isIndexGate(g)) return subsampleMask(d, g);
         boolean[] keep = new boolean[d.rows()];
         int xc = d.indexOf(g.xChan);
         int yc = g.yChan == null ? -1 : d.indexOf(g.yChan);
@@ -439,7 +526,7 @@ public class CytoPlot extends Region {
 
     /** Boolean membership over the current data rows for a gate (drill-down + counts). */
     public boolean[] membership(Gate g) {
-        if ("subsample".equals(g.type)) return subsampleMask(data, g);
+        if (isIndexGate(g)) return subsampleMask(data, g);
         boolean[] keep = new boolean[data.rows()];
         int xc = data.indexOf(g.xChan);
         int yc = g.yChan == null ? -1 : data.indexOf(g.yChan);
@@ -467,11 +554,27 @@ public class CytoPlot extends Region {
      *  (The density cloud itself is raster — use the PNG snapshot for that.) */
     public String exportSvg() {
         int w = (int) getWidth(), h = (int) getHeight();
-        double px = plotLeft(), py = plotTop(), pw = plotW(), ph = plotH();
         StringBuilder s = new StringBuilder();
         s.append("<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='")
                 .append(w).append("' height='").append(h).append("' font-family='Segoe UI, sans-serif'>");
         s.append("<rect width='100%' height='100%' fill='white'/>");
+        s.append(exportSvgBody());
+        s.append("</svg>");
+        return s.toString();
+    }
+
+    /** On-screen pixel size, so a composite SVG can lay panels out with the right offsets. */
+    public int svgWidth()  { return (int) getWidth(); }
+    public int svgHeight() { return (int) getHeight(); }
+
+    /**
+     * The inner SVG content (plot raster, axis frame, gates, labels) WITHOUT the {@code <svg>} wrapper
+     * or the white page rect, so several panels can be composed into one document inside translated
+     * {@code <g>} groups. {@link #exportSvg} is this plus the wrapper.
+     */
+    public String exportSvgBody() {
+        double px = plotLeft(), py = plotTop(), pw = plotW(), ph = plotH();
+        StringBuilder s = new StringBuilder();
         // embed the density raster (inherently raster) so the SVG isn't blank; gates/axes stay vector
         if (!isHistogram() && plotImg != null) {
             String b64 = pngBase64(plotImg);
@@ -529,7 +632,6 @@ public class CytoPlot extends Region {
             double[] a = labelAnchorPx(gt);
             s.append(svgText(a[0] + 3 + gt.lblDx, a[1] + 10 + gt.lblDy, gt.name == null ? "" : gt.name, col));
         }
-        s.append("</svg>");
         return s.toString();
     }
     private static String svgText(double x, double y, String t, String col) {
@@ -562,7 +664,7 @@ public class CytoPlot extends Region {
         sp.setTransform(javafx.scene.transform.Transform.scale(scale, scale));
         // viewport is in post-transform (scaled) space — crop to the actually-drawn region,
         // extended to include any gate label that sticks out past the plot box.
-        double usedW = plotLeft() + plotW() + MR;
+        double usedW = plotLeft() + plotW() + MR + colorBarW();   // keep the colour bar in the export
         double usedH = plotTop() + plotH() + MB;
         for (javafx.scene.Node n : overlay.getChildren()) {
             if (!n.isVisible()) continue;
@@ -586,8 +688,8 @@ public class CytoPlot extends Region {
     public Scale yScale() { return yScale; }
 
     /** Logicle linearization width (W): explicit value, or <0 to auto-estimate from data. */
-    public void setXWidth(double w) { xW = w; if (xScale == Scale.LOGICLE) { invalidate(); } }
-    public void setYWidth(double w) { yW = w; if (yScale == Scale.LOGICLE) { invalidate(); } }
+    public void setXWidth(double w) { xW = w; if (logicleLike(xScale)) { invalidate(); } }
+    public void setYWidth(double w) { yW = w; if (logicleLike(yScale)) { invalidate(); } }
     public double xWidth() { return xWeff; }
     public double yWidth() { return yWeff; }
 
@@ -615,8 +717,8 @@ public class CytoPlot extends Region {
     public double xDataMax() { return (data == null || xChan == null) ? 1 : data.range(data.indexOf(xChan))[1]; }
     public double yDataMax() { return (data == null || yChan == null) ? 1 : data.range(data.indexOf(yChan))[1]; }
 
-    private double sxv(double v) { return xScale == Scale.LOGICLE ? xLogicle.scale(v) : scaleVal(v, xScale, xCof); }
-    private double syv(double v) { return yScale == Scale.LOGICLE ? yLogicle.scale(v) : scaleVal(v, yScale, yCof); }
+    private double sxv(double v) { return logicleLike(xScale) ? xLogicle.scale(v) : scaleVal(v, xScale, xCof); }
+    private double syv(double v) { return logicleLike(yScale) ? yLogicle.scale(v) : scaleVal(v, yScale, yCof); }
 
     /** Effective logicle width, auto-estimated from the data minimum when not set. */
     private static double effW(double dataMin, double dataMax, double req) {
@@ -644,7 +746,7 @@ public class CytoPlot extends Region {
     // ---- rendering ----------------------------------------------------------
 
     // Keep the data area SQUARE so maximising never stretches the cloud on one axis.
-    private double plotSide() { return Math.max(1, Math.min(getWidth() - ML - MR, getHeight() - MT - MB)); }
+    private double plotSide() { return Math.max(1, Math.min(getWidth() - ML - MR - colorBarW(), getHeight() - MT - MB)); }
     private double plotW() { return plotSide(); }
     private double plotH() { return plotSide(); }
     // Anchor the square plot at the top-left margin so the Y-axis title/ticks always sit right next to
@@ -657,11 +759,11 @@ public class CytoPlot extends Region {
     private double pxY(double dy) { return plotTop() + (syMax - syv(dy)) / (syMax - syMin) * plotH(); }
     private double dataX(double px) {
         double t = sxMin + (px - plotLeft()) / plotW() * (sxMax - sxMin);
-        return xScale == Scale.LOGICLE ? xLogicle.inverse(t) : unscaleVal(t, xScale, xCof);
+        return logicleLike(xScale) ? xLogicle.inverse(t) : unscaleVal(t, xScale, xCof);
     }
     private double dataY(double py) {
         double t = syMax - (py - plotTop()) / plotH() * (syMax - syMin);
-        return yScale == Scale.LOGICLE ? yLogicle.inverse(t) : unscaleVal(t, yScale, yCof);
+        return logicleLike(yScale) ? yLogicle.inverse(t) : unscaleVal(t, yScale, yCof);
     }
 
     // last Logicle build params, so we rebuild the 16k-entry LUT only when T or W actually change
@@ -675,7 +777,7 @@ public class CytoPlot extends Region {
         if (xc < 0) return;
         double[] xr = data.range(xc);
         xmin = Double.isNaN(xMinOv) ? xr[0] : xMinOv; xmax = Double.isNaN(xMaxOv) ? xr[1] : xMaxOv;
-        if (xScale == Scale.LOGICLE) {
+        if (logicleLike(xScale)) {
             xWeff = effW(xmin, xmax, xW);
             double T = Math.max(xmax, 1);
             if (xLogicle == null || T != xLogT || xWeff != xLogW) {   // reuse the LUT when unchanged
@@ -688,7 +790,7 @@ public class CytoPlot extends Region {
             if (yc < 0) return;
             double[] yr = data.range(yc);
             ymin = Double.isNaN(yMinOv) ? yr[0] : yMinOv; ymax = Double.isNaN(yMaxOv) ? yr[1] : yMaxOv;
-            if (yScale == Scale.LOGICLE) {
+            if (logicleLike(yScale)) {
                 yWeff = effW(ymin, ymax, yW);
                 double T = Math.max(ymax, 1);
                 if (yLogicle == null || T != yLogT || yWeff != yLogW) {
@@ -745,11 +847,19 @@ public class CytoPlot extends Region {
                         Platform.runLater(() -> { if (gen == renderGen) setBusy(false); });
                         return;
                     }
+                    // Overlays share the main histogram's bins/scale, so they must be binned here,
+                    // off the FX thread, against the same sxMin/sxMax this render used.
+                    double[][] ovh = new double[histOverlays.size()][];
+                    for (int i = 0; i < ovh.length; i++)
+                        ovh[i] = computeOverlayHistogram(histOverlays.get(i).data(), 256);
                     Platform.runLater(() -> {
                         // Always clear busy, even for stale renders — the controls must never
                         // stay permanently disabled because a prior task was cancelled.
                         setBusy(false);
-                        if (gen == renderGen) { histHeights = heights; plotImg = null; applyValleys(valleys); paint(); }
+                        if (gen == renderGen) {
+                            histHeights = heights; histOverlayHeights = ovh;
+                            plotImg = null; applyValleys(valleys); paint();
+                        }
                     });
                 } else {
                     int[] argb = computeScatter(fw, fh);
@@ -808,15 +918,19 @@ public class CytoPlot extends Region {
         double px = plotLeft(), py = plotTop(), pw = plotW(), ph = plotH();
         // Light mode: white the plot plus its axis margins only (exactly the region Copy/export crops
         // to), so there is no white overhang. Dark mode keeps navy margins with light axis text.
+        // The colour bar lives past MR and IS part of the export crop, so it must be inside the white
+        // fill too — otherwise drawColorBar's light-mode dark text lands on the navy surround and the
+        // exported image carries an unreadable dark band. colorBarW() is 0 when there is no colour bar.
         if (lightExport) {
             g.setFill(Color.WHITE);
-            g.fillRect(px - ML, py - MT, ML + pw + MR, MT + ph + MB);
+            g.fillRect(px - ML, py - MT, ML + pw + MR + colorBarW(), MT + ph + MB);
         }
         g.setFill(Color.WHITE);
         g.fillRect(px, py, pw, ph);
 
         if (isHistogram()) {
             drawHistogram(g, px, py, pw, ph);
+            drawHistOverlays(g, px, py, pw, ph);
         } else if (plotImg != null) {
             // Smoothing softens density/contour, but it also blurs single-pixel contour OUTLIERS into
             // fat blobs — so keep it OFF for dot plots and whenever outliers are being drawn, so the
@@ -826,11 +940,64 @@ public class CytoPlot extends Region {
             g.drawImage(plotImg, px, py, pw, ph);
         }
         drawAxes(g, px, py, pw, ph);
+        drawColorBar(g, px, py, pw, ph);
+        drawPopulationLegend(g, px, py, pw, ph);
         drawHighlight(g);
         drawIntercept(g);
         drawFmo(g);
         drawGates(g);
         drawInProgress(g);
+    }
+
+    /** Vertical colour bar for continuous colour-by-channel, drawn in the reserved right margin. */
+    /** Names the population colours inside the plot. Without it the colours mean nothing on paper. */
+    private void drawPopulationLegend(GraphicsContext g, double px, double py, double pw, double ph) {
+        if (!popLegendInside || popNames == null || popColors == null || popNames.length == 0) return;
+        double fs = Math.max(8, axisFontSize - 2), lx = px + 10, ly = py + 8;
+        g.setFont(Font.font(fs));
+        g.setTextAlign(javafx.scene.text.TextAlignment.LEFT);
+        g.setTextBaseline(javafx.geometry.VPos.TOP);
+        for (int i = 0; i < popNames.length && i < popColors.length; i++) {
+            boolean dim = popHighlight >= 0 && popHighlight != i;
+            g.setGlobalAlpha(dim ? 0.35 : 1.0);
+            g.setFill(popColors[i]);
+            g.fillRect(lx, ly + 1, 10, 10);
+            // ALWAYS dark: this legend is drawn inside the plot box, which is filled white in both
+            // light and dark mode. Using the dark-mode axis colour here made the key invisible.
+            g.setFill(Color.web("#222222"));
+            g.fillText(popNames[i], lx + 16, ly);
+            ly += fs + 5;
+        }
+        g.setGlobalAlpha(1.0);
+        g.setTextBaseline(javafx.geometry.VPos.BASELINE);
+    }
+
+    private void drawColorBar(GraphicsContext g, double px, double py, double pw, double ph) {
+        if (colorByChannel == null || colorByCategorical) return;
+        double bx = px + pw + 12, bw = 14, bh = ph;
+        for (int k = 0; k < bh; k++) {
+            double t = 1.0 - (k / Math.max(1.0, bh - 1));      // top of the bar = colorMax
+            g.setFill(lut[(int) Math.max(0, Math.min(255, t * 255))]);
+            g.fillRect(bx, py + k, bw, 1);
+        }
+        g.setStroke(lightExport ? Color.web("#666666") : Color.web("#B0C4D8"));
+        g.setLineWidth(1);
+        g.strokeRect(bx, py, bw, bh);
+
+        g.setFill(lightExport ? Color.web("#222222") : Color.web("#E0E0E0"));
+        g.setFont(Font.font(Math.max(7, axisFontSize - 3)));
+        g.setTextAlign(javafx.scene.text.TextAlignment.LEFT);
+        g.setTextBaseline(javafx.geometry.VPos.CENTER);
+        g.fillText(fmt(colorMax), bx + bw + 3, py + 4);
+        g.fillText(fmt(colorMin), bx + bw + 3, py + bh - 4);
+        g.save();
+        g.translate(bx + bw + 34, py + bh / 2);
+        g.rotate(-90);
+        g.setTextAlign(javafx.scene.text.TextAlignment.CENTER);
+        g.fillText(chLabel(colorByChannel), 0, 0);
+        g.restore();
+        g.setTextAlign(javafx.scene.text.TextAlignment.LEFT);
+        g.setTextBaseline(javafx.geometry.VPos.BASELINE);
     }
 
     /** FlowJo-style dashed crosshair at a fixed data-space (X,Y) reference point. Draggable — small
@@ -908,8 +1075,131 @@ public class CytoPlot extends Region {
 
     // ---- background compute (no JavaFX, no scene-graph access) ---------------
 
+    /** Colour each pixel by the MEAN value of {@code colorByChannel} among the events landing in it.
+     *  Runs on the render thread like {@link #computeScatter}. Continuous values map through the
+     *  current palette between the 1st/99th percentile (robust to outliers); categorical values are
+     *  treated as class indices. Returns ARGB, or null when the channel isn't present. */
+    /**
+     * Raster for population colouring. Unassigned events are stamped first as faint grey, then the
+     * populations paint over them, so a small population is never buried under the bulk of the data.
+     * Where two populations overlap on one pixel the later label wins — the legend, not the picture,
+     * is the authority on membership.
+     */
+    private int[] computePopColor(int w, int h) {
+        EventData d = data;
+        int xc = d.indexOf(xChan), yc = d.indexOf(yChan);
+        if (xc < 0 || yc < 0 || popLabels == null || popLabels.length < d.rows()) return null;
+
+        double sMinX = sxMin, sRangeX = sxMax - sxMin, sMaxY = syMax, sRangeY = syMax - syMin;
+        int rows = d.rows(), pr = pointRadius;
+        int[] argb = new int[w * h];
+        java.util.Arrays.fill(argb, WHITE_ARGB);
+
+        int unassigned = argbOf(Color.web("#C8CDD4"), 1.0);
+        // Two passes so populations always sit above the unassigned cloud.
+        for (int pass = 0; pass < 2; pass++) {
+            for (int r = 0; r < rows; r++) {
+                if ((r & 0x3FFF) == 0 && Thread.currentThread().isInterrupted()) return null;
+                int lab = popLabels[r];
+                boolean assigned = lab >= 0 && popColors != null && lab < popColors.length;
+                if ((pass == 0) == assigned) continue;
+
+                int color;
+                if (!assigned) {
+                    color = unassigned;
+                } else {
+                    double alpha = (popHighlight < 0 || popHighlight == lab) ? 1.0 : 0.12;
+                    color = argbOf(popColors[lab], alpha);
+                }
+                int px = (int) ((sxv(d.get(r, xc)) - sMinX) / sRangeX * (w - 1));
+                int py = (int) ((sMaxY - syv(d.get(r, yc))) / sRangeY * (h - 1));
+                if (px < 0 || px >= w || py < 0 || py >= h) continue;
+                for (int dy = -pr; dy <= pr; dy++) {
+                    int yy = py + dy; if (yy < 0 || yy >= h) continue;
+                    for (int dx = -pr; dx <= pr; dx++) {
+                        int xx = px + dx; if (xx < 0 || xx >= w) continue;
+                        argb[yy * w + xx] = color;
+                    }
+                }
+            }
+        }
+        return argb;
+    }
+
+    /** Blend a colour onto white at the given alpha and pack it as opaque ARGB. */
+    private static int argbOf(Color c, double alpha) {
+        int r = (int) Math.round((c.getRed()   * alpha + (1 - alpha)) * 255);
+        int g = (int) Math.round((c.getGreen() * alpha + (1 - alpha)) * 255);
+        int b = (int) Math.round((c.getBlue()  * alpha + (1 - alpha)) * 255);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private int[] computeColorBy(int w, int h) {
+        EventData d = data;
+        int xc = d.indexOf(xChan), yc = d.indexOf(yChan), cc = d.indexOf(colorByChannel);
+        if (cc < 0) return null;
+
+        double sMinX = sxMin, sRangeX = sxMax - sxMin, sMaxY = syMax, sRangeY = syMax - syMin;
+        int rows = d.rows(), pr = pointRadius;
+        double[] sum = new double[w * h];
+        int[] cnt = new int[w * h];
+
+        // Robust range from the raw values (1st..99th pct), so a few extreme events don't wash it out.
+        double lo = 0, hi = 1;
+        if (!colorByCategorical) {
+            double[] v = new double[rows];
+            for (int r = 0; r < rows; r++) v[r] = d.get(r, cc);
+            double[] s = v.clone();
+            java.util.Arrays.sort(s);
+            lo = s[(int) (0.01 * (s.length - 1))];
+            hi = s[(int) (0.99 * (s.length - 1))];
+            if (hi <= lo) hi = lo + 1e-9;
+        }
+        colorMin = lo; colorMax = hi;
+
+        for (int r = 0; r < rows; r++) {
+            if ((r & 0x3FFF) == 0 && Thread.currentThread().isInterrupted()) return null;
+            int px = (int) ((sxv(d.get(r, xc)) - sMinX) / sRangeX * (w - 1));
+            int py = (int) ((sMaxY - syv(d.get(r, yc))) / sRangeY * (h - 1));
+            if (px < 0 || px >= w || py < 0 || py >= h) continue;
+            double val = d.get(r, cc);
+            for (int dy = -pr; dy <= pr; dy++) {
+                int yy = py + dy; if (yy < 0 || yy >= h) continue;
+                for (int dx = -pr; dx <= pr; dx++) {
+                    int xx = px + dx; if (xx < 0 || xx >= w) continue;
+                    int p = yy * w + xx;
+                    sum[p] += val; cnt[p]++;
+                }
+            }
+        }
+
+        int[] argb = new int[w * h];
+        java.util.Arrays.fill(argb, WHITE_ARGB);
+        for (int p = 0; p < argb.length; p++) {
+            if (cnt[p] == 0) continue;
+            double mean = sum[p] / cnt[p];
+            if (colorByCategorical) {
+                int k = (int) Math.round(mean);
+                argb[p] = colorArgb(CAT_COLORS[Math.floorMod(k, CAT_COLORS.length)]);
+            } else {
+                double t = (mean - lo) / (hi - lo);
+                t = Math.max(0, Math.min(1, t));
+                argb[p] = lutArgb[(int) (t * 255)];
+            }
+        }
+        return argb;
+    }
+
     /** Bin events into a w×h density grid, then colour per plot type. Returns ARGB. */
     private int[] computeScatter(int w, int h) {
+        if (popLabels != null) {
+            int[] byPop = computePopColor(w, h);
+            if (byPop != null) return byPop;       // population colouring wins over channel colouring
+        }
+        if (colorByChannel != null) {
+            int[] byValue = computeColorBy(w, h);
+            if (byValue != null) return byValue;   // fall through to density if the channel is missing
+        }
         EventData d = data;
         int xc = d.indexOf(xChan), yc = d.indexOf(yChan);
         double sMinX = sxMin, sRangeX = sxMax - sxMin, sMaxY = syMax, sRangeY = syMax - syMin;
@@ -1007,6 +1297,27 @@ public class CytoPlot extends Region {
     }
 
     /** 1-D histogram over the X channel, optional KDE smoothing; heights normalised 0..1. */
+    /**
+     * Bin an overlay dataset against the MAIN plot's scale, range and bin count, then peak-normalise it.
+     * Sharing sxMin/sxMax is what makes the traces superimposable; normalising each to its own peak is
+     * what makes differently-sized controls comparable in shape. Returns null if the channel is absent.
+     */
+    private double[] computeOverlayHistogram(EventData d, int bins) {
+        int xc = d == null ? -1 : d.indexOf(xChan);
+        if (xc < 0) return null;
+        double sMin = sxMin, sRange = sxMax - sxMin;
+        double[] h = new double[bins];
+        for (int r = 0, rows = d.rows(); r < rows; r++) {
+            if ((r & 0x3FFF) == 0 && Thread.currentThread().isInterrupted()) return null;
+            int b = (int) ((sxv(d.get(r, xc)) - sMin) / sRange * (bins - 1));
+            if (b >= 0 && b < bins) h[b]++;
+        }
+        if (smoothHistogram) h = blur1d(h, Math.max(1, (int) (histBandwidth * 24)));
+        double max = arrayMax(h);
+        if (max > 0) for (int i = 0; i < h.length; i++) h[i] /= max;
+        return h;
+    }
+
     private double[] computeHistogram(int bins) {
         EventData d = data;
         int xc = d.indexOf(xChan);
@@ -1298,6 +1609,44 @@ public class CytoPlot extends Region {
         return best;
     }
 
+    /**
+     * Overlaid control traces, drawn on top of the main histogram. Each is peak-normalised, so the
+     * heights say nothing about event counts — only where the distribution sits. A small legend names
+     * them, because an unlabelled overlay is worse than none.
+     */
+    private void drawHistOverlays(GraphicsContext g, double px, double py, double pw, double ph) {
+        if (histOverlayHeights == null || histOverlays.isEmpty()) return;
+        int n = Math.min(histOverlayHeights.length, histOverlays.size());
+
+        for (int i = 0; i < n; i++) {
+            double[] h = histOverlayHeights[i];
+            if (h == null) continue;
+            double bw = pw / h.length;
+            g.setStroke(histOverlays.get(i).color());
+            g.setLineWidth(1.8);
+            g.beginPath();
+            for (int b = 0; b < h.length; b++) {
+                double xx = px + b * bw + bw / 2, yy = py + ph - h[b] * ph;
+                if (b == 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
+            }
+            g.stroke();
+        }
+
+        double fs = Math.max(8, axisFontSize - 2), ly = py + 6, lx = px + pw - 130;
+        g.setFont(Font.font(fs));
+        g.setTextAlign(javafx.scene.text.TextAlignment.LEFT);
+        g.setTextBaseline(javafx.geometry.VPos.TOP);
+        for (int i = 0; i < n; i++) {
+            HistOverlay o = histOverlays.get(i);
+            if (histOverlayHeights[i] == null) continue;
+            g.setFill(o.color());
+            g.fillRect(lx, ly + fs * 0.45, 14, 2);
+            g.fillText(o.name(), lx + 19, ly);
+            ly += fs + 4;
+        }
+        g.setTextBaseline(javafx.geometry.VPos.BASELINE);
+    }
+
     private void drawHistogram(GraphicsContext g, double px, double py, double pw, double ph) {
         double[] h = histHeights;
         if (h == null) return;
@@ -1536,7 +1885,7 @@ public class CytoPlot extends Region {
             for (int e = 1; e <= 6; e++) {
                 double v = Math.pow(10, e);
                 if (v >= lo && v <= hi) t.add(v);
-                if ((s == Scale.ARCSINH || s == Scale.LOGICLE) && -v >= lo && -v <= hi) t.add(-v);
+                if ((s == Scale.ARCSINH || logicleLike(s)) && -v >= lo && -v <= hi) t.add(-v);
             }
         }
         return t;
@@ -1567,6 +1916,13 @@ public class CytoPlot extends Region {
             g.setStroke(singleConf != null ? singleConf : gt.border);
             double lw = (singleConf != null || segColors != null) ? (sel ? 3.0 : 2.4) : (sel ? 2.4 : 1.6);
             g.setLineWidth(lw);
+
+            // A provisional gate is a SUGGESTION, not a population: dashed and unfilled, so it can never
+            // be mistaken for something that already defines events. Approving it clears the flag.
+            if (gt.provisional) {
+                g.setFill(Color.TRANSPARENT);
+                g.setLineDashes(6, 5);
+            }
 
             switch (gt.type) {
                 case "rectangle" -> {
@@ -1657,6 +2013,7 @@ public class CytoPlot extends Region {
                     }
                 }
             }
+            if (gt.provisional) g.setLineDashes((double[]) null);   // never leak the dash into the next gate
             if (sel) drawHandles(g, gt);
         }
         syncLabels();
@@ -1689,8 +2046,8 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         if (best <= 0) return zero;
         double pSX = sMinX + (double) bx / (CG - 1) * sRangeX;
         double pSY = sMinY + (double) by / (CG - 1) * sRangeY;
-        double pX = xScale == Scale.LOGICLE ? xLogicle.inverse(pSX) : unscaleVal(pSX, xScale, xCof);
-        double pY = yScale == Scale.LOGICLE ? yLogicle.inverse(pSY) : unscaleVal(pSY, yScale, yCof);
+        double pX = logicleLike(xScale) ? xLogicle.inverse(pSX) : unscaleVal(pSX, xScale, xCof);
+        double pY = logicleLike(yScale) ? yLogicle.inverse(pSY) : unscaleVal(pSY, yScale, yCof);
         return new double[]{pX - cx, pY - cy};
     }
 
@@ -1698,7 +2055,8 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
     public double confidenceOf(Gate g) { return gateBoundaryConfidence(g); }
 
     private boolean visible(Gate g) {
-        if ("subsample".equals(g.type)) return false;   // subsample is a tree population, not a drawn shape
+        if (g.hidden) return false;          // population unticked in the legend: hide its outline too
+        if (isIndexGate(g)) return false;   // index-defined population (subsample/plugin), not a drawn shape
         if (g.xChan == null || !g.xChan.equals(xChan)) return false;
         return "interval".equals(g.type) || "line".equals(g.type)
                 || (yChan != null && g.yChan != null && g.yChan.equals(yChan));
@@ -2146,7 +2504,7 @@ public void setShowConfidence(boolean b) { this.showConfidence = b; paint(); }
         MenuItem addNode = new MenuItem("Add node");
         addNode.setOnAction(a -> addNodeToPolygon(g, localX, localY));
         addNode.setDisable(!"polygon".equals(g.type));
-        MenuItem stats = new MenuItem("Change Statistics Displayed…");
+        MenuItem stats = new MenuItem("Add Statistic…");
         stats.setOnAction(a -> { if (onStatsConfig != null) onStatsConfig.accept(g); });
         MenuItem color = new MenuItem("Color…");
         color.setOnAction(a -> { if (onColorRequest != null) onColorRequest.accept(g); });

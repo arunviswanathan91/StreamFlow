@@ -20,6 +20,34 @@
     -fx-background-color: -fx-bg;
 }
 
+/* Dialogs / Alerts. AppIcons.theme() attaches this stylesheet + the app-root class to every popup,
+   but JavaFX's DialogPane header-panel defaults to a LIGHT band with grey text (see the Close / New
+   Workspace alerts) while the body is dark — inconsistent. Style the whole dialog dark, once. */
+.app-root.dialog-pane,
+.dialog-pane {
+    -fx-background-color: -fx-bg;
+    -fx-border-color: -fx-panel-2;
+}
+.dialog-pane > .header-panel {
+    -fx-background-color: -fx-panel;
+}
+.dialog-pane > .header-panel .label {
+    -fx-text-fill: -fx-text-c;
+}
+.dialog-pane > .content,
+.dialog-pane .content.label,
+.dialog-pane > .content.label {
+    -fx-text-fill: -fx-text-c;
+}
+.dialog-pane .button-bar .button {
+    -fx-background-color: -fx-panel-2;
+    -fx-text-fill: -fx-text-c;
+}
+.dialog-pane .button-bar .button:default {
+    -fx-background-color: -fx-accent-c;
+    -fx-text-fill: #08151F;
+}
+
 /* Default label colour so plain, unstyled <Label>s (e.g. the Copy/Export dialog rows) are readable
    instead of falling back to Modena's dark grey. Scoped rules below (.subtitle, column headers, menu
    items, etc.) have higher specificity and still win. */

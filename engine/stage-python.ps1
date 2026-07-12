@@ -57,11 +57,18 @@ Write-Host "Upgrading pip and installing engine packages..."
 & $pyExe -m pip install --upgrade pip
 # flowkit pulls flowio, flowutils, numpy, scipy, pandas; matplotlib drives the
 # render/stats commands; scikit-learn/umap-learn/openTSNE power Dim. Reduction,
-# Clustering and the Classifier. Keep this in sync with the CI install in build-java.yml.
-& $pyExe -m pip install flowkit matplotlib scikit-learn umap-learn openTSNE phenograph flowsom
+# Clustering and the Classifier. FlowCal provides bead-based MEF/MEFL calibration.
+# Keep this in sync with the CI install in build-java.yml.
+#
+# DO NOT add `cytonormpy`: it hard-pins flowio<=1.3.0 while flowkit 1.3.2 requires
+# flowio>=1.4.0 — mutually exclusive, and flowkit is the core engine. CytoNorm is an R
+# package (engine/vendor/CytoNorm-master) and runs through the optional R runway instead.
+& $pyExe -m pip install flowkit matplotlib scikit-learn umap-learn openTSNE phenograph flowsom FlowCal
 
 Write-Host "Verifying..."
 & $pyExe -c "import flowkit; print('SUCCESS: staged FlowKit', flowkit.__version__)"
+& $pyExe -c "import FlowCal; print('SUCCESS: staged FlowCal')"
+& $pyExe -m pip check
 
 Write-Host "Done. Portable Python staged at $Dest"
 Write-Host "Next: powershell -File app\package.ps1   (bundles Python + R-Portable into the EXE)"

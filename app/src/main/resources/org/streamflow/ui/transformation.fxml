@@ -21,7 +21,7 @@
                 </Button>
             </children>
         </HBox>
-        <Label text="Transforms the STORED fluorescence values that engine analyses (Clustering, Dim. Reduction, statistics) consume. This is different from a plot's axis scale, which only changes how a Graph Window draws — for gating/viewing, just set the axis scale. Use this when you want clustering/DimRedux to run on transformed data."
+        <Label text="Sets the transform that Clustering and Dim. Reduction apply to fluorescence values before they run — choose logicle here and the embedding really is computed on logicle-scaled data. It does NOT change a plot's axis scale (that is a per-plot setting in the Graph Window, and is what you want for gating and viewing), and it does NOT change the Statistics table, which reports raw values."
                styleClass="subtitle" wrapText="true"/>
 
         <HBox spacing="8.0" alignment="CENTER_LEFT">

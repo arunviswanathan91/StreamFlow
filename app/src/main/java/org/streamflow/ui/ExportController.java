@@ -1162,6 +1162,7 @@ public class ExportController implements ContextAware, Refreshable {
     private static CytoPlot.Scale scaleOf(String s) {
         if ("Log".equals(s)) return CytoPlot.Scale.LOG;
         if ("Logicle".equals(s)) return CytoPlot.Scale.LOGICLE;
+        if ("Biex".equals(s)) return CytoPlot.Scale.BIEX;
         if ("ArcSinh".equals(s)) return CytoPlot.Scale.ARCSINH;
         return CytoPlot.Scale.LINEAR;
     }
@@ -1487,15 +1488,16 @@ public class ExportController implements ContextAware, Refreshable {
         for (int r = 0; r < v.length; r++) v[r] = d.get(r, c);
         return v;
     }
+    // These delegate to Stats so the exported CSV cannot drift from the numbers on the gate labels.
+    // They keep NaN (rendered as an empty cell) for an empty population, where Stats returns 0.
     private static double median(EventData d, String ch) {
-        double[] v = vals(d, ch); if (v.length == 0) return Double.NaN;
-        Arrays.sort(v); int n = v.length;
-        return n % 2 == 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+        double[] v = vals(d, ch);
+        return v.length == 0 ? Double.NaN : Stats.median(v);
     }
+    /** Excludes events at or below zero; an all-negative population exports as empty, not as 0. */
     private static double geomean(EventData d, String ch) {
-        double[] v = vals(d, ch); double s = 0; int n = 0;
-        for (double x : v) if (x > 0) { s += Math.log(x); n++; }
-        return n == 0 ? Double.NaN : Math.exp(s / n);
+        Stats.GeoMean g = Stats.geoMean(vals(d, ch));
+        return g.excluded() == g.total() ? Double.NaN : g.value();
     }
     private static double cv(EventData d, String ch) {
         double[] v = vals(d, ch); if (v.length == 0) return Double.NaN;
