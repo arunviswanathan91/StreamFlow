@@ -1,0 +1,24 @@
+{
+  "id": "flowmagic",
+  "name": "FlowMagic (template auto-gating)",
+  "version": "0.1.0",
+  "description": "Applies a TRAINED flowMagic template to auto-gate a population. flowMagic is supervised: train a template from manually gated samples (magic_template_train) first, then this plugin runs the predict step and returns polygon gates.",
+  "vendor": "flowMagic (vendored: python-migration/flowMagic-main)",
+  "status": "experimental",
+  "requires": {
+    "r": ">=4.2",
+    "packages": ["jsonlite", "flowCore", "flowWorkspace", "flowMagic"],
+    "notes": "flowMagic pulls heavy deps (caret, randomForest, sf, concaveman, sp, doParallel) plus Bioconductor flowWorkspace."
+  },
+  "entry": {
+    "script": "flowmagic.R",
+    "function": "streamflow_run"
+  },
+  "params": [
+    { "id": "x_channel", "label": "X channel", "type": "channel", "required": true },
+    { "id": "y_channel", "label": "Y channel", "type": "channel", "required": true },
+    { "id": "template_path", "label": "Trained template (.rds)", "type": "file", "required": true },
+    { "id": "parent_node", "label": "Parent node", "type": "string", "default": "root" }
+  ],
+  "outputs": ["gates"]
+}

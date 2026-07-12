@@ -130,6 +130,9 @@ public final class WorkspaceModel {
         eventCounts.clear();
         gateClipboard = null;
         channelNames.clear();
+        markerColors.clear();
+        sampleGroups.clear();
+        embeddingSnapshot = null;
         dirty = false;
         if (Platform.isFxApplicationThread()) {
             allSamples.clear();
@@ -175,6 +178,63 @@ public final class WorkspaceModel {
     public void unregisterWindow(String sample) { openWindows.remove(sample); }
     /** Read-only view of every currently-open Graph Window, keyed by sample — for the "Jump" control. */
     public Map<String, javafx.stage.Stage> openWindowsView() { return java.util.Collections.unmodifiableMap(openWindows); }
+
+    // ---- UNIVERSAL marker/tag -> colour ------------------------------------
+    // A fluorochrome (or its user-given tag) gets ONE colour everywhere: dim-reduction overlays, the
+    // preview grid, legends. Same universal-per-marker shape as channelScales below.
+    private final Map<String, String> markerColors = new HashMap<>();
+
+    /** Web colour (e.g. "#1F77B4") for a marker/tag, or null when the user hasn't chosen one. */
+    public String markerColor(String tag) { return tag == null ? null : markerColors.get(tag); }
+    public void setMarkerColor(String tag, String webColor) {
+        if (tag != null && webColor != null) markerColors.put(tag, webColor);
+    }
+    public void clearMarkerColor(String tag) { markerColors.remove(tag); }
+    public Map<String, String> markerColors() { return java.util.Collections.unmodifiableMap(markerColors); }
+
+    // ---- experimental groups (Control / Treated / …) --------------------------
+    // A sample belongs to at most one named group. Groups drive the faceted comparison in Dim
+    // Reduction and are saved with the workspace, so the grouping is part of the analysis, not a
+    // transient UI state.
+    private final Map<String, String> sampleGroups = new java.util.LinkedHashMap<>();
+
+    /** The group this sample belongs to, or null when it is ungrouped. */
+    public String groupOf(String sample) { return sample == null ? null : sampleGroups.get(sample); }
+
+    public void setGroup(String sample, String group) {
+        if (sample == null) return;
+        if (group == null || group.isBlank()) sampleGroups.remove(sample);
+        else sampleGroups.put(sample, group.trim());
+        dirty = true;
+    }
+
+    /** Group names in first-assigned order — the order the comparison panels are drawn in. */
+    public java.util.List<String> groupNames() {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>(sampleGroups.values());
+        return new java.util.ArrayList<>(out);
+    }
+
+    public java.util.List<String> samplesInGroup(String group) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        sampleGroups.forEach((s, g) -> { if (g.equals(group)) out.add(s); });
+        return out;
+    }
+
+    public Map<String, String> sampleGroups() { return java.util.Collections.unmodifiableMap(sampleGroups); }
+    public void clearGroups() { sampleGroups.clear(); dirty = true; }
+
+    // ---- saved embedding -----------------------------------------------------
+    // An opaque snapshot of the last dimensionality reduction (coordinates + the arguments that made
+    // them), written into the .sfw and handed straight back to DimReductionController on reopen.
+    // Re-running t-SNE would take minutes AND produce a different layout, so the coordinates
+    // themselves — not a recipe for regenerating them — are what must persist.
+    private com.fasterxml.jackson.databind.JsonNode embeddingSnapshot;
+
+    public com.fasterxml.jackson.databind.JsonNode embeddingSnapshot() { return embeddingSnapshot; }
+    public void setEmbeddingSnapshot(com.fasterxml.jackson.databind.JsonNode n) {
+        this.embeddingSnapshot = (n == null || n.isNull() || n.isMissingNode()) ? null : n;
+        dirty = true;
+    }
 
     // ---- per-marker (channel) UNIVERSAL scale -------------------------------
     // The display scale for a marker is chosen once and applies to that channel EVERYWHERE (every

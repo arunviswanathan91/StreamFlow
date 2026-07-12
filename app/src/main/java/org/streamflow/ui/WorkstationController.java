@@ -278,6 +278,14 @@ public class WorkstationController implements ContextAware {
             m.getItems().addAll(new SeparatorMenuItem(), applyAll, rm);
             return m;
         }
+        if (!n.isRoot() && ("plugin".equals(n.gate.type) || "embedding".equals(n.gate.type))) {
+            // A plugin population's rows were computed for THIS sample, so apply-to-all is meaningless:
+            // re-run the plugin per sample instead. Only remove makes sense here.
+            MenuItem rm = new MenuItem("Remove population");
+            rm.setOnAction(e -> removePopulation(sample, n));
+            m.getItems().addAll(new SeparatorMenuItem(), rm);
+            return m;
+        }
         if (!n.isRoot()) {
             MenuItem copy = new MenuItem("Copy gate");
             copy.setOnAction(e -> copyGate(n));

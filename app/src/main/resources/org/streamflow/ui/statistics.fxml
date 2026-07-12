@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ListView?>
 <?import javafx.scene.control.SplitPane?>
 <?import javafx.scene.control.TableView?>
+<?import javafx.scene.control.TextField?>
 <?import javafx.scene.control.Tooltip?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.VBox?>
@@ -22,11 +24,17 @@
                 </Button>
             </children>
         </HBox>
-        <Label text="Per-sample × per-population count, % of parent/total, and median MFI per channel, computed from the gating tree. Choose which populations to include on the left."
+        <Label text="Per-sample × per-population count, % of parent/total, and one statistic per channel, computed from the gating tree. Choose which populations to include on the left."
                styleClass="subtitle" wrapText="true"/>
 
         <HBox spacing="8.0" alignment="CENTER_LEFT">
             <children>
+                <Label text="Channel statistic:"/>
+                <ComboBox fx:id="statCombo" prefWidth="170.0">
+                    <tooltip><Tooltip text="Which statistic the per-channel columns report. Geometric mean excludes events at or below zero."/></tooltip>
+                </ComboBox>
+                <Label text="Percentile:"/>
+                <TextField fx:id="pctField" text="50" prefWidth="60.0"/>
                 <Button fx:id="computeButton" text="Compute" onAction="#onCompute" styleClass="primary">
                     <graphic><FontIcon iconLiteral="fas-calculator"/></graphic>
                 </Button>

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.TextArea?>
+<?import javafx.scene.control.Tooltip?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Priority?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+<?import org.kordamp.ikonli.javafx.FontIcon?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="org.streamflow.ui.PluginsController"
+      styleClass="content" spacing="10.0">
+    <children>
+        <Label text="Plugins" styleClass="title"/>
+        <Label text="R-based analysis plugins bundled with this build. A plugin reads the selected sample's FCS, runs in R, and returns results — e.g. PeacoQC returns the events that passed quality control, which are added as a cleaned sub-population."
+               styleClass="subtitle" wrapText="true"/>
+
+        <Label fx:id="rStatusLabel" text="" styleClass="subtitle" wrapText="true"/>
+
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+            <children>
+                <Label text="Sample:"/>
+                <ComboBox fx:id="sampleCombo" prefWidth="260.0"/>
+                <Separator orientation="VERTICAL"/>
+                <Button fx:id="runButton" text="Run plugin" onAction="#onRun" styleClass="primary">
+                    <graphic><FontIcon iconLiteral="fas-play"/></graphic>
+                </Button>
+                <Button fx:id="batchButton" text="Run on samples…" onAction="#onBatch">
+                    <graphic><FontIcon iconLiteral="fas-layer-group"/></graphic>
+                    <tooltip><Tooltip text="Run this plugin on several samples. Results are computed per sample (they cannot be cloned), so each sample gets its own population."/></tooltip>
+                </Button>
+                <Button fx:id="cancelButton" text="Cancel" onAction="#onCancel" disable="true">
+                    <graphic><FontIcon iconLiteral="fas-stop"/></graphic>
+                </Button>
+                <Button fx:id="addPopButton" text="Add as population" onAction="#onAddPopulation" disable="true">
+                    <graphic><FontIcon iconLiteral="fas-plus"/></graphic>
+                    <tooltip><Tooltip text="Add the plugin's kept events as a new sub-population under All Events"/></tooltip>
+                </Button>
+                <Region HBox.hgrow="ALWAYS"/>
+                <CheckBox fx:id="showExperimentalCheck" text="Show experimental">
+                    <tooltip><Tooltip text="Experimental plugins may require extra setup (e.g. FlowMagic needs a trained template)."/></tooltip>
+                </CheckBox>
+                <Button fx:id="refreshButton" text="Rescan" onAction="#onRefresh">
+                    <graphic><FontIcon iconLiteral="fas-redo"/></graphic>
+                </Button>
+            </children>
+        </HBox>
+
+        <Label fx:id="statusLabel" text="" styleClass="subtitle" wrapText="true"/>
+
+        <HBox spacing="12.0" VBox.vgrow="ALWAYS">
+            <children>
+                <VBox spacing="4.0" prefWidth="260.0" minWidth="220.0">
+                    <children>
+                        <Label text="Available plugins" styleClass="subtitle"/>
+                        <ListView fx:id="pluginList" VBox.vgrow="ALWAYS"/>
+                    </children>
+                </VBox>
+
+                <VBox spacing="6.0" HBox.hgrow="ALWAYS">
+                    <children>
+                        <Label fx:id="pluginTitleLabel" text="Select a plugin" styleClass="title"/>
+                        <Label fx:id="pluginMetaLabel" text="" styleClass="subtitle" wrapText="true"/>
+                        <Separator/>
+                        <Label text="Parameters" styleClass="subtitle"/>
+                        <ScrollPane fitToWidth="true" prefHeight="180.0">
+                            <content>
+                                <VBox fx:id="paramBox" spacing="6.0" style="-fx-padding:4;"/>
+                            </content>
+                        </ScrollPane>
+                        <Label text="Output" styleClass="subtitle"/>
+                        <TextArea fx:id="outputArea" editable="false" VBox.vgrow="ALWAYS"
+                                  promptText="Plugin output appears here."/>
+                    </children>
+                </VBox>
+            </children>
+        </HBox>
+    </children>
+</VBox>
