@@ -198,7 +198,7 @@ public class GraphWindowController {
             GraphWindowController c = loader.getController();
             c.ctx = ctx;
             c.applyDefaultPreferences();
-            ctx.workspace().addTreeChangeListener(c::onExternalTreeChange);   // live sync across windows
+            ctx.workspace().addTreeChangeListener(c.treeChangeListener);   // live sync across windows
             c.sample = title;
             c.plot.setChannelLabeler(ch -> ctx.aliases().label(ch));
             // App-wide Copy format: apply current settings to this plot and stay in sync as they change.
@@ -240,6 +240,7 @@ public class GraphWindowController {
             stage.setOnHidden(e -> {
                 ctx.settings().removeChangeListener(c.exportFormatListener);
                 ctx.workspace().unregisterWindow(c.sampleFile);  // §14: deregister so focus check works
+                ctx.workspace().removeTreeChangeListener(c.treeChangeListener);
             });
             return new Win(stage, c);
         } catch (Exception e) {
@@ -1425,6 +1426,10 @@ public class GraphWindowController {
     /** Listener so this plot tracks the app-wide Copy format live (held for clean removal on close). */
     private final Runnable exportFormatListener = this::applyExportFormat;
 
+    /** Listener so this window re-syncs when another window edits the shared gating tree (held for
+     *  clean removal on close — an inline method reference can't be unregistered later). */
+    private final Runnable treeChangeListener = this::onExternalTreeChange;
+
     /** Push the current app-wide Copy/export format (point size, axis & label fonts) onto this plot. */
     private void applyExportFormat() {
         if (ctx == null) return;
@@ -1808,6 +1813,7 @@ public class GraphWindowController {
         HBox strip = new HBox(8);
         strip.setPadding(new javafx.geometry.Insets(10));
         strip.setStyle("-fx-background-color:#0D1B2A;");
+        List<CytoPlot> minis = new ArrayList<>();
         for (String s : samples) {
             EventData root = ws.data(s);
             boolean[] keep = new boolean[root.rows()];
@@ -1824,6 +1830,7 @@ public class GraphWindowController {
             mini.setData(sub);
             mini.setView(xch, ych, xs, ysc, type);
             for (PopNode chn : currentNode.children) mini.addGate(chn.gate);
+            minis.add(mini);
 
             Label cap = new Label(shortLabel(s) + "  (" + sub.rows() + ")");
             cap.setStyle("-fx-font-size:11; -fx-text-fill:#cfe;");
@@ -1849,6 +1856,7 @@ public class GraphWindowController {
         scene.getStylesheets().add(GraphWindowController.class
                 .getResource("/org/streamflow/ui/streamflow-dark.css").toExternalForm());
         stage.setScene(scene);
+        stage.setOnHidden(e -> minis.forEach(CytoPlot::dispose));
         stage.show();
         statusLabel.setText("Comparison strip: " + pop + " across " + samples.size()
                 + " sample(s). Double-click a thumbnail to open it.");

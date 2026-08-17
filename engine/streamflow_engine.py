@@ -372,7 +372,7 @@ def _render_plot(i, a):
     scale = float(a.get("scale", 1))
     w = int(a.get("width", 700)); h = int(a.get("height", 520))
     dpi = 100.0
-    ev = s.get_events(source="raw")
+    ev = s.get_events(source="comp" if STATE.get("comp_applied") else "raw")
     n = ev.shape[0]
     idx = np.random.choice(n, 20000, replace=False) if n > 20000 else np.arange(n)
     x = ev[idx, pnn.index(xch)]
@@ -427,44 +427,6 @@ def _render_plot(i, a):
             "xrange": [float(xr[0]), float(xr[1])],
             "yrange": [float(yr[0]), float(yr[1])],
             "plotbox_px": plotbox}
-
-# ---- statistics: per-sample count + MFI (FlowKit) -------------------------
-@command("compute_stats")
-def _compute_stats(i, a):
-    """Return per-sample statistics at the root ("All Events") level.
-    Gate-level stats (child populations) are computed natively in Java from the
-    WorkspaceModel gating tree + EventData; this command covers the Statistics module
-    which needs a cross-sample table with median MFI per fluorescence channel."""
-    import numpy as np
-    if not STATE["meta"]:
-        raise ValueError("Load data first.")
-
-    fluor_chans = [m for m in STATE["meta"][0]["pnn"]
-                   if not bool(__import__("re").search(r"FSC|SSC|Time|Width|Event", m, __import__("re").I))]
-    rows = []
-    total_files = len(STATE["files"])
-    for k, meta in enumerate(STATE["meta"]):
-        if is_cancelled(i): raise Cancelled()
-        send_progress(i, (k + 0.5) / total_files, "Stats for %s" % meta["name"])
-        s = _sample_by_name(meta["name"])
-        ev = np.asarray(s.get_events(source="raw"))
-        pnn = list(s.pnn_labels)
-        n_events = int(ev.shape[0])
-        mfi = {}
-        for ch in fluor_chans:
-            if ch in pnn:
-                col = pnn.index(ch)
-                vals = ev[:, col]
-                mfi[ch] = float(np.median(vals))
-        rows.append({
-            "sample": meta["name"],
-            "population": "All Events",
-            "count": n_events,
-            "percent_total": 100.0,
-            "mfi": mfi,
-        })
-    return {"channels": fluor_chans, "rows": rows}
-
 
 # ---- dim reduction: UMAP / t-SNE (umap-learn / openTSNE) ------------------
 
@@ -580,13 +542,15 @@ def _run_dimredux(i, a):
             else:
                 keep &= ~(v < float(thr))
 
+        cols = [pnn.index(c) for c in features]
+        keep &= np.all(np.isfinite(ev[:, cols]), axis=1)   # drop NaN/Inf marker values before pooling
+
         rows = np.flatnonzero(keep)
         if rows.size == 0:
             continue
         take = min(n_per_sample, rows.size)
         pick = np.sort(rows[rng.permutation(rows.size)[:take]])
 
-        cols = [pnn.index(c) for c in features]
         blocks.append(ev[np.ix_(pick, cols)].astype("float32"))
         sample_idx.extend([si] * take)
         row_idx.extend(int(r) for r in pick)
@@ -664,6 +628,14 @@ def _cluster_embedding(i, a):
     seed = int(a.get("seed", cache.get("seed", 42)))
     scale = str(a.get("scale", "zscore")).lower()
     X = cache["X"]
+    if not np.all(np.isfinite(X)):
+        # Do NOT silently filter rows here: `labels` below is consumed by Java under a strict
+        # positional 1:1 mapping onto this embedding's existing SampleIdx/RowIndex columns. Dropping
+        # non-finite rows would return a shorter `labels` array and desync every cluster assignment
+        # from the row it actually belongs to — a worse bug than the crash this replaces. This should
+        # only trigger for an embedding built before run_dimredux's own NaN/Inf filter existed.
+        raise ValueError("The cached embedding contains non-finite values — re-run Dimensionality "
+                          "Reduction (this workspace's embedding predates the NaN-filtering fix).")
 
     # Per-marker scaling BEFORE clustering. Without it, bright wide-range channels dominate the SOM /
     # kNN distances and clusters look wrong even with correct markers. Applied only to the clustering
@@ -715,6 +687,12 @@ def _cluster_embedding(i, a):
         import os as _os, importlib.util as _ilu
         mod_path = _os.path.join(_os.path.dirname(__file__), "vendor", "FlowGrid-master",
                                  "FlowGrid-master", "FlowGrid", "_FlowGrid.py")
+        if not _os.path.exists(mod_path):
+            # A missing vendor bundle isn't a package import — spec_from_file_location/exec_module would
+            # raise FileNotFoundError/AttributeError, not ImportError, which would bypass the "unavailable,
+            # fall back" handling below and crash the run instead. Normalize the signal here so every
+            # backend uniformly reports unavailability the same way.
+            raise ImportError("FlowGrid vendor bundle missing at %s" % mod_path)
         spec = _ilu.spec_from_file_location("sf_flowgrid", mod_path)
         m = _ilu.module_from_spec(spec)
         spec.loader.exec_module(m)
@@ -741,11 +719,14 @@ def _cluster_embedding(i, a):
     actual = method if method in backends else "flowsom"
     try:
         labels, probs = backends.get(actual, _flowsom)()
-    except Exception as exc:
+    except ImportError as exc:
+        # Only a missing package/vendor bundle falls back silently — any OTHER exception (NaN input,
+        # a singular covariance in BayesianGaussianMixture, etc.) is a real computation error and must
+        # propagate with its real message, not be mislabeled as "library unavailable".
         send_progress(i, 0.5, "%s unavailable (%s) — using FlowSOM." % (actual, type(exc).__name__))
         try:
             labels, probs = _flowsom(); actual = "flowsom"
-        except Exception:
+        except ImportError:
             labels, probs = _kmeans(); actual = "kmeans"
 
     labels = np.asarray(labels, dtype=int)
@@ -811,6 +792,25 @@ def _apply_matrix_transform(X, xtype, cofactor):
         return np.arcsinh(X / max(1e-9, cofactor)), "arcsinh"
 
 
+def _invert_matrix_transform(t_value, xtype, cofactor):
+    """Inverse of _apply_matrix_transform for a single scalar (a threshold cut-point). Closed-form for
+    arcsinh/none; FlowKit's LogicleTransform/LogTransform expose no analytic inverse, so logicle/log use
+    monotonic numeric inversion (both transforms are strictly increasing in x over the instrument range)."""
+    import numpy as np
+    xtype = str(xtype or "arcsinh").lower()
+    if xtype in ("none", "linear"):
+        return float(t_value)
+    if xtype == "arcsinh":
+        return float(np.sinh(t_value) * cofactor)
+    from scipy.optimize import brentq
+    def f(raw):
+        return float(_apply_matrix_transform(np.array([[raw]], dtype=float), xtype, cofactor)[0][0, 0]) - t_value
+    try:
+        return float(brentq(f, 0.0, 262144.0, xtol=1e-3))
+    except Exception:
+        return float(np.sinh(t_value) * cofactor)   # bracketing failed — fall back rather than crash
+
+
 #: Established threshold algorithms, all from scikit-image except our own Otsu (kept as the fallback
 #: so the engine still works if skimage is missing). They differ in what they assume:
 #:   otsu     - two classes of equal-ish spread; the default, and what FlowJo-adjacent tools use.
@@ -841,17 +841,22 @@ def _threshold_value(t, method):
 
 @command("positivity_thresholds")
 def _positivity_thresholds(i, a):
-    """Per-channel positive/negative split in arcsinh space, used to drop e.g. Live/Dead+ cells.
+    """Per-channel positive/negative split, used to drop e.g. Live/Dead+ cells.
 
-    Thresholds are DEFAULTS: the UI shows them and the user can edit or disable each one before they
-    are applied. `sources` lets a channel be thresholded off a specific control (unstained /
-    single-stain / FMO); otherwise the given `sample` is thresholded against itself. `method` picks
-    the algorithm; the response reports the one that actually ran."""
+    Honours the same transform as run_dimredux/run_clustering (`transform` arg, or whatever the
+    Transformation tab recorded) instead of assuming arcsinh(150) — a threshold computed under the
+    wrong transform lands on the wrong point of the distribution and disagrees with cluster medians
+    computed under the real one. Thresholds are DEFAULTS: the UI shows them and the user can edit or
+    disable each one before they are applied. `sources` lets a channel be thresholded off a specific
+    control (unstained / single-stain / FMO); otherwise the given `sample` is thresholded against
+    itself. `method` picks the algorithm; the response reports the one that actually ran."""
     import numpy as np
     if not STATE["meta"]:
         raise ValueError("Load data first.")
     a = a or {}
-    cofactor = float(a.get("cofactor", 150.0))
+    xform = a.get("transform") or _default_transform()
+    xtype = str(xform.get("type", "arcsinh")).lower()
+    cofactor = float(xform.get("cofactor") or 150.0)
     channels = a.get("channels") or []
     default_src = a.get("sample") or STATE["meta"][0]["name"]
     sources = a.get("sources") or {}
@@ -867,16 +872,18 @@ def _positivity_thresholds(i, a):
                 out.append({"channel": ch, "ok": False, "error": "not present in %s" % src})
                 continue
             v = np.asarray(s.get_events(source="raw"), dtype=float)[:, pnn.index(ch)]
-            t = np.arcsinh(v / max(1e-9, cofactor))
+            t, actual_xform = _apply_matrix_transform(v.reshape(-1, 1), xtype, cofactor)
+            t = t.ravel()
             thr_t, actual = _threshold_value(t, method)
-            thr = float(np.sinh(thr_t) * cofactor)
+            thr = _invert_matrix_transform(thr_t, actual_xform, cofactor)
             out.append({"channel": ch, "ok": True,
                         "threshold": thr, "threshold_t": thr_t,
-                        "method": actual, "requested": method, "source_sample": src,
+                        "method": actual, "requested": method, "transform": actual_xform,
+                        "source_sample": src,
                         "pct_positive": round(float(100.0 * np.mean(v >= thr)), 2)})
         except Exception as ex:
             out.append({"channel": ch, "ok": False, "error": "%s: %s" % (type(ex).__name__, ex)})
-    return {"cofactor": cofactor, "channels": out, "methods": list(THRESHOLD_METHODS)}
+    return {"cofactor": cofactor, "transform": xtype, "channels": out, "methods": list(THRESHOLD_METHODS)}
 
 
 # ---- clustering: FlowSOM / PhenoGraph -------------------------------------
@@ -912,10 +919,18 @@ def _run_clustering(i, a):
 
     actual = method   # what actually ran (so the title/legend never lies)
     if method == "phenograph":
-        import phenograph
-        labels, _graph, _Q = phenograph.cluster(X)
-        labels = np.asarray(labels)
-        n_clusters = int(labels.max() + 1)
+        try:
+            import phenograph
+            labels, _graph, _Q = phenograph.cluster(X)
+            labels = np.asarray(labels)
+            n_clusters = int(labels.max() + 1)
+        except ImportError as exc:
+            # Only a missing package falls back silently — any OTHER exception is a real computation
+            # error (bad input, etc.) and must propagate with its real message.
+            send_progress(i, 0.5, "PhenoGraph unavailable (%s) — using k-means." % type(exc).__name__)
+            from sklearn.cluster import MiniBatchKMeans
+            labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3).fit_predict(X)
+            n_clusters = k; actual = "kmeans"
     elif method == "flowsom":
         try:
             import anndata as ad
@@ -925,7 +940,7 @@ def _run_clustering(i, a):
             remap = {v: j for j, v in enumerate(sorted(set(raw)))}
             labels = np.array([remap[v] for v in raw], dtype=int)
             n_clusters = len(remap)
-        except Exception as exc:
+        except ImportError as exc:
             send_progress(i, 0.5, "FlowSOM unavailable (%s) — using k-means." % type(exc).__name__)
             from sklearn.cluster import MiniBatchKMeans
             labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3).fit_predict(X)
@@ -1109,6 +1124,7 @@ def _apply_compensation(i, a):
 
     total = len(STATE["meta"])
     applied = 0
+    failed = []
     for k, meta in enumerate(STATE["meta"]):
         if is_cancelled(i): raise Cancelled()
         send_progress(i, (k + 0.5) / total, "Applying to %s…" % meta["name"])
@@ -1137,8 +1153,9 @@ def _apply_compensation(i, a):
             applied += 1
         except Exception as exc:
             send_progress(i, (k + 1) / total, "Warning: %s — %s" % (meta["name"], exc))
+            failed.append(meta["name"])
 
-    return {"channels": channels, "applied": applied, "mode": mode}
+    return {"channels": channels, "applied": applied, "total": total, "mode": mode, "failed": failed}
 
 
 @command("comp_preview")
@@ -1417,6 +1434,7 @@ def _compute_spillover_from_controls(i, a):
     n = len(detectors)
     matrix = [[1.0 if r == c else 0.0 for c in range(n)] for r in range(n)]
     reports = []
+    fit_failures = []   # regression/huber coefficients that failed to fit and were zeroed instead
 
     for ri, ctrl in enumerate(controls):
         if is_cancelled(i):
@@ -1473,8 +1491,10 @@ def _compute_spillover_from_controls(i, a):
                         hr = HuberRegressor(fit_intercept=False, max_iter=200)
                         hr.fit(prim_adj[fm].reshape(-1, 1), other_adj[fm])
                         matrix[ri][ci] = round(float(hr.coef_[0]), 5)
-                except Exception:
+                except Exception as exc:
                     matrix[ri][ci] = 0.0
+                    fit_failures.append({"row": primary, "col": d,
+                                          "error": "%s: %s" % (type(exc).__name__, exc)})
         else:
             def neg_med(d):
                 if d in baseline:
@@ -1505,11 +1525,12 @@ def _compute_spillover_from_controls(i, a):
             "n_pos": n_pos, "n_neg": n_neg, "pct_pos": round(pct_pos, 2), "ok": bool(ok),
             "stain_index": stain_index,
             "hist": {"x": xmid.tolist(), "counts": counts.tolist()},
+            "fit_failures": [f for f in fit_failures if f["row"] == primary],
         })
 
     STATE["comp_matrix"] = {"channels": detectors, "matrix": matrix, "fk_matrix": None}
     return {"channels": detectors, "matrix": matrix, "controls": reports,
-            "scatter": {"x": fsc, "y": ssc}, "unstained": unstained}
+            "scatter": {"x": fsc, "y": ssc}, "unstained": unstained, "fit_failures": fit_failures}
 
 
 # ---- transformation ---------------------------------------------------------
@@ -2231,10 +2252,36 @@ def _run_stats_comparison(i, a):
     gate = a.get("gate", "population")
     paired = bool(a.get("paired", False))
     raw = a.get("groups") or {}
-    groups = {k: [float(v) for v in vals] for k, vals in raw.items() if len(vals) >= 2}
-    if len(groups) < 2:
-        raise ValueError("Need at least 2 groups with ≥2 values each. "
-                         "Assign samples to groups and make sure their %s frequencies are computed." % gate)
+
+    # A NaN input would otherwise silently yield p=nan (_stars(nan) reads as "ns" — a bad-input
+    # sample gets misreported as "not significant" instead of surfacing that it was excluded).
+    dropped = {}
+    if paired and len(raw) == 2:
+        # Filter with a JOINT mask so pairing/index correspondence survives — filtering each side
+        # independently could drop different indices from each group and silently mispair samples.
+        names_raw = list(raw.keys())
+        arr0 = np.asarray([float(v) for v in raw[names_raw[0]]], dtype=float)
+        arr1 = np.asarray([float(v) for v in raw[names_raw[1]]], dtype=float)
+        if arr0.size != arr1.size:
+            raise ValueError("Paired test requires equal group sizes (%d vs %d)." % (arr0.size, arr1.size))
+        joint = np.isfinite(arr0) & np.isfinite(arr1)
+        groups = {names_raw[0]: arr0[joint].tolist(), names_raw[1]: arr1[joint].tolist()}
+        if int(joint.sum()) < arr0.size:
+            dropped[names_raw[0]] = dropped[names_raw[1]] = int(arr0.size - joint.sum())
+        if int(joint.sum()) < 2:
+            raise ValueError("Need at least 2 paired values with both sides finite.")
+    else:
+        groups = {}
+        for k, vals in raw.items():
+            arr = np.asarray([float(v) for v in vals], dtype=float)
+            finite = arr[np.isfinite(arr)]
+            if finite.size >= 2:
+                groups[k] = finite.tolist()
+            if finite.size < arr.size:
+                dropped[k] = int(arr.size - finite.size)
+        if len(groups) < 2:
+            raise ValueError("Need at least 2 groups with ≥2 finite values each. "
+                             "Assign samples to groups and make sure their %s frequencies are computed." % gate)
 
     names = list(groups.keys())
     data = [np.asarray(groups[n], float) for n in names]
@@ -2261,7 +2308,8 @@ def _run_stats_comparison(i, a):
                    "values": [round(float(v), 4) for v in data[k].tolist()]}
                   for k in range(len(names))]
     return {"test": test, "p_value": round(float(p), 6),
-            "stars": _stars(p), "posthoc": posthoc, "groups": group_summ, "gate": gate}
+            "stars": _stars(p), "posthoc": posthoc, "groups": group_summ, "gate": gate,
+            "dropped": dropped}
 
 
 # ---- analysis A3: apoptosis (Annexin V / PI quadrant) ----------------------
@@ -2310,9 +2358,28 @@ def _run_apoptosis(i, a):
             mask &= _apply_gate_mask(ev_np, pnn, gate)
         events = events[mask]
 
-    ann_vals = events[annexin_ch].values.astype(float)
-    pi_vals  = events[pi_ch].values.astype(float)
-    n = len(ann_vals)
+    ann_vals_raw = events[annexin_ch].values.astype(float)
+    pi_vals_raw  = events[pi_ch].values.astype(float)
+    # A NaN/Inf event compares False on `>= threshold`, so it would otherwise silently land in the
+    # "live" (double-negative) bucket instead of being excluded — filter before counting, not just
+    # inside the threshold finder.
+    finite_mask = np.isfinite(ann_vals_raw) & np.isfinite(pi_vals_raw)
+    ann_vals_raw, pi_vals_raw = ann_vals_raw[finite_mask], pi_vals_raw[finite_mask]
+    n = len(ann_vals_raw)
+    if n < 100:
+        raise ValueError("Too few finite events in '%s'/'%s' for apoptosis analysis." % (annexin_ch, pi_ch))
+
+    # Valley-finding needs the SAME transform the rest of the app uses — a linear 256-bin histogram on
+    # raw fluorescence (spanning several decades) crams nearly all signal into the first few bins, so
+    # the live/dying valley is unreliable in raw space. Threshold is found in transformed space, then
+    # inverted back to raw so it lines up with the raw-space scatter/quadrant counts below.
+    xform = a.get("transform") or _default_transform()
+    xtype = str(xform.get("type", "arcsinh")).lower()
+    cofactor = float(xform.get("cofactor") or 150.0)
+    ann_vals, actual_xform = _apply_matrix_transform(ann_vals_raw.reshape(-1, 1), xtype, cofactor)
+    ann_vals = ann_vals.ravel()
+    pi_vals, _ = _apply_matrix_transform(pi_vals_raw.reshape(-1, 1), xtype, cofactor)
+    pi_vals = pi_vals.ravel()
 
     def _valley_threshold(vals, bins=256):
         """1-D valley between the two dominant populations; falls back to 95th %ile."""
@@ -2331,11 +2398,15 @@ def _run_apoptosis(i, a):
             return float(mids[valley_idx])
         return float(np.percentile(finite, 95))
 
-    ann_thresh = _valley_threshold(ann_vals)
-    pi_thresh  = _valley_threshold(pi_vals)
+    ann_thresh_t = _valley_threshold(ann_vals)
+    pi_thresh_t  = _valley_threshold(pi_vals)
+    # Invert back to RAW units: the scatter below plots ann_vals_raw/pi_vals_raw, so the threshold
+    # lines and pos/neg masks must be computed in that same raw space.
+    ann_thresh = _invert_matrix_transform(ann_thresh_t, actual_xform, cofactor)
+    pi_thresh  = _invert_matrix_transform(pi_thresh_t, actual_xform, cofactor)
 
-    ann_pos = ann_vals >= ann_thresh
-    pi_pos  = pi_vals  >= pi_thresh
+    ann_pos = ann_vals_raw >= ann_thresh
+    pi_pos  = pi_vals_raw  >= pi_thresh
 
     n_live     = int(np.sum(~ann_pos & ~pi_pos))
     n_early    = int(np.sum( ann_pos & ~pi_pos))
@@ -2353,8 +2424,8 @@ def _run_apoptosis(i, a):
     sub = min(n, 5000)
     rng = np.random.default_rng(0)
     idx = rng.choice(n, sub, replace=False)
-    ax_s = ann_vals[idx]
-    py_s = pi_vals[idx]
+    ax_s = ann_vals_raw[idx]
+    py_s = pi_vals_raw[idx]
 
     # colour by quadrant membership
     color_arr = np.where(
@@ -2518,22 +2589,35 @@ def _run_classifier(i, a):
     X_sc  = StandardScaler().fit_transform(X)
     n_comp = min(2, X_sc.shape[1], X_sc.shape[0] - 1)
     if n_comp < 1:
-        raise ValueError("Need ≥ 2 features and ≥ 3 samples for PCA.")
+        raise ValueError("Need at least 1 feature and 2 samples for PCA.")
     pca = PCA(n_components=n_comp)
     Z   = pca.fit_transform(X_sc)
     L   = pca.components_.T   # (n_feats, n_comp)
 
-    method     = "PCA"
-    importance = []
+    method       = "PCA"
+    importance   = []
+    oob_accuracy = None
     unique_grps = sorted(set(grp_lbl.values()))
     if len(unique_grps) >= 2:
         from sklearn.ensemble import RandomForestClassifier
-        y  = [grp_lbl.get(s, "?") for s in sample_names]
-        rf = RandomForestClassifier(n_estimators=200, random_state=0)
+        from sklearn.inspection import permutation_importance
+        y = [grp_lbl.get(s, "?") for s in sample_names]
+        grp_counts = {g: y.count(g) for g in unique_grps}
+        if min(grp_counts.values()) < 3:
+            raise ValueError("Need at least 3 samples per group for a Random Forest classification "
+                              "(smallest group has %d)." % min(grp_counts.values()))
+        # Unvalidated impurity importance on all-data fit was optimistically biased and gave no signal
+        # on whether group separation was real — OOB accuracy + permutation importance (held-out,
+        # unbiased toward high-cardinality/correlated features) fix both at once.
+        rf = RandomForestClassifier(n_estimators=200, random_state=0, oob_score=True, bootstrap=True)
         rf.fit(X_sc, y)
-        top = sorted(zip(feat_names, rf.feature_importances_), key=lambda x: -x[1])[:10]
+        oob = getattr(rf, "oob_score_", None)   # can be unavailable at very small n; degrade, don't crash
+        oob_accuracy = round(float(oob), 4) if oob is not None else None
+        perm = permutation_importance(rf, X_sc, y, n_repeats=30, random_state=0)
+        top = sorted(zip(feat_names, perm.importances_mean), key=lambda x: -x[1])[:10]
         importance = [{"feat": f, "value": round(float(v), 4)} for f, v in top]
-        method = "PCA + Random Forest"
+        method = ("PCA + Random Forest (OOB accuracy %.2f)" % oob_accuracy) if oob_accuracy is not None \
+            else "PCA + Random Forest"
 
     ve = pca.explained_variance_ratio_
     mag  = np.sqrt(np.sum(L[:, :n_comp] ** 2, axis=1))
@@ -2552,7 +2636,8 @@ def _run_classifier(i, a):
     return {"method": method, "components": comps_out, "loadings": loads_out,
             "importance": importance, "top_loading_indices": top8,
             "n_samples": len(sample_names), "n_features": len(feat_names),
-            "var_explained": [round(float(v), 4) for v in ve]}
+            "var_explained": [round(float(v), 4) for v in ve],
+            "oob_accuracy": oob_accuracy}
 
 
 # ---- export: GatingML 2.0 --------------------------------------------------

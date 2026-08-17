@@ -344,6 +344,10 @@ public class WorkstationController implements ContextAware {
             selectPreferred(overviewXCombo, channels, "FSC-A");
             selectPreferred(overviewYCombo, yOpts, "SSC-A");
         }
+        for (javafx.scene.Node n : overviewGrid.getChildren())
+            if (n instanceof javafx.scene.layout.VBox v && v.getChildren().size() > 1
+                    && v.getChildren().get(1) instanceof CytoPlot p)
+                p.dispose();
         overviewGrid.getChildren().clear();
         String xch = overviewXCombo != null && overviewXCombo.getValue() != null
                 ? overviewXCombo.getValue() : (channels.isEmpty() ? null : channels.get(0));

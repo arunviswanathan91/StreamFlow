@@ -139,6 +139,10 @@ public class StatComparisonController implements ContextAware, Refreshable {
         if (prevGate != null && gateNames.contains(prevGate)) gateCombo.setValue(prevGate);
         else if (!gateNames.isEmpty()) gateCombo.getSelectionModel().selectFirst();
         rebuildRows();
+        plotNames = null; plotValues = null; plotPosthoc = null; plotP = 0; plotStars = null;
+        if (boxCanvas != null)
+            boxCanvas.getGraphicsContext2D().clearRect(0, 0, boxCanvas.getWidth(), boxCanvas.getHeight());
+        copyButton.setDisable(true); exportButton.setDisable(true);
         if (gateNames.isEmpty())
             statusLabel.setText("No gates found. Draw at least one gate first.");
     }

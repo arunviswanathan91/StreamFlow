@@ -154,6 +154,21 @@ public class CytoPlot extends Region {
         Thread t = new Thread(r, "cyto-render"); t.setDaemon(true); return t;
     });
     private Future<?> renderTask;
+    private volatile boolean disposed = false;
+
+    /** Stop this plot's background render thread. Idempotent — safe to call more than once, and
+     *  safe to call on a plot that's mid-render. Every {@code new CytoPlot()} owns its own single-
+     *  thread executor that is never reclaimed otherwise, so any discarded/replaced plot MUST call
+     *  this or it leaks a daemon thread for the life of the process. */
+    public void dispose() {
+        if (disposed) return;
+        disposed = true;
+        if (renderDebounce != null) renderDebounce.stop();
+        if (renderTask != null) renderTask.cancel(true);
+        renderGen++;   // any in-flight task's captured gen can never match again, so its
+                       // Platform.runLater callback becomes a harmless no-op
+        renderExec.shutdownNow();
+    }
     private double[] histHeights;           // cached normalised histogram (0..1), null for 2D
     private double histMaxCount = 0;        // raw peak count of the current histogram (for Y-axis labels)
 
@@ -824,6 +839,7 @@ public class CytoPlot extends Region {
 
     /** Cancel any in-flight render and start a fresh one; FX thread stays free. */
     private void scheduleCompute() {
+        if (disposed) return;   // dropped/disposed plot — never submit to a shut-down executor
         recomputeRanges();   // done once here after the debounce, not on every invalidate() call
         if (renderTask != null) renderTask.cancel(true);
         final long gen = ++renderGen;

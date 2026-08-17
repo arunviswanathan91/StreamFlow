@@ -101,7 +101,12 @@ public final class EmbeddingRules {
                 String tag = tagOf == null ? e.getKey() : tagOf.apply(e.getKey());
                 pos.add((tag == null ? e.getKey() : tag) + "+");
             }
-        return pos.isEmpty() ? fallback : String.join(" ", pos);
+        // More than 2 simultaneous positives is very likely a boundary/doublet artifact, not a real
+        // phenotype — presenting it as a confident multi-positive name ("CD45+ CD8+ CD4+") reads as an
+        // impossible biological call. Cap it instead of asserting one.
+        if (pos.size() > 2) return "Ambiguous (" + pos.size() + ")";
+        if (pos.size() == 2) return "Mixed: " + String.join(" ", pos);
+        return pos.isEmpty() ? fallback : pos.get(0);
     }
 
     /**

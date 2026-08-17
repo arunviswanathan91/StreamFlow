@@ -125,9 +125,14 @@ public class TransformationController implements ContextAware, Refreshable {
             selected.forEach(arr::add);
         }
         statusLabel.setText("Applying " + methodCombo.getValue() + " transform…");
-        ctx.jobs().run(ctx.bridge().command("apply_transformation", args), r ->
-                statusLabel.setText("Transformed " + r.path("channels").size()
-                        + " channel(s) with " + r.path("method").asText() + "."));
+        ctx.jobs().run(ctx.bridge().command("apply_transformation", args), r -> {
+            statusLabel.setText("Transformed " + r.path("channels").size()
+                    + " channel(s) with " + r.path("method").asText() + ".");
+            // Reflect what the engine actually confirmed — the single source of truth every other
+            // analysis tab (Dim Reduction, Clustering, ...) reads instead of keeping its own default.
+            ctx.workspace().setActiveTransform(r.path("method").asText(methodCombo.getValue()),
+                    "arcsinh".equals(methodCombo.getValue()) ? cofactorSpinner.getValue() : 150.0);
+        });
     }
 
     private void setDisabled(boolean d) {

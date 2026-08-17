@@ -255,6 +255,13 @@ public class ExportController implements ContextAware, Refreshable {
         if (keepLay != null && ctx.workspace().sampleNames().contains(keepLay)) layoutSampleCombo.getSelectionModel().select(keepLay);
         else if (!ctx.workspace().sampleNames().isEmpty()) layoutSampleCombo.getSelectionModel().selectFirst();
         rebuildLayoutTree();
+
+        // ---- Data Export tab: the computed table describes the PREVIOUS workspace's data — drop it
+        // rather than let Copy/Save ship a table for samples that are no longer loaded.
+        rows.clear();
+        dataTable.getColumns().clear();
+        copyTsvButton.setDisable(true);
+        saveCsvButton.setDisable(true);
     }
 
     // ==== Layout Editor tab (drag-drop tiles + batch multi-page PDF) ===========
@@ -345,6 +352,10 @@ public class ExportController implements ContextAware, Refreshable {
     /** Render every blueprint tile for one sample onto a canvas, arranged in the Cols grid. Populations
      *  that don't exist in this sample are skipped. Returns the number of tiles placed. */
     private int renderTiles(String sample, Pane canvas, boolean interactive) {
+        for (javafx.scene.Node n : canvas.getChildren()) {
+            CytoPlot p = cellPlotMap.remove(n);
+            if (p != null) p.dispose();
+        }
         canvas.getChildren().clear();
         EventData root = ctx.workspace().data(sample);
         if (root == null) return 0;
@@ -369,6 +380,10 @@ public class ExportController implements ContextAware, Refreshable {
 
     @FXML private void onLayoutClear() {
         layoutTiles.clear();
+        for (javafx.scene.Node n : layoutCanvas.getChildren()) {
+            CytoPlot p = cellPlotMap.remove(n);
+            if (p != null) p.dispose();
+        }
         layoutCanvas.getChildren().clear();
         layoutStatusLabel.setText("Canvas cleared.");
     }
@@ -496,6 +511,7 @@ public class ExportController implements ContextAware, Refreshable {
         if (steps.isEmpty()) { info("No gates", "This sample has no gates to show."); return; }
 
         // Clear previous canvas content (panels + arrows), but keep user text boxes
+        for (VBox cell : gsCells) { CytoPlot p = cellPlotMap.get(cell); if (p != null) p.dispose(); }
         gsCanvas.getChildren().removeIf(n -> n.getUserData() instanceof String s &&
                 (s.startsWith("panel") || s.startsWith("arrow")));
         gsCells.clear();
@@ -867,6 +883,8 @@ public class ExportController implements ContextAware, Refreshable {
     }
 
     private void removeGsPanel(VBox cell) {
+        CytoPlot p = cellPlotMap.get(cell);
+        if (p != null) p.dispose();
         gsCanvas.getChildren().remove(cell);
         gsCells.remove(cell);
         cellPopMap.remove(cell);
@@ -1117,6 +1135,7 @@ public class ExportController implements ContextAware, Refreshable {
     }
 
     @FXML private void onGsClearCanvas() {
+        for (VBox cell : gsCells) { CytoPlot p = cellPlotMap.get(cell); if (p != null) p.dispose(); }
         gsCanvas.getChildren().clear();
         gsCells.clear(); cellPopMap.clear(); cellPlotMap.clear(); gsLinks.clear();
         textStyles.clear();
@@ -1409,6 +1428,8 @@ public class ExportController implements ContextAware, Refreshable {
             if (any) nSamples++;
         }
         rebuildColumns();
+        copyTsvButton.setDisable(rows.isEmpty());
+        saveCsvButton.setDisable(rows.isEmpty());
         dataStatusLabel.setText(rows.size() + " row(s) across " + nSamples + " sample(s). Copy TSV or Save CSV.");
         if (ctx.auditLog() != null) ctx.auditLog().add(AuditLog.Type.EXPORT, "",
                 "Data export: " + rows.size() + " rows, " + (headers.size() - 2) + " stat column(s)");

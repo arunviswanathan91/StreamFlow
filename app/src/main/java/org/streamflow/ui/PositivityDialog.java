@@ -304,6 +304,7 @@ public final class PositivityDialog {
         ok.disableProperty().bind(thrField.textProperty().isEmpty());
 
         Optional<ButtonType> res = dlg.showAndWait();
+        plot.dispose();
         if (res.isEmpty() || res.get() != ButtonType.OK) return Optional.empty();
         if (firstWithRole(rows, CompWizardController.ROLE_SINGLE) == null
                 || firstWithRole(rows, CompWizardController.ROLE_UNSTAINED) == null) return Optional.empty();

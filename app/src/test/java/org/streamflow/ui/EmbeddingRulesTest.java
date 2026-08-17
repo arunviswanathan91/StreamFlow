@@ -73,6 +73,23 @@ class EmbeddingRulesTest {
         assertEquals("Cluster", EmbeddingRules.nameCluster(none, List.of(), c -> c, "Cluster"));
     }
 
+    @Test void nameClusterUsesMixedPrefixForExactlyTwoPositives() {
+        Map<String, Boolean> calls = new java.util.LinkedHashMap<>();
+        calls.put("CD4", true);
+        calls.put("CD8", true);
+        calls.put("CD19", false);
+        assertEquals("Mixed: CD4+ CD8+", EmbeddingRules.nameCluster(calls, List.of(), c -> c, "Cluster"));
+    }
+
+    @Test void nameClusterCapsAtAmbiguousForThreeOrMorePositives() {
+        Map<String, Boolean> calls = new java.util.LinkedHashMap<>();
+        calls.put("CD3", true);
+        calls.put("CD4", true);
+        calls.put("CD8", true);
+        calls.put("CD19", true);
+        assertEquals("Ambiguous (4)", EmbeddingRules.nameCluster(calls, List.of(), c -> c, "Cluster"));
+    }
+
     @Test void andsItsClauses() {
         EventData d = data(new double[][]{
                 {0, 0,  1,  1},   // CD4+ FoxP3+
