@@ -310,6 +310,14 @@ public class DimReductionController implements ContextAware, Refreshable {
         return out;
     }
 
+    /** Stop the render thread of every facet tile currently in the preview grid, before discarding
+     *  them — CytoPlot owns a background executor that otherwise leaks on every rebuild. */
+    private void disposePreviewTiles() {
+        for (javafx.scene.Node n : previewGrid.getChildren())
+            if (n instanceof VBox v && !v.getChildren().isEmpty() && v.getChildren().get(0) instanceof CytoPlot p)
+                p.dispose();
+    }
+
     @FXML
     private void onToggleLightBg() {
         boolean on = lightBgToggle.isSelected();
@@ -356,17 +364,72 @@ public class DimReductionController implements ContextAware, Refreshable {
 
     @FXML private void onRefresh() { refreshFromWorkspace(); }
 
+    /** True when this controller still holds an embedding but the workspace no longer contains every
+     *  sample it was built from (dataset changed underneath it) — its gate row-indices would then point
+     *  into events that no longer exist. */
+    private boolean embeddingStale() {
+        if (embedding == null || embSamples.isEmpty()) return false;
+        return !ctx.workspace().sampleNames().containsAll(embSamples);
+    }
+
+    /** Drop the current embedding and every piece of state derived from it, so a dataset change never
+     *  leaves a ghost plot/gates on screen pointing at events that no longer exist. Rule definitions
+     *  ({@link #rules}) are user-authored and reusable across re-embeddings of the same biology, so they
+     *  are intentionally NOT cleared here — only embedding-derived state is. */
+    private void clearEmbeddingState() {
+        embedding = null;
+        embSamples = List.of();
+        embFeatures = List.of();
+        axisX = "UMAP 1"; axisY = "UMAP 2";
+        gateSeq = 0;
+        focusedSample = -1;
+        plot.clearGates();
+        plot.setData(null);
+        plot.clearColorByChannel();
+        plot.clearColorByPopulation();
+        for (CytoPlot p : comparePlots) p.dispose();
+        comparePlots.clear();
+        compareCaptions.clear();
+        comparisonBox.getChildren().clear();
+        comparisonBox.setVisible(false); comparisonBox.setManaged(false);
+        plot.setVisible(true); plot.setManaged(true);
+        disposePreviewTiles();
+        previewGrid.getChildren().clear();
+        colorByCombo.setItems(FXCollections.observableArrayList(COLOR_DENSITY));
+        colorByCombo.getSelectionModel().selectFirst();
+        suggestions.clear();
+        markerThresholds.clear();
+        popColoring = null;
+        legendPane.getChildren().clear();
+        legendScroll.setVisible(false); legendScroll.setManaged(false);
+        hiddenPops.clear();
+        hiddenPanels.clear();
+        refreshGateList();
+        setHasEmbedding(false);
+        statusLabel.setText("Workspace changed — the previous embedding no longer matches the loaded data. Run again.");
+    }
+
     @Override
     public void refreshFromWorkspace() {
         if (ctx == null) return;
         List<String> samples = new ArrayList<>(ctx.workspace().sampleNames());
         List<String> channels = new ArrayList<>(ctx.workspace().channelNames());
         if (samples.isEmpty() || channels.isEmpty()) {
+            if (embedding != null) clearEmbeddingState();
             statusLabel.setText("Load FCS first.");
             runButton.setDisable(true);
             return;
         }
         runButton.setDisable(false);
+        if (embeddingStale()) clearEmbeddingState();
+
+        // Seed the transform combo from the app-wide setting (Transformation tab) rather than a
+        // hardcoded default — this run's combo is a per-run OVERRIDE of that value, so it should start
+        // in sync with it instead of silently disagreeing until the user notices and re-picks it.
+        WorkspaceModel.TransformSpec t = ctx.workspace().activeTransform();
+        transformCombo.getSelectionModel().select(t.type());
+        double cof = t.cofactor();
+        cofactorField.setText(cof == Math.rint(cof) ? String.valueOf((long) cof) : String.valueOf(cof));
 
         // Markers: all channels, with scatter/Time de-selected by default — a proposal, not a rule.
         markerList.setItems(FXCollections.observableArrayList(channels));
@@ -448,6 +511,9 @@ public class DimReductionController implements ContextAware, Refreshable {
         ObjectNode args = JSON.createObjectNode();
         args.put("sample", controlCombo.getValue());
         args.putArray("channels").add(liveDeadCombo.getValue());
+        ObjectNode xf = args.putObject("transform");
+        xf.put("type", transformCombo.getValue());
+        xf.put("cofactor", parseOrDefault(cofactorField.getText(), 150.0));
         statusLabel.setText("Computing positivity threshold from " + controlCombo.getValue() + "…");
         ctx.jobs().run(ctx.bridge().command("positivity_thresholds", args), r -> {
             JsonNode c = r.path("channels").path(0);
@@ -511,12 +577,12 @@ public class DimReductionController implements ContextAware, Refreshable {
         args.put("method", methodCombo.getValue());
         args.put("n_per_sample", eventsSpinner.getValue());
         args.put("seed", seedSpinner.getValue());
-        // The transform chosen here IS the app-wide setting (no separate Transformation tab); pass it
-        // explicitly so this run uses exactly what the user sees, and persist it globally for Clustering.
+        // Per-run override: defaults to the Transformation tab's setting (seeded in refreshFromWorkspace),
+        // but the user can pick something else here for just this run — it does NOT overwrite the
+        // app-wide transform (that would silently clobber what the Transformation tab recorded).
         ObjectNode xf = args.putObject("transform");
         xf.put("type", transformCombo.getValue());
         xf.put("cofactor", parseOrDefault(cofactorField.getText(), 150.0));
-        applyGlobalTransform();
         ArrayNode farr = args.putArray("features");
         features.forEach(farr::add);
 
@@ -1092,6 +1158,9 @@ public class DimReductionController implements ContextAware, Refreshable {
                 ObjectNode args = JSON.createObjectNode();
                 args.put("sample", controlCombo.getValue());
                 args.putArray("channels").add(ch);
+                ObjectNode xf = args.putObject("transform");
+                xf.put("type", transformCombo.getValue());
+                xf.put("cofactor", parseOrDefault(cofactorField.getText(), 150.0));
                 ctx.jobs().run(ctx.bridge().command("positivity_thresholds", args), r -> {
                     JsonNode c = r.path("channels").path(0);
                     if (c.path("ok").asBoolean(false)) tf.setText(String.format("%.1f", c.path("threshold").asDouble()));
@@ -1131,6 +1200,10 @@ public class DimReductionController implements ContextAware, Refreshable {
             if (v != null) markerThresholds.put(ch, v);
         });
         statusLabel.setText(markerThresholds.size() + " marker threshold(s) set.");
+        // A user who just set thresholds almost certainly wants intensity-based naming to use them —
+        // leaving naming on Z-score silently ignores what they just configured.
+        if (!markerThresholds.isEmpty() && !NAME_THRESHOLD.equals(namingCombo.getValue()))
+            namingCombo.getSelectionModel().select(NAME_THRESHOLD);
         if (COLOR_RULES.equals(colorByCombo.getValue())) applyColorBy();
     }
 
@@ -1145,17 +1218,6 @@ public class DimReductionController implements ContextAware, Refreshable {
     private static double parseOrDefault(String s, double dflt) {
         try { return s == null || s.isBlank() ? dflt : Double.parseDouble(s.trim()); }
         catch (NumberFormatException e) { return dflt; }
-    }
-
-    /** Persist the chosen transform globally (apply_transformation) so Clustering reads the same one. */
-    private void applyGlobalTransform() {
-        if (ctx == null) return;
-        String m = transformCombo.getValue();
-        if ("none".equals(m)) return;   // apply_transformation only records logicle/arcsinh/log
-        ObjectNode a = JSON.createObjectNode();
-        a.put("method", m);
-        a.put("cofactor", parseOrDefault(cofactorField.getText(), 150.0));
-        ctx.jobs().run(ctx.bridge().command("apply_transformation", a), r -> {});
     }
 
     private static Double parseOrNull(String s) {
@@ -1823,6 +1885,7 @@ public class DimReductionController implements ContextAware, Refreshable {
      */
     private void rebuildMainView() {
         boolean byGroup = groupToggle.isSelected() && embedding != null;
+        for (CytoPlot p : comparePlots) p.dispose();
         comparePlots.clear();
         compareCaptions.clear();
         comparisonBox.getChildren().clear();
@@ -1923,11 +1986,12 @@ public class DimReductionController implements ContextAware, Refreshable {
     private void onToggleGrid() {
         boolean on = gridToggle.isSelected();
         gridScroll.setVisible(on); gridScroll.setManaged(on);
-        if (on) buildPreviewGrid(); else previewGrid.getChildren().clear();
+        if (on) buildPreviewGrid(); else { disposePreviewTiles(); previewGrid.getChildren().clear(); }
     }
 
     /** Facet the SAME embedding per sample (or per group): identical axes, so tiles are comparable. */
     private void buildPreviewGrid() {
+        disposePreviewTiles();
         previewGrid.getChildren().clear();
         if (embedding == null) return;
         int cs = embedding.indexOf("SampleIdx");

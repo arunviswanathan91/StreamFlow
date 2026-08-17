@@ -36,6 +36,7 @@ import java.util.function.Consumer;
  * from FXML and handed an {@link AppContext} once the engine is ready.
  */
 public class MainController implements JobRunner {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(MainController.class);
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -632,7 +633,15 @@ public class MainController implements JobRunner {
     private void refreshModules() {
         for (Object c : controllers.values()) {
             if (c instanceof Refreshable r) {
-                try { r.refreshFromWorkspace(); } catch (Exception ignored) {}
+                try {
+                    r.refreshFromWorkspace();
+                } catch (Exception ex) {
+                    // A silent swallow here means a bug in ANY module's refresh (e.g. a future
+                    // clearEmbeddingState()-style fix) leaves that tab permanently stale with zero
+                    // visible symptom during manual QA — log and surface it instead.
+                    log.error("refreshFromWorkspace failed for {}", c.getClass().getSimpleName(), ex);
+                    status("Warning: " + c.getClass().getSimpleName() + " failed to refresh — " + ex.getMessage());
+                }
             }
         }
     }

@@ -48,6 +48,10 @@ public class PluginsController implements ContextAware, Refreshable {
     private Task<JsonNode> current;
     private int[] lastKeptIndices;
     private String lastPluginName;
+    /** The EventData that lastKeptIndices was computed against — re-checked in onAddPopulation() so a
+     *  workspace reload that reuses the same sample name never applies stale row indices to it. */
+    private EventData lastKeptSourceData;
+    private String lastKeptSample;
 
     @FXML
     public void initialize() {
@@ -76,6 +80,13 @@ public class PluginsController implements ContextAware, Refreshable {
         sampleCombo.setItems(FXCollections.observableArrayList(ctx.workspace().sampleNames()));
         if (keep != null && sampleCombo.getItems().contains(keep)) sampleCombo.getSelectionModel().select(keep);
         else if (!sampleCombo.getItems().isEmpty()) sampleCombo.getSelectionModel().selectFirst();
+        // A workspace change can reload a differently-sized dataset under the SAME sample name — a stale
+        // kept_indices from the previous run would then apply to the wrong rows. onAddPopulation() also
+        // re-checks EventData identity as defense in depth, but drop the obviously-stale cache here too.
+        lastKeptIndices = null;
+        lastPluginName = null;
+        lastKeptSourceData = null;
+        addPopButton.setDisable(true);
     }
 
     @FXML private void onRefresh() { reloadPlugins(); }
@@ -165,6 +176,8 @@ public class PluginsController implements ContextAware, Refreshable {
             JsonNode resp = task.getValue();
             runButton.setDisable(false); cancelButton.setDisable(true); current = null;
             lastKeptIndices = PluginRunner.indices(resp, "kept_indices");
+            lastKeptSample = sampleCombo.getValue();
+            lastKeptSourceData = ctx.workspace().data(lastKeptSample);
             // Record the run so it appears in the Analysis Log and the generated Methods paragraph.
             ctx.auditLog().add(AuditLog.Type.ANALYSIS, sampleCombo.getValue(), auditDetail(m, resp));
             outputArea.appendText("\n--- result ---\n" + resp.toPrettyString().lines()
@@ -202,6 +215,12 @@ public class PluginsController implements ContextAware, Refreshable {
     private void onAddPopulation() {
         String sample = sampleCombo.getValue();
         if (ctx == null || sample == null || lastKeptIndices == null || lastKeptIndices.length == 0) return;
+        // Defense in depth against a same-named sample from a different (reloaded) workspace: the row
+        // indices were computed against a specific EventData instance, not just a sample NAME.
+        if (!sample.equals(lastKeptSample) || ctx.workspace().data(sample) != lastKeptSourceData) {
+            statusLabel.setText("The workspace changed since this plugin ran — re-run it before adding a population.");
+            return;
+        }
         PopNode node = addPopulationFor(sample, lastKeptIndices, lastPluginName);
         addPopButton.setDisable(true);
         statusLabel.setText("Added '" + node.name() + "' to " + sample + " ("

@@ -138,6 +138,7 @@ public class CrossSampleController implements ContextAware, Refreshable {
     @Override
     public void refreshFromWorkspace() {
         syncSampleSelList();
+        clearViews("Workspace changed — tick samples and click Compute again.");
         refreshHints();
     }
     @FXML private void onSelectAll()  { for (SampleSel s : sampleSel) s.use.set(true);  sampleSelectTable.refresh(); }

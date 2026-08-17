@@ -85,7 +85,15 @@ public class ClusteringController implements ContextAware, Refreshable {
     @FXML private void onRefresh() { refreshSamples(); }
 
     @Override
-    public void refreshFromWorkspace() { refreshSamples(); refreshHints(); }
+    public void refreshFromWorkspace() {
+        refreshSamples();
+        refreshHints();
+        plotChannels = null; plotMedians = null; plotK = 0;
+        clusterList.getItems().clear();
+        if (heatmapCanvas != null)
+            heatmapCanvas.getGraphicsContext2D().clearRect(0, 0, heatmapCanvas.getWidth(), heatmapCanvas.getHeight());
+        copyButton.setDisable(true); exportButton.setDisable(true);
+    }
 
     private void refreshSamples() {
         if (ctx == null) return;
@@ -120,7 +128,13 @@ public class ClusteringController implements ContextAware, Refreshable {
         a.put("sample", sampleCombo.getValue());
         a.put("k", kSpinner.getValue());
         a.put("n_events", eventsSpinner.getValue());
-        statusLabel.setText("Clustering with " + methodCombo.getValue() + "…");
+        // Read the single source of truth (Transformation tab) instead of silently relying on the
+        // engine's own server-side fallback — the choice should be visible, not just implicit.
+        WorkspaceModel.TransformSpec t = ctx.workspace().activeTransform();
+        ObjectNode xf = a.putObject("transform");
+        xf.put("type", t.type());
+        xf.put("cofactor", t.cofactor());
+        statusLabel.setText("Clustering with " + methodCombo.getValue() + " (" + t.type() + " transform)…");
         ctx.jobs().run(ctx.bridge().command("run_clustering", a), this::showResult);
     }
 

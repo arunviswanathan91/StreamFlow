@@ -109,7 +109,26 @@ public class SetupController implements ContextAware {
             });
             return row;
         });
+        experimentField.setOnAction(e -> commitExperimentName());              // Enter
+        experimentField.focusedProperty().addListener((o, was, isNow) -> {
+            if (!isNow) commitExperimentName();                                // focus loss
+        });
         setControlsDisabled(true); // until the engine is ready
+    }
+
+    private String lastCommittedExperimentName;
+
+    /** Send the edited experiment name to the engine. Skips a redundant round-trip when the text
+     *  didn't actually change (focus-loss fires even when the user just tabbed through). */
+    private void commitExperimentName() {
+        if (ctx == null) return;
+        String name = experimentField.getText();
+        if (name == null || name.isBlank() || name.equals(lastCommittedExperimentName)) return;
+        lastCommittedExperimentName = name.trim();
+        ObjectNode args = JSON.createObjectNode();
+        args.put("name", name.trim());
+        ctx.jobs().run(ctx.bridge().command("set_experiment_name", args),
+                r -> summaryLabel.setText("Experiment renamed to \"" + r.path("experiment").asText() + "\"."));
     }
 
     @Override
@@ -147,7 +166,9 @@ public class SetupController implements ContextAware {
     public void populate(JsonNode summary) {
         if (summary == null) return;
         if (summary.hasNonNull("experiment")) {
-            experimentField.setText(summary.path("experiment").asText());
+            String name = summary.path("experiment").asText();
+            experimentField.setText(name);
+            lastCommittedExperimentName = name;   // engine-confirmed value — not a pending user edit
         }
         samples.clear();
         for (JsonNode s : summary.path("samples")) {

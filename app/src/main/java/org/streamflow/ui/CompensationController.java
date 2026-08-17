@@ -105,7 +105,19 @@ public class CompensationController implements ContextAware, Refreshable {
         });
     }
 
-    @Override public void refreshFromWorkspace() { refreshSamples(); }
+    @Override
+    public void refreshFromWorkspace() {
+        refreshSamples();
+        // A workspace change can bring in a differently-channeled panel; without this, matrixArgs()
+        // could ship apply_compensation a stale channel/coefficient set built for the OLD panel.
+        currentChannels.clear();
+        rows.clear();
+        matrixTable.getColumns().clear();
+        heatmap.clear();
+        applyButton.setDisable(true);
+        previewButton.setDisable(true);
+        residualButton.setDisable(true);
+    }
 
     @FXML
     private void onExtract() {
@@ -134,10 +146,20 @@ public class CompensationController implements ContextAware, Refreshable {
         final ObjectNode finalArgs = args;
         ctx.jobs().run(ctx.bridge().command("apply_compensation", finalArgs), r -> {
             ctx.workspace().compApplied().set(true);
-            statusLabel.setText("Compensation applied to "
+            int applied = r.path("applied").asInt();
+            int total = r.path("total").asInt(applied);
+            StringBuilder msg = new StringBuilder("Compensation applied to "
                     + r.path("channels").size() + " channels"
                     + ("nnls".equals(r.path("mode").asText()) ? " (NNLS)" : "")
-                    + ". Use Preview to verify, then run the residual diagnostic.");
+                    + " — " + applied + "/" + total + " sample(s).");
+            if (applied < total) {
+                List<String> failed = new ArrayList<>();
+                r.path("failed").forEach(n -> failed.add(n.asText()));
+                msg.append("  WARNING: failed on ").append(String.join(", ", failed)).append(".");
+                ctx.auditLog().add(AuditLog.Type.COMPENSATION, "", msg.toString());
+            }
+            msg.append(" Use Preview to verify, then run the residual diagnostic.");
+            statusLabel.setText(msg.toString());
         });
     }
 
@@ -208,6 +230,9 @@ public class CompensationController implements ContextAware, Refreshable {
         if (channels.size() >= 1) xCombo.getSelectionModel().select(0);
         if (channels.size() >= 2) yCombo.getSelectionModel().select(1);
         refreshSamples();   // data is loaded by now → populate the before/after sample picker
+        applyButton.setDisable(false);
+        previewButton.setDisable(false);
+        residualButton.setDisable(false);
 
         statusLabel.setText(channels.size() + "×" + channels.size()
                 + " spillover matrix — edit in the heatmap or table, Preview a pair, then Apply.");

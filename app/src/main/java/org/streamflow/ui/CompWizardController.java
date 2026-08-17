@@ -118,6 +118,7 @@ public class CompWizardController {
             stage.setScene(scene);
             AppIcons.apply(stage);
             c.stage = stage;
+            stage.setOnHidden(e -> c.scatterPlot.dispose());
             c.load();
             stage.show();
         } catch (Exception e) {
@@ -430,9 +431,12 @@ public class CompWizardController {
         }
 
         useButton.setDisable(channels.isEmpty());
+        int fitFailures = result.path("fit_failures").size();
         statusLabel.setText(channels.size() + "×" + channels.size() + " spillover computed from "
                 + result.path("controls").size() + " control(s)"
                 + (warnings > 0 ? " — " + warnings + " with weak positive separation; review before using." : ".")
+                + (fitFailures > 0 ? " " + fitFailures + " coefficient(s) failed to fit and were set to 0 — "
+                        + "review the matrix before using." : "")
                 + " Click 'Use this matrix' to load it into the Compensation editor.");
     }
 

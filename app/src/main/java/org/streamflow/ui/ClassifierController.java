@@ -139,6 +139,10 @@ public class ClassifierController implements ContextAware, Refreshable {
     public void refreshFromWorkspace() {
         rebuildSamples();
         refreshHints();
+        lastResult = null;
+        if (biplotCanvas != null)
+            biplotCanvas.getGraphicsContext2D().clearRect(0, 0, biplotCanvas.getWidth(), biplotCanvas.getHeight());
+        copyButton.setDisable(true); exportButton.setDisable(true);
     }
 
     private void rebuildSamples() {

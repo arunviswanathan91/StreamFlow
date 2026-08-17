@@ -34,6 +34,15 @@ public final class WorkspaceModel {
     // True once Apply Compensation has succeeded in this session.
     private final BooleanProperty compApplied = new SimpleBooleanProperty(false);
 
+    /** The app-wide transform (type + cofactor) as last confirmed by the engine via
+     *  {@code apply_transformation}. Single source of truth: the Transformation tab writes it; every
+     *  other analysis tab (Dim Reduction, Clustering, ...) reads it instead of keeping its own default. */
+    public record TransformSpec(String type, double cofactor) {
+        public static final TransformSpec DEFAULT = new TransformSpec("logicle", 150.0);
+    }
+    private final javafx.beans.property.ObjectProperty<TransformSpec> activeTransform =
+            new javafx.beans.property.SimpleObjectProperty<>(TransformSpec.DEFAULT);
+
     // Observable sample list — populated by SetupController after load_fcs completes.
     private final ObservableList<String> allSamples = FXCollections.observableArrayList();
     // Channel names for the loaded experiment (all samples share one panel).
@@ -47,6 +56,15 @@ public final class WorkspaceModel {
 
     /** Observable flag — true once Apply Compensation succeeds. Bind UI badges to this. */
     public BooleanProperty compApplied() { return compApplied; }
+
+    // ---- transform state (single source of truth) ----------------------------
+
+    /** Observable property for the app-wide transform — bind a status label to this. */
+    public javafx.beans.property.ObjectProperty<TransformSpec> activeTransformProperty() { return activeTransform; }
+    public TransformSpec activeTransform() { return activeTransform.get(); }
+    public void setActiveTransform(String type, double cofactor) {
+        activeTransform.set(new TransformSpec(type, cofactor));
+    }
 
     // ---- sample + channel registry (from SetupController) --------------------
 
@@ -149,6 +167,10 @@ public final class WorkspaceModel {
 
     /** Register a listener called (on the FX thread) when any gating tree changes. */
     public void addTreeChangeListener(Runnable listener) { treeListeners.add(listener); }
+
+    /** Unregister a listener previously added via {@link #addTreeChangeListener} — call when a
+     *  spawned window (e.g. a Graph Window) closes, or it leaks for the app's remaining lifetime. */
+    public void removeTreeChangeListener(Runnable listener) { treeListeners.remove(listener); }
 
     /** Notify all registered listeners that a gating tree has changed. */
     public void notifyTreeChanged() {

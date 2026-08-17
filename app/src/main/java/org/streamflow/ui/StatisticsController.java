@@ -40,6 +40,8 @@ import java.util.Set;
  */
 public class StatisticsController implements ContextAware, Refreshable {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(StatisticsController.class);
+
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Display name -> {@link StatKeys} id, for the per-channel columns. */
@@ -98,7 +100,13 @@ public class StatisticsController implements ContextAware, Refreshable {
 
     @FXML
     private void onRefresh() { refreshPopulations(); }
-    @Override public void refreshFromWorkspace() { refreshPopulations(); }
+    @Override
+    public void refreshFromWorkspace() {
+        refreshPopulations();
+        rows.clear();
+        channels.clear();
+        exportButton.setDisable(true);
+    }
 
     private void refreshPopulations() {
         if (ctx == null) return;
@@ -165,7 +173,11 @@ public class StatisticsController implements ContextAware, Refreshable {
         String sample = samples.get(i);
         statusLabel.setText("Computing " + (i + 1) + "/" + samples.size() + " — " + sample + "…");
         ensureData(sample, () -> {
-            try { computeSample(sample); } catch (Exception ignored) {}
+            try { computeSample(sample); }
+            catch (Exception ex) {
+                log.warn("computeSample failed for {}", sample, ex);
+                statusLabel.setText("Warning: could not compute '" + sample + "' — " + ex.getMessage());
+            }
             computeNext(samples, i + 1);
         });
     }
@@ -236,6 +248,7 @@ public class StatisticsController implements ContextAware, Refreshable {
             cols.add(col);
         }
         table.getColumns().setAll(cols);
+        exportButton.setDisable(rows.isEmpty());
         statusLabel.setText(rows.size() + " row(s) × " + channels.size() + " channel(s), reporting "
                 + statLabel() + (StatKeys.GEOMEAN.equals(statId)
                     ? ". Geometric mean excludes events at or below zero." : "."));
@@ -316,7 +329,9 @@ public class StatisticsController implements ContextAware, Refreshable {
                 EventData d = EventData.read(bin, chans, r.path("rows").asInt(), r.path("cols").asInt());
                 try { Files.deleteIfExists(bin); } catch (Exception ignored) {}
                 ctx.workspace().putData(sample, d);
-            } catch (Exception ignored) {}
+            } catch (Exception ex) {
+                log.warn("Failed to load events for {}", sample, ex);
+            }
             onReady.run();
         });
     }
