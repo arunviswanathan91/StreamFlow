@@ -34,8 +34,9 @@ fn frame(app: &mut App, ctx: &egui::Context) -> egui::FullOutput {
 
 /// One frame with events; the clock advances so egui can recognise double clicks.
 fn pointer(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
+    let now = ctx.input(|i| i.time);
     let t = CLOCK.with(|c| {
-        c.set(c.get() + 0.04);
+        c.set((c.get() + 0.04).max(now + 0.01)); // plain frames advance egui's clock too; never go backwards
         c.get()
     });
     let input = egui::RawInput { screen_rect: Some(screen()), time: Some(t), events, ..Default::default() };
@@ -751,4 +752,102 @@ fn kinetic_screen_uses_the_real_time_channel_and_names_the_samples_it_skips() {
     app.cmp.restrict = vec!["Nope".into()];
     app.run_kinetics();
     assert!(app.cmp.k_result.is_none());
+}
+
+// ---- moving and resizing gates -------------------------------------------------------------------------------
+
+fn gate_of(app: &App, node: usize) -> Gate {
+    match app.session.tree(0).kind(node).unwrap() {
+        NodeKind::Gate(g) => g.clone(),
+        k => panic!("{k:?}"),
+    }
+}
+
+/// Press at `a`, drag through a few intermediate points to `b`, release.
+fn drag(app: &mut App, ctx: &egui::Context, a: Pos2, b: Pos2) {
+    pointer(app, ctx, vec![egui::Event::PointerMoved(a)]);
+    pointer(app, ctx, vec![button(a, true)]);
+    for k in 1..=4 {
+        let t = k as f32 / 4.0;
+        pointer(app, ctx, vec![egui::Event::PointerMoved(Pos2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))]);
+    }
+    pointer(app, ctx, vec![button(b, false)]);
+    frame(app, ctx);
+}
+
+#[test]
+fn a_gate_is_moved_and_resized_with_the_pointer_and_each_edit_is_one_undo_step() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    let range = app.ws.graphs[&w].range.unwrap();
+    let map = Mapper { rect: plot, range };
+    let at = |fx: f32, fy: f32| Pos2::new(plot.left() + fx * plot.width(), plot.top() + fy * plot.height());
+    app.session.window_mut(w).unwrap().tool = Tool::Rectangle;
+    settle(&mut app, &ctx);
+    drag(&mut app, &ctx, at(0.25, 0.75), at(0.60, 0.30));
+    let kid = children(&app)[0];
+    let g0 = gate_of(&app, kid);
+    let n0 = app.session.count(0, kid);
+    app.session.window_mut(w).unwrap().tool = Tool::Pointer;
+    settle(&mut app, &ctx);
+    let undo_depth = |app: &App| (0..50).filter(|_| false).count() + usize::from(app.session.can_undo(0));
+    assert_eq!(undo_depth(&app), 1);
+
+    // ---- move: grab the body and drag right and up
+    let (dx_px, dy_px) = (0.20 * plot.width(), -0.10 * plot.height());
+    let centre = at(0.425, 0.525);
+    drag(&mut app, &ctx, centre, Pos2::new(centre.x + dx_px, centre.y + dy_px));
+    let g1 = gate_of(&app, kid);
+    let (ddx, ddy) = (map.to_data(Pos2::new(centre.x + dx_px, centre.y + dy_px)).0 - map.to_data(centre).0, map.to_data(Pos2::new(centre.x + dx_px, centre.y + dy_px)).1 - map.to_data(centre).1);
+    for (a, b) in g1.xs.iter().zip(&g0.xs) {
+        assert!((a - b - ddx).abs() < 1e-6 * ddx.abs().max(1.0), "x shifted by the drag: {:?} -> {:?}", g0.xs, g1.xs);
+    }
+    for (a, b) in g1.ys.iter().zip(&g0.ys) {
+        assert!((a - b - ddy).abs() < 1e-6 * ddy.abs().max(1.0), "y shifted by the drag: {:?} -> {:?}", g0.ys, g1.ys);
+    }
+    assert!(app.status.contains("events"), "{}", app.status);
+    assert_ne!(app.session.count(0, kid), 0);
+    // the view did not pan while a gate was being moved
+    assert_eq!(app.ws.graphs[&w].range.unwrap(), range, "dragging a gate must not pan the plot");
+
+    // ---- resize: drag the right edge handle outward
+    let g1b = gate_of(&app, kid);
+    let (x1, ym) = (g1b.xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max), (g1b.ys[0] + g1b.ys[1]) / 2.0);
+    let handle = map.to_screen((x1, ym));
+    drag(&mut app, &ctx, handle, Pos2::new(handle.x + 0.15 * plot.width(), handle.y));
+    let g2 = gate_of(&app, kid);
+    let (old_w, new_w) = (g1b.xs[1].max(g1b.xs[0]) - g1b.xs[0].min(g1b.xs[1]), g2.xs[1] - g2.xs[0]);
+    assert!(new_w > old_w * 1.3, "width grew from {old_w} to {new_w}");
+    assert!((g2.xs[0] - g1b.xs[0].min(g1b.xs[1])).abs() < 1e-9, "the left edge stayed put");
+    assert_eq!(g2.ys, g1b.ys, "a vertical edge does not touch y");
+
+    // ---- each edit is one undo step, and undo restores the exact gate
+    assert!(app.session.undo(0));
+    assert_eq!(gate_of(&app, kid), g1b);
+    assert!(app.session.undo(0));
+    assert_eq!(gate_of(&app, kid), g0);
+    assert_eq!(app.session.count(0, kid), n0);
+    assert!(app.session.redo(0) && app.session.redo(0));
+    assert_eq!(gate_of(&app, kid), g2);
+
+    // ---- Esc cancels a drag in progress
+    let before = gate_of(&app, kid);
+    let c = map.to_screen(((before.xs[0] + before.xs[1]) / 2.0, (before.ys[0] + before.ys[1]) / 2.0));
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(c)]);
+    pointer(&mut app, &ctx, vec![button(c, true)]);
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(Pos2::new(c.x + 60.0, c.y))]);
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(Pos2::new(c.x + 90.0, c.y))]);
+    pointer(&mut app, &ctx, vec![key(egui::Key::Escape, false, false)]);
+    pointer(&mut app, &ctx, vec![button(Pos2::new(c.x + 90.0, c.y), false)]);
+    frame(&mut app, &ctx);
+    assert_eq!(gate_of(&app, kid), before, "Esc abandons the move");
+
+    // ---- dragging empty space still pans
+    let empty = at(0.9, 0.1);
+    let r0 = app.ws.graphs[&w].range.unwrap();
+    drag(&mut app, &ctx, empty, Pos2::new(empty.x - 80.0, empty.y + 40.0));
+    let r1 = app.ws.graphs[&w].range.unwrap();
+    assert!(r1.x0 > r0.x0, "the plot panned: {r0:?} -> {r1:?}");
+    assert_eq!(gate_of(&app, kid), before, "the gate was not touched by a pan");
 }

@@ -14,7 +14,7 @@
 //! * A node that cannot be evaluated (missing channel, dangling Boolean reference) becomes an *empty
 //!   population plus a warning*; it never aborts the evaluation of its siblings (BUG-01).
 
-use crate::gate::{EventView, Gate, GateError};
+use crate::gate::{EventView, Gate, GateError, GateKind};
 use crate::mask::Mask;
 use std::fmt;
 
@@ -318,6 +318,27 @@ impl GateTree {
             self.remove(old)?;
         }
         self.add_gate(parent, name, gate)
+    }
+
+    /// Replace the geometry of an existing gate in place (move / resize). The name, the children and the place in
+    /// the tree are kept, so populations gated below it stay attached. The shape family, channels and scales must
+    /// not change (that would be a different gate); the new coordinates are validated like a new gate's.
+    pub fn set_gate(&mut self, id: NodeId, gate: Gate) -> Result<(), TreeError> {
+        let old = match &self.node(id)?.kind {
+            NodeKind::Gate(g) => g.clone(),
+            _ => return Err(TreeError::BadExpression("only a gate has geometry to edit".into())),
+        };
+        if std::mem::discriminant(&old.kind) != std::mem::discriminant(&gate.kind) || old.x_chan != gate.x_chan || old.y_chan != gate.y_chan || old.x_scale != gate.x_scale || old.y_scale != gate.y_scale {
+            return Err(TreeError::BadExpression("an edit may move or resize a gate, not change its type, channels or scales".into()));
+        }
+        if !matches!(gate.kind, GateKind::Indexed(_)) {
+            Gate::new(gate.kind.clone(), &gate.x_chan, gate.y_chan.as_deref(), gate.xs.clone(), gate.ys.clone()).map_err(TreeError::Gate)?;
+            if !gate.angle.is_finite() {
+                return Err(TreeError::Gate(GateError::Invalid("ellipse angle must be finite".into())));
+            }
+        }
+        self.nodes[id].kind = NodeKind::Gate(gate);
+        Ok(())
     }
 
     /// Remove a population and everything below it. The root cannot be removed. Ids are not reused.

@@ -4,6 +4,7 @@ use super::{theme, workstation::Tab, App};
 use crate::axis::ticks;
 use crate::density::{bin, histogram, render, render_dots, PlotKind, Range};
 use crate::drawing::{Drawing, Shape, Tool};
+use crate::gate_edit::{self, Handle, Side};
 use crate::session::{default_scale, GraphWindow};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions};
 use sf_core::scale::ScaleSpec;
@@ -64,11 +65,23 @@ pub struct GraphUi {
     summary: Option<(u64, Vec<(String, String)>)>,
     /// Histogram bar heights (normalised 0..1) of the last render.
     hist: Vec<f32>,
+    /// A gate being moved or resized: nothing is committed until the button is released.
+    pub edit: Option<EditDrag>,
+}
+
+/// One in-progress move / resize of a gate.
+pub struct EditDrag {
+    pub node: NodeId,
+    pub handle: Handle,
+    pub start: (f64, f64),
+    pub orig: Gate,
+    /// The gate as it would be at the pointer's current position (`None` while the result would be degenerate).
+    pub preview: Option<Gate>,
 }
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new() }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None }
     }
 }
 
@@ -168,7 +181,7 @@ impl App {
         egui::TopBottomPanel::top("g_tools").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
         egui::TopBottomPanel::top("g_crumb").frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 4.0))).show_inside(ui, |ui| self.breadcrumb(ui, id, &w));
         egui::TopBottomPanel::bottom("g_hint").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
-            theme::caption(ui, "P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag (pointer) pan");
+            theme::caption(ui, "P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan");
         });
         let open = self.ws.options_open;
         egui::SidePanel::right("g_opts").resizable(true).default_width(250.0).width_range(200.0..=380.0).frame(egui::Frame::none().fill(theme::PANEL_2).inner_margin(egui::Margin::same(10.0))).show_animated_inside(ui, open, |ui| self.graph_options(ui, id, &w));
@@ -528,7 +541,8 @@ impl App {
         self.paint_population(ctx, id, &w, &map, &painter);
         draw_axes(&painter, &map, &w, hist);
         let style = self.ws.graphs[&id].style.clone();
-        self.draw_child_gates(&painter, &map, &w, &style);
+        self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
+        self.draw_child_gates(&painter, &map, &w, &style, id);
         draw_in_progress(&painter, &map, &w.drawing, w.tool);
 
         // ---- zoom & pan
@@ -550,7 +564,7 @@ impl App {
                 }
             }
         }
-        if w.tool == Tool::Pointer && resp.dragged() {
+        if w.tool == Tool::Pointer && resp.dragged() && self.ws.graphs[&id].edit.is_none() {
             let d = resp.drag_delta();
             let (dx, dy) = ((d.x / plot.width()) as f64 * (range.x1 - range.x0), (d.y / plot.height()) as f64 * (range.y1 - range.y0));
             if let Some(r) = self.ws.graphs.get_mut(&id).unwrap().range.as_mut() {
@@ -678,6 +692,105 @@ impl App {
         }
     }
 
+    /// Move / resize the gates of this window with the Pointer tool: press on a handle (or inside a gate) and drag.
+    /// The result is previewed live and committed as one undo step when the button is released; Esc cancels.
+    fn gate_edit_input(&mut self, ctx: &egui::Context, id: u64, w: &GraphWindow, resp: &egui::Response, map: &Mapper, hist: bool) {
+        let _ = hist;
+        if w.tool != Tool::Pointer {
+            if let Some(g) = self.ws.graphs.get_mut(&id) {
+                g.edit = None; // choosing another tool abandons a half-done edit
+            }
+            return;
+        }
+        let (plot, range) = (map.rect, map.range);
+        let tol = (7.0 / plot.width() as f64 * (range.x1 - range.x0), 7.0 / plot.height() as f64 * (range.y1 - range.y0));
+        let y_mid = (range.y0 + range.y1) / 2.0;
+        if resp.drag_started() {
+            let origin = ctx.input(|i| i.pointer.press_origin()).filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
+            if let Some(o) = origin {
+                self.begin_gate_edit(id, w, o, tol, y_mid);
+            }
+        }
+        let editing = self.ws.graphs.get(&id).map_or(false, |g| g.edit.is_some());
+        if !editing {
+            // show what a press here would grab
+            if let Some(pos) = resp.hover_pos().filter(|p| plot.contains(*p)) {
+                let at = map.to_data(pos);
+                let selected = self.session.selected.filter(|(s, _)| *s == w.sample).map(|(_, n)| n);
+                let icon = selected.and_then(|n| match self.session.tree(w.sample).kind(n) {
+                    Ok(NodeKind::Gate(g)) if gate_on_axes(g, w) && self.session.tree(w.sample).parent(n).ok().flatten() == Some(w.node) => gate_edit::hit(g, at, tol, y_mid),
+                    _ => None,
+                });
+                match icon {
+                    Some(Handle::Body) => ctx.set_cursor_icon(egui::CursorIcon::Grab),
+                    Some(Handle::Edge(Side::Left | Side::Right)) => ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
+                    Some(Handle::Edge(_)) => ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical),
+                    Some(Handle::Corner { right, top }) => ctx.set_cursor_icon(if right == top { egui::CursorIcon::ResizeNeSw } else { egui::CursorIcon::ResizeNwSe }),
+                    Some(_) => ctx.set_cursor_icon(egui::CursorIcon::Crosshair),
+                    None => {}
+                }
+            }
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.ws.graphs.get_mut(&id).unwrap().edit = None;
+            self.status = "Edit cancelled.".into();
+            return;
+        }
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let cur = map.to_data(Pos2::new(p.x.clamp(plot.left(), plot.right()), p.y.clamp(plot.top(), plot.bottom())));
+                if let Some(e) = self.ws.graphs.get_mut(&id).and_then(|g| g.edit.as_mut()) {
+                    e.preview = gate_edit::apply(&e.orig, e.handle, e.start, cur);
+                }
+            }
+            ctx.request_repaint();
+        }
+        if resp.drag_stopped() {
+            let Some(e) = self.ws.graphs.get_mut(&id).and_then(|g| g.edit.take()) else { return };
+            match e.preview {
+                Some(new) if new != e.orig => {
+                    let name = self.session.tree(w.sample).name(e.node).unwrap_or("population").to_string();
+                    let before = self.session.count(w.sample, e.node);
+                    self.status = match self.session.edit_gate(w.sample, e.node, new) {
+                        Ok(after) => format!("Changed '{name}': {before} → {after} events. Ctrl+Z to undo."),
+                        Err(err) => format!("Could not change the gate: {err}"),
+                    };
+                    if let Some(g) = self.ws.graphs.get_mut(&id) {
+                        g.key = 0;
+                    }
+                }
+                Some(_) => {}
+                None => self.status = "That would leave the gate with no size, so it was not changed.".into(),
+            }
+        }
+    }
+
+    /// Pick what a press at `at` grabs: handles of the selected gate, then handles of the others, then bodies.
+    fn begin_gate_edit(&mut self, id: u64, w: &GraphWindow, at: (f64, f64), tol: (f64, f64), y_mid: f64) {
+        let mut order: Vec<NodeId> = self.session.tree(w.sample).children(w.node).map(|c| c.iter().rev().copied().collect()).unwrap_or_default();
+        if let Some((s, n)) = self.session.selected {
+            if s == w.sample && order.contains(&n) {
+                order.retain(|k| *k != n);
+                order.insert(0, n);
+            }
+        }
+        let gates: Vec<(NodeId, Gate)> = order
+            .into_iter()
+            .filter_map(|k| match self.session.tree(w.sample).kind(k) {
+                Ok(NodeKind::Gate(g)) if gate_on_axes(g, w) => Some((k, g.clone())),
+                _ => None,
+            })
+            .collect();
+        let found = gates.iter().find_map(|(k, g)| gate_edit::hit_handle(g, at, tol, y_mid).map(|h| (*k, g.clone(), h))).or_else(|| gates.iter().find_map(|(k, g)| gate_edit::hit(g, at, tol, y_mid).map(|h| (*k, g.clone(), h))));
+        if let Some((k, g, h)) = found {
+            self.session.selected = Some((w.sample, k));
+            if let Some(gr) = self.ws.graphs.get_mut(&id) {
+                gr.edit = Some(EditDrag { node: k, handle: h, start: at, orig: g, preview: None });
+            }
+        }
+    }
+
     /// Select (and on double-click open) the topmost child gate under a display-space point.
     fn pick_gate(&mut self, w: &GraphWindow, at: (f64, f64), open: bool) {
         let kids: Vec<NodeId> = self.session.tree(w.sample).children(w.node).map(|c| c.to_vec()).unwrap_or_default();
@@ -794,12 +907,12 @@ impl App {
         }
     }
 
-    fn draw_child_gates(&mut self, painter: &egui::Painter, map: &Mapper, w: &GraphWindow, style: &GateStyle) {
+    fn draw_child_gates(&mut self, painter: &egui::Painter, map: &Mapper, w: &GraphWindow, style: &GateStyle, id: u64) {
         let kids: Vec<NodeId> = self.session.tree(w.sample).children(w.node).map(|c| c.to_vec()).unwrap_or_default();
         let parent_count = self.session.count(w.sample, w.node).max(1);
         let painter = painter.with_clip_rect(map.rect.expand(2.0));
         for k in kids {
-            let (name, gate) = match (self.session.tree(w.sample).name(k), self.session.tree(w.sample).kind(k)) {
+            let (name, mut gate) = match (self.session.tree(w.sample).name(k), self.session.tree(w.sample).kind(k)) {
                 (Ok(n), Ok(NodeKind::Gate(g))) => (n.to_string(), g.clone()),
                 _ => continue,
             };
@@ -807,9 +920,22 @@ impl App {
             if !gate_on_axes(&gate, w) {
                 continue;
             }
+            // while it is being dragged, show where it would land
+            if let Some(p) = self.ws.graphs.get(&id).and_then(|g| g.edit.as_ref()).filter(|e| e.node == k).and_then(|e| e.preview.clone()) {
+                gate = p;
+            }
             let selected = self.session.selected == Some((w.sample, k));
             let stroke = Stroke::new(if selected { style.width + 1.2 } else { style.width }, if selected { Color32::from_rgb(255, 214, 10) } else { style.color });
             let anchor = draw_gate(&painter, map, &gate, stroke, w.kind == PlotKind::Histogram, style.fill);
+            if selected && w.tool == Tool::Pointer {
+                let y_mid = (map.range.y0 + map.range.y1) / 2.0;
+                for (_, at) in gate_edit::handles(&gate, y_mid) {
+                    let c = map.to_screen(at);
+                    let r = Rect::from_center_size(c, egui::vec2(8.0, 8.0));
+                    painter.rect_filled(r, 1.0, Color32::WHITE);
+                    painter.rect_stroke(r, 1.0, Stroke::new(1.2_f32, Color32::from_rgb(40, 40, 40)));
+                }
+            }
             if style.labels {
                 if let Some(a) = anchor {
                     let count = self.session.count(w.sample, k);

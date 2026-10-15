@@ -298,6 +298,18 @@ impl Session {
         Ok(nid)
     }
 
+
+    /// Move or resize a gate: replace its geometry as ONE undoable step. The gate keeps its name and everything
+    /// gated below it. Returns the population's new event count.
+    pub fn edit_gate(&mut self, sample: usize, node: NodeId, gate: sf_gating::Gate) -> Result<usize, String> {
+        self.snapshot(sample);
+        if let Err(e) = self.states[sample].tree.set_gate(node, gate) {
+            self.discard_snapshot(sample);
+            return Err(e.to_string());
+        }
+        self.touch(sample);
+        Ok(self.count(sample, node))
+    }
     /// A unique default name under `parent`: "Population 1", "Population 2", ...
     pub fn next_name(&self, sample: usize, parent: NodeId) -> String {
         let t = &self.states[sample].tree;
