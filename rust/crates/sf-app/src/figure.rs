@@ -51,13 +51,14 @@ pub struct Text {
     pub align: Align,
     pub valign: VAlign,
     pub bold: bool,
+    pub italic: bool,
     /// Read bottom-to-top (a y-axis label); `x` is then the centre line and `align` runs along the text.
     pub vertical: bool,
 }
 
 impl Text {
     pub fn new(x: f32, y: f32, text: impl Into<String>, size: f32) -> Text {
-        Text { x, y, text: text.into(), size, color: BLACK, align: Align::Left, valign: VAlign::Bottom, bold: false, vertical: false }
+        Text { x, y, text: text.into(), size, color: BLACK, align: Align::Left, valign: VAlign::Bottom, bold: false, italic: false, vertical: false }
     }
     pub fn align(mut self, a: Align, v: VAlign) -> Text {
         self.align = a;
@@ -70,6 +71,10 @@ impl Text {
     }
     pub fn bold(mut self) -> Text {
         self.bold = true;
+        self
+    }
+    pub fn italic(mut self) -> Text {
+        self.italic = true;
         self
     }
     pub fn vertical(mut self) -> Text {
@@ -321,7 +326,7 @@ fn svg_items(items: &[Item], out: &mut String, clip_id: &mut usize) {
                     Align::Center => bx + w / 2.0,
                     Align::Right => bx + w,
                 };
-                let style = format!("font-family=\"Helvetica, Arial, sans-serif\" font-size=\"{}\"{} fill=\"{}\" text-anchor=\"{anchor}\"", num(t.size), if t.bold { " font-weight=\"bold\"" } else { "" }, rgb_hex(t.color));
+                let style = format!("font-family=\"Helvetica, Arial, sans-serif\" font-size=\"{}\"{} fill=\"{}\" text-anchor=\"{anchor}\"", num(t.size), if t.bold { " font-weight=\"bold\"" } else { "" }, rgb_hex(t.color)) + if t.italic { " font-style=\"italic\"" } else { "" };
                 if t.vertical {
                     out.push_str(&format!("<text transform=\"translate({},{}) rotate(-90)\" x=\"0\" y=\"0\" {style}>{}</text>\n", num(bx), num(by), xml_escape(&t.text)));
                     // the anchor along the text is relative to its start after rotation
@@ -451,7 +456,13 @@ fn pdf_items(items: &[Item], cx: &mut PageCtx, objs: &mut Vec<Vec<u8>>) {
                 let tm = if t.vertical { format!("0 1 -1 0 {} {} Tm", num(bx), cx.y(by)) } else { format!("1 0 0 1 {} {} Tm", num(bx), cx.y(by)) };
                 cx.content.push_str("q\n");
                 cx.alpha(t.color[3]);
-                cx.content.push_str(&format!("BT\n/{} {} Tf\n{}{}\n(", if t.bold { "F2" } else { "F1" }, num(t.size), PageCtx::rg(t.color, false), tm));
+                let font = match (t.bold, t.italic) {
+                    (false, false) => "F1",
+                    (true, false) => "F2",
+                    (false, true) => "F3",
+                    (true, true) => "F4",
+                };
+                cx.content.push_str(&format!("BT\n/{font} {} Tf\n{}{}\n(", num(t.size), PageCtx::rg(t.color, false), tm));
                 let esc = pdf_escape(&bytes);
                 // the content stream is bytes; WinAnsi bytes above 127 are kept as Latin-1 chars and re-encoded on write
                 cx.content.extend(esc.iter().map(|&b| b as char));
@@ -480,9 +491,11 @@ fn pdf_items(items: &[Item], cx: &mut PageCtx, objs: &mut Vec<Vec<u8>>) {
 /// A multi-page PDF, one page per figure (each page the size of its figure).
 pub fn to_pdf(pages: &[Figure], title: &str) -> Vec<u8> {
     // object ids: 1 catalog, 2 pages, 3 Helvetica, 4 Helvetica-Bold, 5 info; the rest are created as needed
-    let mut objs: Vec<Vec<u8>> = vec![vec![]; 5];
+    let mut objs: Vec<Vec<u8>> = vec![vec![]; 7];
     objs[2] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec();
     objs[3] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_vec();
+    objs[5] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>".to_vec();
+    objs[6] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>".to_vec();
     let t: Vec<u8> = title.chars().flat_map(win_ansi).collect();
     let mut info = b"<< /Title (".to_vec();
     info.extend(pdf_escape(&t));
@@ -509,7 +522,7 @@ pub fn to_pdf(pages: &[Figure], title: &str) -> Vec<u8> {
         let content_id = objs.len();
         let xobj: String = cx.images.iter().map(|(n, id)| format!("/Im{n} {id} 0 R ")).collect();
         let gs: String = cx.alphas.iter().map(|a| format!("/A{a} {} 0 R ", alpha_ids.iter().find(|(x, _)| x == a).unwrap().1)).collect();
-        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << {xobj}>> /ExtGState << {gs}>> >> /Contents {content_id} 0 R >>", num(fig.width), num(fig.height)).into_bytes());
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 6 0 R /F4 7 0 R >> /XObject << {xobj}>> /ExtGState << {gs}>> >> /Contents {content_id} 0 R >>", num(fig.width), num(fig.height)).into_bytes());
         page_ids.push(objs.len());
     }
     let kids: String = page_ids.iter().map(|i| format!("{i} 0 R ")).collect();
@@ -617,6 +630,7 @@ mod tests {
         f.push(Item::Poly { pts: vec![(20.0, 100.0), (80.0, 100.0), (50.0, 160.0)], closed: true, fill: None, stroke: Some(Stroke::new([0, 128, 0, 255], 2.0)) });
         f.push(Item::Text(Text::new(150.0, 30.0, "Hello (world) \\ ≥ ▸ é", 12.0).align(Align::Center, VAlign::Middle)));
         f.push(Item::Text(Text::new(12.0, 100.0, "CD3 vertical", 10.0).align(Align::Center, VAlign::Middle).vertical().bold()));
+        f.push(Item::Text(Text::new(150.0, 60.0, "control layer", 9.0).italic()));
         let rgb: Vec<u8> = (0..4 * 3 * 3).map(|i| (i * 20) as u8).collect();
         f.push(Item::Clip { x: 150.0, y: 80.0, w: 100.0, h: 80.0, items: vec![Item::Image { x: 140.0, y: 70.0, w: 120.0, h: 90.0, px_w: 4, px_h: 3, rgb }] });
         f
@@ -642,7 +656,7 @@ mod tests {
         assert!(svg.contains("Hello (world) \\ ≥ ▸ é"), "SVG keeps full Unicode");
         assert!(svg.contains("clip-path=\"url(#clip1)\"") && svg.contains("data:image/png;base64,"));
         assert!(svg.contains("stroke-dasharray=\"4 2\"") && svg.contains("fill-opacity=\"0.502\""));
-        assert!(svg.contains("rotate(-90)"));
+        assert!(svg.contains("rotate(-90)") && svg.contains("font-style=\"italic\""));
         // markup characters in text are escaped
         let mut f = Figure::new(10.0, 10.0);
         f.push(Item::Text(Text::new(1.0, 1.0, "a<b & \"c\"", 8.0)));
@@ -657,6 +671,7 @@ mod tests {
         assert_eq!(validate_pdf(&pdf), Ok(2), "{}", String::from_utf8_lossy(&pdf[..200.min(pdf.len())]));
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/BaseFont /Helvetica ") && text.contains("/Title (Test layout)"));
+        assert!(text.contains("/BaseFont /Helvetica-Oblique ") && text.contains("/F3 6 0 R") && text.contains("/F3 9 Tf"), "italic text uses the oblique font");
         assert!(text.contains("/MediaBox [0 0 300 200]") && text.contains("/MediaBox [0 0 100 100]"));
         assert!(text.contains("/A128 gs") && text.contains("/ca 0.5020"), "constant alpha is expressed as an ExtGState");
         assert!(text.contains("[4 2] 0 d") && text.contains("re W n"), "dash pattern and clipping are written");

@@ -22,6 +22,16 @@ pub struct PlotGate {
     pub label: Option<String>,
 }
 
+/// One sample drawn on the plot. With several layers the first is the base and the others are overlays.
+#[derive(Debug, Clone)]
+pub struct PlotLayer {
+    pub points: Vec<(f64, f64)>,
+    pub color: Rgba,
+    pub label: String,
+    /// A control layer is the same on every page; its legend entry is italic.
+    pub control: bool,
+}
+
 /// A dashed FMO reference line at a display-space position on the X (`true`) or Y axis.
 #[derive(Debug, Clone, Copy)]
 pub struct FmoLine {
@@ -35,6 +45,10 @@ pub struct PlotSpec<'a> {
     /// Lines of text above the plot (sample, population, ...).
     pub captions: Vec<String>,
     pub points: &'a [(f64, f64)],
+    /// When not empty these are drawn instead of `points`.
+    pub layers: Vec<PlotLayer>,
+    /// List the layers in a legend (only when there is more than one).
+    pub legend: bool,
     pub range: Range,
     pub kind: PlotKind,
     pub x_chan: String,
@@ -151,28 +165,35 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
 
     // ---- data
     let mut clipped: Vec<Item> = Vec::new();
+    let single = [PlotLayer { points: Vec::new(), color: [0, 100, 160, 255], label: String::new(), control: false }];
+    let layers: Vec<(&[(f64, f64)], Rgba)> = if spec.layers.is_empty() { vec![(spec.points, single[0].color)] } else { spec.layers.iter().map(|l| (l.points.as_slice(), l.color)).collect() };
     if hist {
         let bins = (fr.w.round() as usize).clamp(32, 400);
-        let h = histogram(spec.points.iter().map(|p| p.0), spec.range.x0, spec.range.x1, bins);
-        let sm: Vec<f32> = (0..h.len())
-            .map(|i| {
-                let (a, c) = (i.saturating_sub(1), (i + 1).min(h.len() - 1));
-                (h[a] as f32 + 2.0 * h[i] as f32 + h[c] as f32) / 4.0
-            })
-            .collect();
-        let mx = sm.iter().cloned().fold(0.0f32, f32::max);
-        if mx > 0.0 {
-            let mut pts = vec![(fr.l, fr.t + fr.h)];
-            for (i, v) in sm.iter().enumerate() {
-                pts.push((fr.l + (i as f32 + 0.5) / bins as f32 * fr.w, fr.t + fr.h - v / mx * 0.94 * fr.h));
+        for (pts_l, color) in &layers {
+            let h = histogram(pts_l.iter().map(|p| p.0), spec.range.x0, spec.range.x1, bins);
+            let sm: Vec<f32> = (0..h.len())
+                .map(|i| {
+                    let (a, c) = (i.saturating_sub(1), (i + 1).min(h.len() - 1));
+                    (h[a] as f32 + 2.0 * h[i] as f32 + h[c] as f32) / 4.0
+                })
+                .collect();
+            // every layer is scaled to its own peak, so a small control can be compared with a large sample
+            let mx = sm.iter().cloned().fold(0.0f32, f32::max);
+            if mx > 0.0 {
+                let mut pts = vec![(fr.l, fr.t + fr.h)];
+                for (i, v) in sm.iter().enumerate() {
+                    pts.push((fr.l + (i as f32 + 0.5) / bins as f32 * fr.w, fr.t + fr.h - v / mx * 0.94 * fr.h));
+                }
+                pts.push((fr.l + fr.w, fr.t + fr.h));
+                let many = layers.len() > 1;
+                let (fill, stroke) = if many { ([color[0], color[1], color[2], 45], *color) } else { ([0, 140, 200, 110], [0, 100, 160, 255]) };
+                clipped.push(Item::Poly { pts, closed: true, fill: Some(fill), stroke: Some(Stroke::new(stroke, if many { 1.0 } else { 0.7 })) });
             }
-            pts.push((fr.l + fr.w, fr.t + fr.h));
-            clipped.push(Item::Poly { pts, closed: true, fill: Some([0, 140, 200, 110]), stroke: Some(Stroke::new([0, 100, 160, 255], 0.7)) });
         }
     } else {
         let gw = ((fr.w * SUPERSAMPLE) as usize).clamp(16, MAX_CELLS);
         let gh = ((fr.h * SUPERSAMPLE) as usize).clamp(16, MAX_CELLS);
-        let grid = bin(spec.points.iter().copied(), spec.range, gw, gh);
+        let grid = bin(layers[0].0.iter().copied(), spec.range, gw, gh);
         let px = if spec.kind == PlotKind::Dot { render_dots(&grid, [31, 111, 235]) } else { render(&grid) };
         // composite on white: the figure's image is opaque RGB
         let mut rgb = Vec::with_capacity(gw * gh * 3);
@@ -180,6 +201,15 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
             let a = p[3] as u32;
             for c in 0..3 {
                 rgb.push(((p[c] as u32 * a + 255 * (255 - a)) / 255) as u8);
+            }
+        }
+        // overlays: the occupied cells of each further layer, in its own colour, on top of the base
+        for (pts_l, color) in layers.iter().skip(1) {
+            let g = bin(pts_l.iter().copied(), spec.range, gw, gh);
+            for (i, p) in render_dots(&g, [color[0], color[1], color[2]]).iter().enumerate() {
+                if p[3] > 0 {
+                    rgb[i * 3..i * 3 + 3].copy_from_slice(&p[..3]);
+                }
             }
         }
         clipped.push(Item::Image { x: fr.l, y: fr.t, w: fr.w, h: fr.h, px_w: gw as u32, px_h: gh as u32, rgb });
@@ -216,6 +246,21 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         fig.push(a);
     }
     fig.push(Item::Rect { x: fr.l, y: fr.t, w: fr.w, h: fr.h, fill: None, stroke: Some(Stroke::new(AXIS, 0.6)) });
+    if spec.legend && spec.layers.len() > 1 {
+        let widest = spec.layers.iter().map(|l| text_width(&l.label, 6.6, false)).fold(0.0f32, f32::max);
+        let (bw, bh) = (widest + 18.0, spec.layers.len() as f32 * 9.0 + 4.0);
+        let (bx, by) = (fr.l + fr.w - bw - 4.0, fr.t + 4.0);
+        fig.push(Item::Rect { x: bx, y: by, w: bw, h: bh, fill: Some([255, 255, 255, 215]), stroke: Some(Stroke::new([190, 190, 190, 255], 0.4)) });
+        for (i, l) in spec.layers.iter().enumerate() {
+            let y = by + 3.0 + i as f32 * 9.0;
+            fig.push(Item::Rect { x: bx + 3.0, y: y + 0.5, w: 7.0, h: 5.0, fill: Some(l.color), stroke: None });
+            let mut t = Text::new(bx + 13.0, y + 3.0, l.label.clone(), 6.6).align(Align::Left, VAlign::Middle).color(INK);
+            if l.control {
+                t = t.italic();
+            }
+            fig.push(Item::Text(t));
+        }
+    }
     fig.push(Item::Text(Text::new(fr.l + fr.w / 2.0, fr.t + fr.h + 15.0, spec.x_chan.clone(), 8.0).align(Align::Center, VAlign::Top).color(INK)));
     if hist {
         fig.push(Item::Text(Text::new(10.0, fr.t + fr.h / 2.0, "count", 8.0).align(Align::Center, VAlign::Middle).color(MUTED).vertical()));
@@ -293,6 +338,8 @@ mod tests {
             height: 220.0,
             captions: vec!["sample.fcs".into(), "Lymphocytes ▸ CD3+".into()],
             points: pts,
+            layers: vec![],
+            legend: true,
             range: Range { x0: 0.0, x1: 1000.0, y0: 0.0, y1: 500.0 },
             kind,
             x_chan: "FSC-A".into(),
@@ -394,6 +441,55 @@ mod tests {
         // a valid view with no points still draws axes and a (blank white) image
         let f2 = plot_figure(&spec(&pts, PlotKind::Pseudocolor));
         assert!(f2.texts().contains(&"FSC-A".to_string()));
+    }
+
+    fn layer(pts: Vec<(f64, f64)>, color: Rgba, label: &str, control: bool) -> PlotLayer {
+        PlotLayer { points: pts, color, label: label.into(), control }
+    }
+
+    #[test]
+    fn histogram_overlays_are_one_coloured_outline_per_layer_each_scaled_to_its_own_peak() {
+        let pts = points(10);
+        let mut s = spec(&pts, PlotKind::Histogram);
+        let wide: Vec<(f64, f64)> = (0..4000).map(|i| ((i % 1000) as f64, 0.0)).collect();
+        let narrow: Vec<(f64, f64)> = (0..300).map(|i| (400.0 + (i % 50) as f64, 0.0)).collect();
+        s.layers = vec![layer(wide, [31, 119, 180, 255], "sample A", false), layer(narrow, [214, 39, 40, 255], "control", true)];
+        let f = plot_figure(&s);
+        let clip = f.items.iter().find_map(|i| if let Item::Clip { items, .. } = i { Some(items) } else { None }).unwrap();
+        let polys: Vec<(&Vec<(f32, f32)>, Rgba)> = clip.iter().filter_map(|i| if let Item::Poly { pts, stroke: Some(st), .. } = i { Some((pts, st.color)) } else { None }).collect();
+        assert_eq!(polys.len(), 2);
+        assert_eq!((polys[0].1, polys[1].1), ([31, 119, 180, 255], [214, 39, 40, 255]));
+        // both curves reach the same height even though one layer has 13x fewer events
+        let top = |p: &Vec<(f32, f32)>| p.iter().map(|q| q.1).fold(f32::INFINITY, f32::min);
+        let (ta, tb) = (top(polys[0].0), top(polys[1].0));
+        assert!((ta - tb).abs() < 1.0, "{ta} vs {tb}");
+        // the legend lists both layers; the control is italic
+        let texts: Vec<&Text> = f.items.iter().filter_map(|i| if let Item::Text(t) = i { Some(t) } else { None }).collect();
+        assert!(texts.iter().any(|t| t.text == "sample A" && !t.italic) && texts.iter().any(|t| t.text == "control" && t.italic));
+        // no legend for a single layer, or when switched off
+        let mut one = spec(&pts, PlotKind::Histogram);
+        one.layers = vec![layer(vec![(1.0, 1.0)], [0, 0, 0, 255], "only", false)];
+        assert!(!plot_figure(&one).texts().contains(&"only".to_string()));
+        s.legend = false;
+        assert!(!plot_figure(&s).texts().contains(&"control".to_string()));
+        assert_eq!(validate_pdf(&to_pdf(&[plot_figure(&{ let mut x = spec(&pts, PlotKind::Histogram); x.layers = s.layers.clone(); x })], "o")), Ok(1));
+    }
+
+    #[test]
+    fn two_dimensional_overlays_paint_the_further_layers_in_their_colour_over_the_base() {
+        let base = points(20_000);
+        let pts = points(10);
+        let mut s = spec(&pts, PlotKind::Pseudocolor);
+        let cluster: Vec<(f64, f64)> = (0..200).map(|i| (800.0 + (i % 10) as f64, 400.0 + (i / 10) as f64)).collect();
+        s.layers = vec![layer(base, [0, 0, 0, 255], "base", false), layer(cluster, [255, 0, 0, 255], "overlay", false)];
+        let f = plot_figure(&s);
+        let im = f.items.iter().find_map(|i| if let Item::Clip { items, .. } = i { items.iter().find_map(|x| if let Item::Image { px_w, px_h, rgb, .. } = x { Some((*px_w as usize, *px_h as usize, rgb.clone())) } else { None }) } else { None }).unwrap();
+        let reds = im.2.chunks(3).filter(|p| p == &[255, 0, 0]).count();
+        assert!(reds > 0 && reds < im.0 * im.1 / 20, "the overlay cluster is a small patch of pure red: {reds}");
+        // the patch sits where the data says (x 800..810 of 0..1000 is the right-hand fifth, y 400..420 the top)
+        let first = im.2.chunks(3).position(|p| p == &[255, 0, 0]).unwrap();
+        let (col, row) = (first % im.0, first / im.0);
+        assert!(col as f32 / im.0 as f32 > 0.75 && (row as f32 / im.1 as f32) < 0.25, "({col}, {row}) of {} x {}", im.0, im.1);
     }
 
     #[test]

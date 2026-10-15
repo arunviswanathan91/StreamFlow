@@ -11,7 +11,15 @@ use crate::stats_table::pop_label;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, TextureHandle, TextureOptions};
 use sf_gating::GateTree;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LayTab {
+    Grid,
+    Editor,
+}
+
 pub struct State {
+    pub tab: LayTab,
+    pub ed: super::layout_editor::State,
     pub population: Vec<String>,
     pub x_chan: String,
     pub y_chan: String,
@@ -33,7 +41,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        State { population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, sel: vec![], spec: LayoutSpec::default(), a4: false, landscape: true, show_gates: true, show_fmo: true, pages: vec![], page: 0, built_for: None, notes: vec![], textures: vec![] }
+        State { tab: LayTab::Grid, ed: Default::default(), population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, sel: vec![], spec: LayoutSpec::default(), a4: false, landscape: true, show_gates: true, show_fmo: true, pages: vec![], page: 0, built_for: None, notes: vec![], textures: vec![] }
     }
 }
 
@@ -42,7 +50,7 @@ fn color(c: Rgba) -> Color32 {
 }
 
 /// Draw a figure into `rect` (scaled to fit), taking each image's texture in order.
-fn paint_figure(painter: &egui::Painter, rect: Rect, fig: &Figure, textures: &[TextureHandle]) {
+pub(super) fn paint_figure(painter: &egui::Painter, rect: Rect, fig: &Figure, textures: &[TextureHandle]) {
     let scale = rect.width() / fig.width;
     painter.rect_filled(rect, 2.0, Color32::WHITE);
     let mut next = 0;
@@ -222,6 +230,8 @@ impl App {
             height,
             captions: vec![cell.sample.trim_end_matches(".fcs").to_string(), pop_label(&req.population)],
             points: pts,
+            layers: vec![],
+            legend: false,
             range: common.range,
             kind: common.kind,
             x_chan: common.x_chan.clone(),
@@ -264,6 +274,19 @@ impl App {
             return;
         }
         self.lay_sync();
+        egui::TopBottomPanel::top("lay_tabs").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12.0, 6.0))).show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (t, l) in [(LayTab::Grid, "Grid of plots"), (LayTab::Editor, "Layout editor")] {
+                    if theme::toggle(ui, self.lay.tab == t, l).clicked() {
+                        self.lay.tab = t;
+                    }
+                }
+            });
+        });
+        if self.lay.tab == LayTab::Editor {
+            self.editor_screen(ui, ctx);
+            return;
+        }
         egui::SidePanel::left("lay_cfg").resizable(false).exact_width(330.0).frame(egui::Frame::none().fill(theme::PANEL_2).inner_margin(egui::Margin::same(12.0))).show_inside(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.layout_panel(ui));
         });

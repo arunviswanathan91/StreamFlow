@@ -201,6 +201,20 @@ fn main() -> eframe::Result<()> {
             std::process::exit(0);
         }
     }
+    if args.iter().any(|a| a == "--editor-demo") || flag("layout-batch-pdf").is_some() {
+        app.demo_layout(flag("iterate-keyword"));
+        if let Some(p) = flag("layout-batch-pdf") {
+            match app.editor_run_batch(None) {
+                Ok(n) => eprintln!("batch: {n} page(s)"),
+                Err(e) => eprintln!("batch failed: {e}"),
+            }
+            match app.write_batch_pdf(std::path::Path::new(&p)) {
+                Ok(()) => eprintln!("wrote {p}"),
+                Err(e) => eprintln!("could not write {p}: {e}"),
+            }
+            std::process::exit(0);
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

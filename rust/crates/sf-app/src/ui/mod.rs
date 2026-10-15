@@ -6,6 +6,7 @@ mod analysis_view;
 mod compare_view;
 mod cross_view;
 mod discover_view;
+mod layout_editor;
 mod layout_view;
 mod export_view;
 mod graph;
@@ -218,12 +219,38 @@ impl App {
         self.status = if failed.is_empty() { format!("Loaded {ok} file(s).") } else { format!("Loaded {ok}; {} failed: {}", failed.len(), failed.join(" | ")) };
     }
 
+    /// Everything a workspace file holds: samples, gates, compensation, FMO levels and the layout.
+    pub fn workspace_document(&mut self) -> Json {
+        for w in self.session.windows.iter().map(|w| w.id).collect::<Vec<_>>() {
+            self.session.remember_view(w);
+        }
+        let mut doc = self.session.to_workspace_json();
+        if !self.lay.ed.doc.tiles.is_empty() || !self.lay.ed.doc.texts.is_empty() {
+            doc = doc.with("layout", self.lay.ed.doc.to_json());
+        }
+        doc
+    }
+
+    /// Restore a workspace document; returns the notes (things that could not be restored exactly).
+    pub fn apply_workspace_document(&mut self, j: &Json) -> Result<Vec<String>, String> {
+        let mut notes = self.session.apply_workspace_json(j)?;
+        self.lay.ed = Default::default();
+        if let Some(l) = j.get("layout") {
+            match crate::layout_doc::LayoutDoc::from_json(l) {
+                Ok(d) => self.lay.ed.doc = d,
+                Err(e) => notes.push(format!("the saved layout could not be read and was ignored: {e}")),
+            }
+        }
+        Ok(notes)
+    }
+
     pub(crate) fn save_workspace(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("StreamFLOW workspace", &["sfw"]).set_file_name("experiment.sfw").save_file() else { return };
         for w in self.session.windows.iter().map(|w| w.id).collect::<Vec<_>>() {
             self.session.remember_view(w);
         }
-        self.status = match std::fs::write(&path, self.session.to_workspace_json().write()) {
+        let doc = self.workspace_document();
+        self.status = match std::fs::write(&path, doc.write()) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Could not save {}: {e}", path.display()),
         };
@@ -234,7 +261,7 @@ impl App {
         let result = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|t| Json::parse(&t).map_err(|e| e.to_string()))
-            .and_then(|j| self.session.apply_workspace_json(&j));
+            .and_then(|j| self.apply_workspace_document(&j));
         self.ws.reset();
         self.status = match result {
             Ok(w) if w.is_empty() => format!("Opened {}", path.display()),

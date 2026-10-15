@@ -134,9 +134,9 @@ pub fn build_pages(spec: &LayoutSpec, common: &PlotCommon, cells: &[CellData]) -
             let captions: Vec<String> = expand_tokens(&spec.caption, &cell_vars(cell, cells.len())).lines().map(|l| l.to_string()).collect();
             let empty: Vec<(f64, f64)> = Vec::new();
             let fig = match &cell.points {
-                Some(pts) => plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: pts, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: cell.gates.clone(), fmo: common.fmo.clone(), footer: None }),
+                Some(pts) => plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: pts, layers: vec![], legend: false, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: cell.gates.clone(), fmo: common.fmo.clone(), footer: None }),
                 None => {
-                    let mut f = plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: &empty, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: vec![], fmo: vec![], footer: None });
+                    let mut f = plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: &empty, layers: vec![], legend: false, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: vec![], fmo: vec![], footer: None });
                     f.push(Item::Text(Text::new((cw - gap) / 2.0 + 20.0, (ch - gap) / 2.0, cell.note.clone().unwrap_or_else(|| "no data".into()), 8.0).align(Align::Center, VAlign::Middle).color([180, 60, 60, 255])));
                     f
                 }
