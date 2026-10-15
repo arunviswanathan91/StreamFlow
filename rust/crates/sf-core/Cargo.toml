@@ -1,0 +1,6 @@
+[package]
+name = "sf-core"
+description = "StreamFLOW numerics: statistics and transforms (no dependencies)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true

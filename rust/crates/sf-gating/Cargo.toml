@@ -1,0 +1,12 @@
+[package]
+name = "sf-gating"
+description = "StreamFLOW gates, Boolean mask gates and the depth-independent gating tree"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+sf-core = { path = "../sf-core" }
+
+[dev-dependencies]
+sf-fcs = { path = "../sf-fcs" }

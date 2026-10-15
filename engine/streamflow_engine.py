@@ -57,6 +57,7 @@ STATE = {
     "comp_applied": False,
     "transforms": {},    # {channel: {method, cofactor}} after apply_transformation
     "comp_failures": {}, # {file: reason} when lazy compensation failed for a sample
+    "spectral": None,    # {detectors, names, M, af, ...} after build_spectral_model
 }
 
 def _basenames():
@@ -188,6 +189,7 @@ def _reset(i, a):
     STATE["meta"] = []; STATE["files"] = []; STATE["cache"] = {}
     STATE["gating"] = None; STATE["comp_matrix"] = None
     STATE["comp_applied"] = False; STATE["transforms"] = {}
+    STATE["spectral"] = None   # an unmixing model belongs to the loaded panel; never outlive it
     return {"ok": True}
 
 @command("get_events")
@@ -1583,6 +1585,167 @@ def _list_fluor_channels(i, a):
         return {"channels": []}
     fluor = [c for c in STATE["meta"][0]["pnn"] if not _scatter(c)]
     return {"channels": fluor}
+
+# ---- spectral unmixing (maths in engine/spectral.py; clean-room, see that module) ------------
+def _spectral_model():
+    m = STATE.get("spectral")
+    if not m:
+        raise ValueError("No spectral model - run build_spectral_model on the single-stain controls first.")
+    return m
+
+def _spectral_events(sample_name, detectors):
+    """Raw events of a sample restricted to the model's detectors. Fails loudly on a panel
+    mismatch instead of unmixing the wrong columns."""
+    import numpy as np
+    s = _sample_by_name(sample_name)
+    pnn = list(s.pnn_labels)
+    missing = [d for d in detectors if d not in pnn]
+    if missing:
+        raise ValueError("Sample %r lacks detector(s) used by the spectral model: %s"
+                         % (sample_name, ", ".join(missing)))
+    ev = np.asarray(s.get_events(source="raw"), dtype=float)
+    return s, pnn, ev, ev[:, [pnn.index(d) for d in detectors]]
+
+@command("build_spectral_model")
+def _build_spectral_model(i, a):
+    """Build fluorophore signatures from single-stain controls.
+
+    args: {controls:[{sample, name?}], unstained?, detectors?:[...], exclude_saturated?:true}
+      * detectors default to every non-scatter channel of the loaded panel.
+      * each control's signature = median(positive) - negative baseline (the unstained median when
+        given, else the control's own negative), peak-scaled to 1; the peak detector is chosen by
+        the first principal component, not by brightest median.
+    Returns {detectors, names, signatures, controls:[{sample,name,peak,n_pos,n_neg,n_saturated,ok,reason}],
+             qc:{cosine, collinearity, condition}}. Controls that fail are reported, not hidden; the
+    model needs >= 2 usable signatures."""
+    import numpy as np
+    import spectral as sp
+    if not STATE["meta"]:
+        raise ValueError("Load the control FCS files first.")
+    a = a or {}
+    pnn0 = list(STATE["meta"][0]["pnn"])
+    detectors = a.get("detectors") or [c for c in pnn0 if not _scatter(c)]
+    bad = [d for d in detectors if d not in pnn0]
+    if bad:
+        raise ValueError("Unknown detector(s): %s" % ", ".join(bad))
+    names_all = [m["name"] for m in STATE["meta"]]
+    unst = a.get("unstained")
+    controls_in = a.get("controls") or [{"sample": n} for n in names_all if n != unst]
+    negative = None
+    if unst:
+        _, _, _, ue = _spectral_events(unst, detectors)
+        negative = np.median(ue, axis=0)
+    excl_sat = bool(a.get("exclude_saturated", True))
+    rows, report = [], []
+    for c in controls_in:
+        nm = c.get("sample")
+        if nm not in names_all:
+            raise ValueError("Unknown control sample %r. Loaded samples: %s" % (nm, ", ".join(names_all)))
+        _, _, _, ev = _spectral_events(nm, detectors)
+        # ceiling = this control's own observed maximum ($PnR is not trusted across vendors)
+        r = sp.build_signature(ev, negative=negative, saturation=np.max(ev, axis=0) if excl_sat else None)
+        peak = detectors[r["peak"]] if r["peak"] is not None else None
+        label = c.get("name") or peak or nm
+        report.append({"sample": nm, "name": label, "peak": peak, "n_pos": r["n_pos"], "n_neg": r["n_neg"],
+                       "n_saturated": r["n_saturated"], "ok": r["ok"], "reason": r["reason"]})
+        if r["ok"]:
+            rows.append((label, r["signature"]))
+    if len(rows) < 2:
+        raise ValueError("Need at least 2 usable single-stain signatures; got %d. %s"
+                         % (len(rows), "; ".join("%s: %s" % (x["sample"], x["reason"]) for x in report if not x["ok"])))
+    names = [n for n, _ in rows]
+    M = np.vstack([v for _, v in rows])
+    qc = sp.signature_qc(M)
+    STATE["spectral"] = {"detectors": detectors, "names": names, "M": M, "af": None, "af_counts": None}
+    return {"detectors": detectors, "names": names, "signatures": M.tolist(), "controls": report,
+            # JSON has no Infinity/NaN: a fluorophore in the span of the others (collinearity inf) is sent as
+            # null and listed under `dependent`, so the UI can say "cannot be unmixed" rather than fail to parse.
+            "qc": {"cosine": qc["cosine"].tolist(),
+                   "collinearity": [float(x) if np.isfinite(x) else None for x in qc["collinearity"]],
+                   "dependent": [names[k] for k, x in enumerate(qc["collinearity"]) if not np.isfinite(x)],
+                   "condition": float(qc["condition"]) if np.isfinite(qc["condition"]) else None}}
+
+@command("extract_af_library")
+def _extract_af_library(i, a):
+    """Cluster an unstained sample into autofluorescence signatures for per-cell AF removal.
+    args: {unstained, k?:4, seed?:0}  Returns {k, counts, library, seed}. Seeded + reproducible."""
+    import spectral as sp
+    model = _spectral_model()
+    a = a or {}
+    if not a.get("unstained"):
+        raise ValueError("unstained sample is required.")
+    _, _, _, ue = _spectral_events(a["unstained"], model["detectors"])
+    seed = int(a.get("seed", 0))
+    lib, counts = sp.extract_af_library(ue, k=int(a.get("k", 4)), seed=seed)
+    model["af"], model["af_counts"] = lib, counts
+    return {"k": int(lib.shape[0]), "counts": counts.tolist(), "library": lib.tolist(), "seed": seed}
+
+@command("compute_unmixing_matrix")
+def _compute_unmixing_matrix(i, a):
+    """Report the unmixing matrix W (fluorophores x detectors). args: {sample?, method?:'wls'|'ols'}
+    WLS weights come from the sample's own per-detector means (Poisson noise model)."""
+    import spectral as sp
+    model = _spectral_model()
+    a = a or {}
+    method = str(a.get("method", "wls")).lower()
+    _, _, _, ev = _spectral_events(a.get("sample"), model["detectors"])
+    _, W = sp.unmix(ev, model["M"], method)
+    return {"method": method, "names": model["names"], "detectors": model["detectors"], "matrix": W.tolist()}
+
+def _unmix_sample(a):
+    """Shared by apply_unmixing/export_unmixed. Returns (names, float32 data (N x C), info)."""
+    import numpy as np
+    import spectral as sp
+    model = _spectral_model()
+    method = str(a.get("method", "wls")).lower()
+    use_af = bool(a.get("af", False))
+    if use_af and model.get("af") is None:
+        raise ValueError("af=true needs an AF library - run extract_af_library first.")
+    s, pnn, full, ev = _spectral_events(a.get("sample"), model["detectors"])
+    n = ev.shape[0]
+    cap = int(a.get("n", 0) or 0)
+    if cap and n > cap:
+        keep = np.sort(np.random.default_rng(int(a.get("seed", 12345))).choice(n, cap, replace=False))
+        full, ev = full[keep], ev[keep]
+    af_idx = None
+    if use_af:
+        ab, af_idx, _ = sp.unmix_with_af(ev, model["M"], model["af"], method)
+        names = list(model["names"]) + ["AF"]
+        res = np.sqrt(np.sum((ev - ab[:, :-1] @ model["M"]
+                              - ab[:, -1:] * model["af"][af_idx]) ** 2, axis=1))
+    else:
+        ab, _ = sp.unmix(ev, model["M"], method)
+        res = sp.residuals(ev, model["M"], ab)
+        names = list(model["names"])
+    scat = [c for c in pnn if _scatter(c)]
+    cols = [full[:, pnn.index(c)] for c in scat]
+    data = np.column_stack(cols + [ab, res]).astype("<f4")
+    return scat + names + ["Residual"], data, {
+        "method": method, "af": use_af, "n": int(data.shape[0]), "total": int(n),
+        "af_counts": None if af_idx is None else np.bincount(af_idx, minlength=model["af"].shape[0]).tolist()}
+
+@command("apply_unmixing")
+def _apply_unmixing(i, a):
+    """Unmix a sample and ship the result to Java as a float32 blob (same shape contract as get_events).
+    args: {sample, method?:'wls'|'ols', af?:false, n?:cap, seed?}
+    Columns: scatter channels, one per fluorophore (+ 'AF'), 'Residual'."""
+    import numpy as np
+    names, data, info = _unmix_sample(a or {})
+    path = os.path.join(CONTROL_DIR, "sfunmix_%s_%d.bin" % (i, int(time.time() * 1000)))
+    data.tofile(path)
+    ranges = {c: [float(np.min(data[:, j])), float(np.max(data[:, j]))] for j, c in enumerate(names)}
+    return dict(info, file=path, channels=names, rows=int(data.shape[0]), cols=len(names), ranges=ranges)
+
+@command("export_unmixed")
+def _export_unmixed(i, a):
+    """Unmix a sample and write it as FCS. args: {sample, file, method?, af?}  Returns {file, n, channels}."""
+    import spectral as sp
+    a = a or {}
+    if not a.get("file"):
+        raise ValueError("file path is required.")
+    names, data, info = _unmix_sample(a)
+    sp.write_fcs_f32(a["file"], names, data)
+    return dict(info, file=a["file"], channels=names)
 
 @command("apply_transformation")
 def _apply_transformation(i, a):
