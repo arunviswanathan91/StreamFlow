@@ -167,6 +167,40 @@ fn main() -> eframe::Result<()> {
             app.set_strip_open(id, true);
         }
     }
+    if args.iter().any(|a| a == "--build-layout") || flag("layout-pdf").is_some() {
+        app.set_module(sf_app::ui::Module::Layout);
+        if let Some(ax) = flag("axes") {
+            if let Some((x, y)) = ax.split_once(',') {
+                app.lay.x_chan = x.to_string();
+                app.lay.y_chan = y.to_string();
+            }
+        }
+        if let Some(g) = flag("layout-grid") {
+            if let Some((c, r)) = g.split_once('x') {
+                app.lay.spec.cols = c.parse().unwrap_or(3);
+                app.lay.spec.rows = r.parse().unwrap_or(2);
+            }
+        }
+        if let Some(pop) = flag("layout-population") {
+            app.lay.population = pop.split('/').map(str::to_string).filter(|s| !s.is_empty()).collect();
+        }
+        match app.build_layout() {
+            Ok(n) => eprintln!("layout built: {n} page(s)"),
+            Err(e) => eprintln!("layout failed: {e}"),
+        }
+        if let Some(p) = flag("layout-pdf") {
+            match app.write_layout_pdf(std::path::Path::new(&p)) {
+                Ok(()) => eprintln!("wrote {p}"),
+                Err(e) => eprintln!("could not write {p}: {e}"),
+            }
+            if let Some(p) = flag("layout-svg") {
+                if let Err(e) = app.write_layout_svg(std::path::Path::new(&p)) {
+                    eprintln!("could not write {p}: {e}");
+                }
+            }
+            std::process::exit(0);
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

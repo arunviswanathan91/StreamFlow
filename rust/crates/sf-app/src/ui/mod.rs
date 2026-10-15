@@ -6,6 +6,7 @@ mod analysis_view;
 mod compare_view;
 mod cross_view;
 mod discover_view;
+mod layout_view;
 mod export_view;
 mod graph;
 mod modules;
@@ -42,6 +43,7 @@ pub enum Module {
     Longitudinal,
     Scatter3d,
     Export,
+    Layout,
     Plugins,
     AnalysisLog,
 }
@@ -54,7 +56,7 @@ impl Module {
             "Analyses",
             &[Module::CellCycle, Module::Proliferation, Module::Apoptosis, Module::StatsComparison, Module::Kinetic, Module::Classifier, Module::CrossSample, Module::Longitudinal, Module::Scatter3d],
         ),
-        ("Output", &[Module::Export, Module::Plugins, Module::AnalysisLog]),
+        ("Output", &[Module::Export, Module::Layout, Module::Plugins, Module::AnalysisLog]),
     ];
 
     pub fn label(self) -> &'static str {
@@ -75,6 +77,7 @@ impl Module {
             Module::Longitudinal => "Longitudinal",
             Module::Scatter3d => "3D Scatter",
             Module::Export => "Export",
+            Module::Layout => "Layout",
             Module::Plugins => "Plugins",
             Module::AnalysisLog => "Analysis Log",
         }
@@ -98,6 +101,7 @@ impl Module {
             Module::Longitudinal => "⌇",
             Module::Scatter3d => "◇",
             Module::Export => "⇪",
+            Module::Layout => "▤",
             Module::Plugins => "⚙",
             Module::AnalysisLog => "☰",
         }
@@ -116,11 +120,13 @@ pub struct App {
     pub ana: analysis_view::State,
     pub cmp: compare_view::State,
     pub xs: cross_view::State,
+    pub lay: layout_view::State,
     pub(crate) disc_last_click: Option<(f64, eframe::egui::Pos2)>,
     pub spec: spectral_view::State,
     pub(crate) status: String,
     themed: bool,
     shot: Option<Shot>,
+    capture: Option<Capture>,
 }
 
 /// A request to save this app's own rendering as a PNG and quit (for documentation and checks); it only ever
@@ -151,15 +157,23 @@ impl App {
             ana: analysis_view::State::default(),
             cmp: compare_view::State::default(),
             xs: cross_view::State::default(),
+            lay: layout_view::State::default(),
             disc_last_click: None,
             spec: spectral_view::State::default(),
             status: "Open FCS files from the File menu (Ctrl+O).".into(),
             themed: false,
             shot: None,
+            capture: None,
         }
     }
 
     /// Save a PNG of the app's window after `wait_frames` frames, then quit.
+    /// Save or copy the pixels of `rect` (in points) as the app shows them, a couple of frames from now (so a
+    /// closing menu is gone).
+    pub(crate) fn begin_capture(&mut self, rect: egui::Rect, dest: CaptureDest) {
+        self.capture = Some(Capture { rect, dest, frames: 3, requested: false });
+    }
+
     pub fn request_screenshot(&mut self, path: std::path::PathBuf, wait_frames: u32) {
         self.shot = Some(Shot { path, wait_frames, requested: false });
     }
@@ -256,6 +270,7 @@ impl App {
             Module::CrossSample => self.cross_sample_screen(ui),
             Module::Classifier => self.classifier_screen(ui),
             Module::Export => self.export_module(ui),
+            Module::Layout => self.layout_screen(ui, ctx),
             Module::AnalysisLog => self.analysis_log(ui),
             other => modules::placeholder(ui, other),
         });
@@ -427,9 +442,59 @@ impl App {
     }
 }
 
+impl App {
+    /// Advance a pending capture: ask for a screenshot after a few frames and, when it arrives, crop it to the
+    /// region and save it (or copy it).
+    pub(crate) fn poll_capture(&mut self, ctx: &egui::Context) {
+        if let Some(c) = self.capture.as_mut() {
+            ctx.request_repaint();
+            if c.frames > 0 {
+                c.frames -= 1;
+            } else if !c.requested {
+                c.requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            let image = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+            if let Some(img) = image {
+                let c = self.capture.take().unwrap();
+                let region = img.region(&c.rect, Some(ctx.pixels_per_point()));
+                self.status = match c.dest {
+                    CaptureDest::File(p) => match write_png(&p, &region) {
+                        Ok(()) => format!("Saved the plot as {} ({} x {} px, as shown on screen).", p.display(), region.width(), region.height()),
+                        Err(e) => format!("Could not save the image: {e}"),
+                    },
+                    CaptureDest::Clipboard => match copy_to_clipboard(&region) {
+                        Ok(()) => format!("Copied the plot to the clipboard ({} x {} px).", region.width(), region.height()),
+                        Err(e) => format!("Could not copy the image: {e}"),
+                    },
+                };
+            }
+        }
+    }
+}
+
+/// Where a captured region goes.
+pub(crate) enum CaptureDest {
+    File(std::path::PathBuf),
+    Clipboard,
+}
+
+struct Capture {
+    rect: egui::Rect,
+    dest: CaptureDest,
+    frames: u32,
+    requested: bool,
+}
+
+fn copy_to_clipboard(img: &egui::ColorImage) -> Result<(), String> {
+    let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+    arboard::Clipboard::new().and_then(|mut c| c.set_image(arboard::ImageData { width: img.width(), height: img.height(), bytes: std::borrow::Cow::Owned(bytes) })).map_err(|e| e.to_string())
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.show(ctx);
+        self.poll_capture(ctx);
         if let Some(s) = self.shot.as_mut() {
             ctx.request_repaint();
             if s.wait_frames > 0 {

@@ -101,7 +101,7 @@ fn every_module_renders_with_and_without_data() {
     // each module has a unique label and icon-bearing nav entry
     let all: Vec<Module> = Module::GROUPS.iter().flat_map(|(_, i)| i.iter().copied()).collect();
     let labels: std::collections::HashSet<&str> = all.iter().map(|m| m.label()).collect();
-    assert_eq!((all.len(), labels.len()), (18, 18));
+    assert_eq!((all.len(), labels.len()), (19, 19));
 }
 
 #[test]
@@ -1063,4 +1063,122 @@ fn fit_all_widens_the_shared_view_to_every_samples_population() {
         assert!(v.iter().all(|x| *x >= all.x0 && *x <= all.x1), "sample {si} fits");
     }
     assert!(all.is_valid());
+}
+
+// ---- plot export and layouts -------------------------------------------------------------------------------------
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("sf_export_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
+#[test]
+fn a_graph_window_exports_as_a_figure_with_its_view_gates_and_fmo_line() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    let _ = plot;
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    app.refit_window(w);
+    settle(&mut app, &ctx);
+    let r = app.ws.graphs[&w].range.unwrap();
+    app.session.commit_shape(w, &Shape::Rect { x0: r.x0, x1: (r.x0 + r.x1) / 2.0, y0: r.y0, y1: (r.y0 + r.y1) / 2.0 }, "Lower left").unwrap();
+    app.session.set_fmo_from_window(w, 90.0).unwrap();
+    settle(&mut app, &ctx);
+    let fig = app.window_figure(w, 460.0, 400.0).unwrap();
+    let texts = fig.texts();
+    for want in ["t", "All Events", "CD3-A", "CD4-A", "Lower left", "FMO"] {
+        assert!(texts.iter().any(|t| t == want), "missing {want:?} in {texts:?}");
+    }
+    assert!(texts.iter().any(|t| t.ends_with("% of parent") && t.contains("3000 events")), "{texts:?}");
+    // written as a valid PDF and as well-formed SVG
+    let (pdf, svg) = (scratch("plot.pdf"), scratch("plot.svg"));
+    std::fs::write(&pdf, crate::figure::to_pdf(&[fig.clone()], "plot")).unwrap();
+    std::fs::write(&svg, crate::figure::to_svg(&fig)).unwrap();
+    assert_eq!(crate::figure::validate_pdf(&std::fs::read(&pdf).unwrap()), Ok(1));
+    assert!(sf_core::xml::parse(&std::fs::read_to_string(&svg).unwrap()).is_ok());
+    // hiding the FMO lines on the plot hides them in the export too
+    app.ws.graphs.get_mut(&w).unwrap().style.fmo = false;
+    let fig2 = app.window_figure(w, 460.0, 400.0).unwrap();
+    assert!(!fig2.texts().iter().any(|t| t == "FMO"));
+    // a window that has not been drawn yet has no view to export, and says so
+    app.ws.graphs.remove(&w);
+    assert!(app.window_figure(w, 460.0, 400.0).err().expect("no view yet").contains("no view"));
+}
+
+#[test]
+fn png_as_shown_crops_the_screenshot_to_the_plot_and_writes_exactly_those_pixels() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    let canvas = app.ws.graphs[&w].canvas_rect.expect("the canvas is recorded for export");
+    assert!(canvas.width() > 200.0 && canvas.height() > 200.0);
+    let path = scratch("shown.png");
+    let _ = std::fs::remove_file(&path);
+    app.begin_capture(egui::Rect::from_min_max(Pos2::new(10.0, 20.0), Pos2::new(60.0, 50.0)), super::CaptureDest::File(path.clone()));
+    // a fake full-window screenshot whose pixels encode their own position
+    let mut img = egui::ColorImage::new([200, 100], egui::Color32::BLACK);
+    for y in 0..100 {
+        for x in 0..200 {
+            img.pixels[y * 200 + x] = egui::Color32::from_rgb(x as u8, y as u8, 7);
+        }
+    }
+    let img = std::sync::Arc::new(img);
+    // the screenshot is requested only after a few frames, so early frames do nothing
+    for _ in 0..5 {
+        let _ = ctx.run(egui::RawInput { screen_rect: Some(screen()), ..Default::default() }, |c| app.poll_capture(c));
+    }
+    assert!(!path.exists());
+    let ev = egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, image: img };
+    let _ = ctx.run(egui::RawInput { screen_rect: Some(screen()), events: vec![ev], ..Default::default() }, |c| app.poll_capture(c));
+    assert!(path.exists(), "{}", app.status);
+    assert!(app.status.contains("50 x 30 px"), "{}", app.status);
+    let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+    let mut rd = dec.read_info().unwrap();
+    let mut buf = vec![0; rd.output_buffer_size().unwrap()];
+    let info = rd.next_frame(&mut buf).unwrap();
+    assert_eq!((info.width, info.height), (50, 30));
+    assert_eq!(&buf[..3], &[10, 20, 7], "top-left pixel of the crop is source pixel (10, 20)");
+    let last = (info.width * info.height - 1) as usize * 4;
+    assert_eq!(&buf[last..last + 3], &[59, 49, 7], "bottom-right is (59, 49)");
+}
+
+#[test]
+fn the_layout_screen_builds_pages_for_real_samples_and_writes_a_valid_pdf_and_svg() {
+    let Some(mut app) = multi_stain_app(7) else { return };
+    let ctx = egui::Context::default();
+    app.set_module(Module::Layout);
+    settle(&mut app, &ctx);
+    assert_eq!((app.lay.x_chan.as_str(), app.lay.y_chan.as_str()), ("FSC-A", "SSC-A"));
+    // nothing built yet: saving says so
+    assert!(app.write_layout_pdf(&scratch("none.pdf")).unwrap_err().contains("build the layout first"));
+    app.lay.spec.cols = 3;
+    app.lay.spec.rows = 2;
+    let pages = app.build_layout().unwrap();
+    assert_eq!(pages, 2, "7 plots at 6 per page");
+    settle(&mut app, &ctx); // the preview paints, including the density images as textures
+    let (pdf, svg) = (scratch("layout.pdf"), scratch("layout_page.svg"));
+    app.write_layout_pdf(&pdf).unwrap();
+    app.lay.page = 1;
+    settle(&mut app, &ctx);
+    app.write_layout_svg(&svg).unwrap();
+    assert_eq!(crate::figure::validate_pdf(&std::fs::read(&pdf).unwrap()), Ok(2));
+    let svg_text = std::fs::read_to_string(&svg).unwrap();
+    assert!(sf_core::xml::parse(&svg_text).is_ok());
+    assert!(svg_text.contains("Page 2 of 2"), "the second page was written");
+    // population and samples
+    app.lay.sel = vec![true, true, false, false, false, false, false];
+    assert_eq!(app.build_layout().unwrap(), 1);
+    app.lay.population = vec!["Nope".into()];
+    let e = app.build_layout().unwrap_err();
+    assert!(e.contains("no sample has events"), "{e}");
+    app.lay.population.clear();
+    app.lay.sel = vec![false; 7];
+    assert!(app.build_layout().unwrap_err().contains("tick at least one sample"));
+    // a grid that leaves plots too small is refused with advice
+    app.lay.sel = vec![true; 7];
+    app.lay.spec.cols = 10;
+    assert!(app.build_layout().unwrap_err().contains("smaller than 90 pt"));
 }
