@@ -851,3 +851,73 @@ fn a_gate_is_moved_and_resized_with_the_pointer_and_each_edit_is_one_undo_step()
     assert!(r1.x0 > r0.x0, "the plot panned: {r0:?} -> {r1:?}");
     assert_eq!(gate_of(&app, kid), before, "the gate was not touched by a pan");
 }
+
+// ---- cross-sample and classifier screens -------------------------------------------------------------------------
+
+#[test]
+fn cross_sample_and_classifier_work_on_real_samples_with_an_applied_gate() {
+    let Some(mut app) = multi_stain_app(8) else { return };
+    let ctx = egui::Context::default();
+    // one gate drawn on sample 0 and applied to every sample
+    let w = app.open_tab(0, GateTree::ROOT).unwrap();
+    settle(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_scale = ScaleSpec::Identity;
+    app.session.window_mut(w).unwrap().y_scale = ScaleSpec::Identity;
+    let r = app.ws.graphs[&w].range.unwrap();
+    let kid = app.session.commit_shape(w, &Shape::Rect { x0: r.x0, x1: (r.x0 + r.x1) / 2.0, y0: r.y0, y1: r.y1 }, "Left half").unwrap();
+    assert_eq!(app.session.apply_to_all(0, kid).unwrap(), 7);
+
+    // nothing computed yet: a clear message
+    app.set_module(Module::CrossSample);
+    settle(&mut app, &ctx);
+    app.xs.sel = vec![false; 8];
+    app.run_cross_sample();
+    assert!(app.status.contains("Tick at least one sample"), "{}", app.status);
+    app.xs.sel = vec![true; 8];
+    app.run_cross_sample();
+    let m = app.xs.matrix.clone().expect(&app.status);
+    assert_eq!((m.populations.len(), m.samples.len()), (1, 8));
+    for (si, f) in m.freq[0].iter().enumerate() {
+        let n = app.session.count(si, app.session.tree(si).find(&["Left half"]).unwrap()) as f64;
+        assert!((f - 100.0 * n / app.session.sample(si).n_events as f64).abs() < 1e-9, "sample {si}: {f}");
+    }
+    assert!(app.xs.drift.as_ref().unwrap().1[0].iter().any(|v| v.is_finite()));
+    for tab in [cross_view::Tab::Matrix, cross_view::Tab::Consistency, cross_view::Tab::Radar, cross_view::Tab::Drift] {
+        app.xs.tab = tab;
+        settle(&mut app, &ctx); // every tab draws, including the 'needs three populations' radar message
+    }
+
+    // classifier: no groups -> PCA only; then two groups of four -> forest
+    app.set_module(Module::Classifier);
+    settle(&mut app, &ctx);
+    app.run_classifier();
+    let r = app.xs.class.clone().expect(&app.status);
+    assert_eq!((r.method.as_str(), r.n_samples, r.n_features), ("PCA", 8, 1));
+    for i in 0..8 {
+        app.cmp.groups[i] = if i < 4 { "A".into() } else { "B".into() };
+    }
+    app.run_classifier();
+    let r = app.xs.class.clone().expect(&app.status);
+    assert!(r.method.starts_with("PCA + Random Forest"), "{}", r.method);
+    assert_eq!(r.rf_samples, 8);
+    settle(&mut app, &ctx);
+    // a group of two is refused with the engine's message
+    app.cmp.groups[0] = "C".into();
+    app.run_classifier();
+    assert!(app.xs.class.is_none() && app.status.contains("at least 3 samples per group"), "{}", app.status);
+    // fewer than two samples
+    app.xs.sel = vec![false, true, false, false, false, false, false, false];
+    app.run_classifier();
+    assert!(app.status.contains("at least 2 samples"), "{}", app.status);
+}
+
+#[test]
+fn cross_sample_without_gates_says_so() {
+    let Some(mut app) = multi_stain_app(3) else { return };
+    let ctx = egui::Context::default();
+    app.set_module(Module::CrossSample);
+    settle(&mut app, &ctx);
+    app.run_cross_sample();
+    assert!(app.status.contains("no gated populations"), "{}", app.status);
+    assert!(app.xs.matrix.is_none());
+}
