@@ -598,3 +598,58 @@ fn spectral_screen_builds_signatures_and_unmixes_real_controls() {
     app.spec.roles = vec![spectral_view::Assign::None; 8];
     assert!(app.spectral_build().unwrap_err().contains("at least two"));
 }
+
+// ---- cell cycle, proliferation, apoptosis screens ---------------------------------------------------------
+
+#[test]
+fn analysis_screens_run_on_the_real_annexin_and_dna_files_and_show_honest_results() {
+    let base = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test-assests/fcs"));
+    if !base.join("dual stain/annexin alone.fcs").exists() {
+        eprintln!("SKIPPED: fixtures missing");
+        return;
+    }
+    let ctx = egui::Context::default();
+    let mut app = App::new();
+    app.load_files(&[base.join("dual stain/annexin alone.fcs"), base.join("single stain/single-stain-pe.fcs")]);
+    assert_eq!(app.session.samples().len(), 2);
+
+    // apoptosis on the Annexin file: channels guessed (FL1 = Annexin, FL2 = viability), numbers equal the engine's
+    app.set_module(Module::Apoptosis);
+    settle(&mut app, &ctx);
+    assert_eq!((app.ana.annexin_channel.as_str(), app.ana.pi_channel.as_str()), ("FL1-A", "FL2-A"));
+    app.run_apoptosis();
+    let (_, r, pts) = app.ana.apop.as_ref().expect(&app.status);
+    assert!((r.quadrants.live - 78.32).abs() < 0.011 && (r.quadrants.necrotic - 14.84).abs() < 0.011, "{:?}", r.quadrants);
+    assert!(pts.len() <= 5000 && pts.len() >= 2500);
+    settle(&mut app, &ctx); // the plot and tables draw
+    // the same channel twice is refused with a message, not run
+    app.ana.pi_channel = app.ana.annexin_channel.clone();
+    app.run_apoptosis();
+    assert!(app.status.contains("two different channels"), "{}", app.status);
+
+    // cell cycle on the PI channel of the second file; the poor fit is reported, not hidden
+    app.set_module(Module::CellCycle);
+    app.ana.sample = 1;
+    settle(&mut app, &ctx);
+    assert_eq!(app.ana.cycle_channel, "PI-A");
+    app.run_cell_cycle();
+    let (label, r) = app.ana.cycle.as_ref().expect(&app.status);
+    assert!(label.contains("single-stain-pe.fcs"));
+    assert!((r.g1_pct + r.s_pct + r.g2_pct - 100.0).abs() < 1e-9);
+    assert!(r.r2 < 0.8, "this PE tube is not a DNA histogram, so the screen must warn (R2 {})", r.r2);
+    settle(&mut app, &ctx);
+    // a population that does not exist in the sample is an error, not a silent fall back to all events
+    app.ana.restrict = vec!["Nope".into()];
+    app.run_cell_cycle();
+    assert!(app.status.contains("does not exist"), "{}", app.status);
+    assert!(app.ana.cycle.is_none());
+    app.ana.restrict.clear();
+
+    // proliferation on a channel without dilution peaks must say so or return a result, never panic
+    app.set_module(Module::Proliferation);
+    settle(&mut app, &ctx);
+    app.ana.prolif_channel = "PI-A".into();
+    app.run_proliferation();
+    settle(&mut app, &ctx);
+    assert!(app.ana.prolif.is_some() || !app.status.is_empty());
+}
