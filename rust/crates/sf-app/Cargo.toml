@@ -1,0 +1,22 @@
+[package]
+name = "sf-app"
+description = "StreamFLOW desktop application (egui)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "sf_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "streamflow"
+path = "src/main.rs"
+
+[dependencies]
+sf-core = { path = "../sf-core" }
+sf-fcs = { path = "../sf-fcs" }
+sf-gating = { path = "../sf-gating" }
+eframe = "0.29"
+rfd = "0.15"
+png = "0.18"
