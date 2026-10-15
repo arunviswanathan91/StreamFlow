@@ -77,6 +77,8 @@ pub struct GraphUi {
     pub strip: HashMap<usize, (u64, StripThumb)>,
     /// Where each sample's card was drawn last frame (for hit-testing and tests).
     pub strip_rects: Vec<(usize, Rect)>,
+    /// The whole canvas (plot and axis labels) as last drawn, for exporting what is shown.
+    pub canvas_rect: Option<Rect>,
 }
 
 /// One sample's picture in the compare strip.
@@ -98,7 +100,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new() }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None }
     }
 }
 
@@ -349,6 +351,7 @@ impl App {
                     g.strip_open = !g.strip_open;
                 }
             }
+            ui.menu_button("⤓ Export", |ui| self.export_menu(ui, id, w));
             if theme::toggle(ui, self.ws.options_open, "⚙ Options").clicked() {
                 self.ws.options_open = !self.ws.options_open;
             }
@@ -604,6 +607,7 @@ impl App {
         let mut map = Mapper { rect: plot, range };
         if let Some(g) = self.ws.graphs.get_mut(&id) {
             g.plot_rect = Some(plot);
+            g.canvas_rect = Some(avail);
         }
         painter.rect_filled(plot, 0.0, Color32::WHITE);
         self.paint_population(ctx, id, &w, &map, &painter);
@@ -760,6 +764,43 @@ impl App {
         // the in-progress hint under the cursor
         if self.session.window(id).map_or(false, |w| w.drawing.is_active()) {
             ctx.request_repaint();
+        }
+    }
+
+    /// The graph window's Export menu: this plot as PDF / SVG (vector), or as the pixels shown (PNG / clipboard).
+    fn export_menu(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
+        let stem = format!("{}_{}_{}", w.x_chan, w.y_chan, self.session.sample(w.sample).name.trim_end_matches(".fcs")).replace(['/', '\\', ':', ' '], "_");
+        if ui.button("Plot as PDF…").on_hover_text("Vector graphics with live text; the current view, gates and FMO lines").clicked() {
+            ui.close_menu();
+            if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(format!("{stem}.pdf")).save_file() {
+                self.status = match self.window_figure(id, 460.0, 400.0).and_then(|f| std::fs::write(&p, crate::figure::to_pdf(&[f], &stem)).map_err(|e| e.to_string())) {
+                    Ok(()) => format!("Saved the plot to {}.", p.display()),
+                    Err(e) => format!("Could not export the plot: {e}"),
+                };
+            }
+        }
+        if ui.button("Plot as SVG…").on_hover_text("Vector graphics for Illustrator / Inkscape / PowerPoint").clicked() {
+            ui.close_menu();
+            if let Some(p) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).set_file_name(format!("{stem}.svg")).save_file() {
+                self.status = match self.window_figure(id, 460.0, 400.0).and_then(|f| std::fs::write(&p, crate::figure::to_svg(&f)).map_err(|e| e.to_string())) {
+                    Ok(()) => format!("Saved the plot to {}.", p.display()),
+                    Err(e) => format!("Could not export the plot: {e}"),
+                };
+            }
+        }
+        ui.separator();
+        let canvas = self.ws.graphs.get(&id).and_then(|g| g.canvas_rect);
+        if ui.add_enabled(canvas.is_some(), egui::Button::new("Plot as PNG (as shown)…")).on_hover_text("The pixels on screen, at screen resolution").clicked() {
+            ui.close_menu();
+            if let (Some(rect), Some(p)) = (canvas, rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name(format!("{stem}.png")).save_file()) {
+                self.begin_capture(rect, super::CaptureDest::File(p));
+            }
+        }
+        if ui.add_enabled(canvas.is_some(), egui::Button::new("Copy image to clipboard")).clicked() {
+            ui.close_menu();
+            if let Some(rect) = canvas {
+                self.begin_capture(rect, super::CaptureDest::Clipboard);
+            }
         }
     }
 
