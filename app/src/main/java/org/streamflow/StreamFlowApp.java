@@ -68,11 +68,11 @@ public class StreamFlowApp extends Application {
                     controller.setEngineStatus("Engine ready");
                 });
             } catch (Exception e) {
-                log.error("Failed to start R engine", e);
+                log.error("Failed to start the analysis engine", e);
                 Platform.runLater(() -> {
                     controller.setEngineStatus("Engine failed to start");
                     Alert a = new Alert(Alert.AlertType.ERROR,
-                            "The R analysis engine could not be started:\n\n" + e.getMessage());
+                            "The analysis engine could not be started:\n\n" + e.getMessage());
                     a.setHeaderText("Analysis Engine Error");
                     org.streamflow.ui.AppIcons.theme(a, null);
                     a.showAndWait();

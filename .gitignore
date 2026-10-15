@@ -1,6 +1,8 @@
 AUDIT_REPORT.md
 BUILDING.md
 MANUAL_TESTING.md
+IDEA.md
+audit-build.bat
 
 .claude/
 .claude.json
@@ -14,6 +16,9 @@ CLAUDE.local.md
 .windsurf/
 .github/copilot-instructions.md
 claude-code-java-main/
+
+# LGPL-3.0 reference checkout (carries its own .git) — read-only reference, never commit
+honeychrome/
 
 plans/
 PLAN.md

@@ -108,6 +108,11 @@ The suite includes `FxmlLoadTest` (loads every FXML through a real `FXMLLoader` 
 regressions) and `PyEngineTest` (exercises the live Python engine). Engine-dependent bridge tests
 skip automatically when their data or runtime is absent.
 
+> **Coverage caveat.** Most bridge tests currently target the legacy R engine; `PyEngineTest`
+> covers only `capabilities`, `load_fcs` and `get_events`. A green build therefore proves less
+> about the shipping Python engine than it appears to. See [STATUS.md](STATUS.md) for the
+> tracked plan to close this.
+
 ## Help
 
 Inside the app: **Help → User Guide** for the end-to-end workflow, and **Help → Compensation Help**
@@ -168,4 +173,6 @@ shaped how StreamFLOW thinks about reproducible cytometry. FlowJo and FCS Expres
 
 ## License
 
-See repository for licensing details.
+StreamFLOW is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
+
+Third-party dependencies remain under their own licenses; see the acknowledgements above.

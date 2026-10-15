@@ -276,6 +276,14 @@ public final class WorkspaceModel {
     public void setChannelRange(String channel, double min, double max) {
         if (channel != null && max > min) channelRange.put(channel, new double[]{min, max});
     }
+    /**
+     * Forget a marker's locked range so the next view re-locks it from the All-Events data.
+     * This is what "Fit to data" in the axis options needs: without it the stored lock would be
+     * re-applied on the next navigation and immediately undo the reset.
+     */
+    public void clearChannelRange(String channel) {
+        if (channel != null) channelRange.remove(channel);
+    }
 
     /** Live map for serialization (channel → scale). */
     public Map<String, String> channelScales() { return channelScales; }

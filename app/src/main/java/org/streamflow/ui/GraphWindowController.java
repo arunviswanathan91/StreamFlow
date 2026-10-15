@@ -71,6 +71,8 @@ public class GraphWindowController {
     @FXML private Button xAxisOptsButton, yAxisOptsButton;
     @FXML private Button prevSampleButton, nextSampleButton, copyButton, copySettingsButton, channelsButton;
     @FXML private Button fmoButton;
+    // Wired by onAction in graph-window.fxml; declared here so their enabled state can be bound.
+    @FXML private Button undoButton, redoButton, svgButton, removeGateButton;
     @FXML private Button compareButton;
     @FXML private MenuButton jumpButton;
     @FXML private ComboBox<String> sampleJumpCombo;
@@ -130,6 +132,14 @@ public class GraphWindowController {
     private final java.util.ArrayDeque<UndoEntry> redoStack = new java.util.ArrayDeque<>();
     private static final int UNDO_LIMIT = 50;
     private boolean suppressUndo = false;
+
+    /**
+     * Guards this controller's async {@code get_events} loads. Rapid Next/Prev can leave an older
+     * request in flight; without a token its response lands last and overwrites the plot the user is
+     * now looking at. Same idiom as CytoPlot's internal {@code gen == renderGen} check, applied here
+     * to the sample-load path that CytoPlot's guard does not cover.
+     */
+    private final java.util.concurrent.atomic.AtomicLong loadGen = new java.util.concurrent.atomic.AtomicLong();
 
     // gate edit pre-state (captured by setOnGateEditStart before any drag begins)
     private CytoPlot.Gate pendingEditGate;
@@ -198,6 +208,7 @@ public class GraphWindowController {
             GraphWindowController c = loader.getController();
             c.ctx = ctx;
             c.applyDefaultPreferences();
+            c.updateUndoButtons();          // both stacks start empty -> both buttons start disabled
             ctx.workspace().addTreeChangeListener(c.treeChangeListener);   // live sync across windows
             c.sample = title;
             c.plot.setChannelLabeler(ch -> ctx.aliases().label(ch));
@@ -558,6 +569,7 @@ public class GraphWindowController {
     // ---- data loading -------------------------------------------------------
 
     private void loadFromEngine(boolean initial) {
+        final long myGen = loadGen.incrementAndGet();
         refreshNav();
         // Workspace cache hit → restore instantly (shares the gating tree, so gates persist).
         EventData cached = ctx.workspace().data(sampleFile);
@@ -572,6 +584,7 @@ public class GraphWindowController {
         args.put("sample", sampleFile);
         Task<JsonNode> task = ctx.bridge().command("get_events", args);
         task.setOnSucceeded(e -> {
+            if (myGen != loadGen.get()) return;   // superseded by a newer load - drop this response
             try {
                 JsonNode r = task.getValue();
                 List<String> chans = new ArrayList<>();
@@ -594,6 +607,7 @@ public class GraphWindowController {
             }
         });
         task.setOnFailed(e -> {
+            if (myGen != loadGen.get()) return;   // superseded by a newer load - stale failure
             Throwable ex = task.getException();
             statusLabel.setText(ex instanceof RJobException ? ex.getMessage()
                     : "Load failed: " + (ex == null ? "?" : ex.getMessage()));
@@ -1054,6 +1068,13 @@ public class GraphWindowController {
     /** Lock the shown channels to their UNIVERSAL range (first sample to display a marker sets it from its
      *  All-Events data; every later sample reuses it), so a gate at fixed coordinates lands in the same
      *  place on every sample. See ui-bug-log BUG-17. */
+    /** Compact axis-bound text for the Min/Max fields: no decimals unless the value is small. */
+    private static String fmtAxisBound(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return "";
+        return (Math.abs(v) >= 100 || v == Math.rint(v)) ? String.format("%.0f", v)
+                                                         : String.format("%.2f", v);
+    }
+
     private void applyUniversalRange(boolean hist) {
         if (ctx == null || rootData == null) return;
         String xch = xAxisCombo.getValue();
@@ -1305,23 +1326,98 @@ public class GraphWindowController {
             showAxisOptions(xAxis, anchor);   // reopen with the new scale's control
         });
 
-        // range extension: widen the visible axis by ~one decade each side
+        // ---- axis range -----------------------------------------------------------------------
+        // The previous controls multiplied the bound by 10 on EVERY click with no ceiling, so a few
+        // clicks pushed the axis to +/-1e6 and squashed the distribution into an unreadable blob.
+        // They also wrote only to the plot, so applyUniversalRange() (BUG-17) silently overwrote
+        // them on the next navigation, and nothing pushed an undo entry - there was no way back.
+        // Now: type exact bounds, extend in clamped decade steps, reset for real, and every change
+        // is undoable with Ctrl+Z like any other edit.
+        final double dataMax = Math.max(1, xAxis ? plot.xDataMax() : plot.yDataMax());
+        final double loLimit = -dataMax;        // never more negative than the positive data extent
+        final double hiLimit = dataMax * 10;    // at most one decade of headroom above the data
+
+        javafx.scene.control.TextField minField = new javafx.scene.control.TextField();
+        javafx.scene.control.TextField maxField = new javafx.scene.control.TextField();
+        minField.setPrefColumnCount(7);
+        maxField.setPrefColumnCount(7);
+
         Button extMinus = new Button("− Extend");
-        Button extPlus = new Button("+ Extend");
+        Button extPlus  = new Button("+ Extend");
+
+        Runnable syncRangeUi = () -> {
+            double lo = xAxis ? plot.xMin() : plot.yMin();
+            double hi = xAxis ? plot.xMax() : plot.yMax();
+            minField.setText(fmtAxisBound(lo));
+            maxField.setText(fmtAxisBound(hi));
+            extMinus.setDisable(lo <= loLimit + 1e-9);
+            extPlus.setDisable(hi >= hiLimit - 1e-9);
+        };
+
+        // Apply + persist as this marker's universal range so navigation stops discarding it.
+        java.util.function.BiConsumer<Double, Double> applyRange = (lo, hi) -> {
+            double l = Math.max(loLimit, lo);
+            double h = Math.min(hiLimit, hi);
+            if (h <= l) h = l + Math.max(1e-9, Math.abs(l) * 0.01);
+            if (xAxis) { plot.setXMin(l); plot.setXMax(h); }
+            else       { plot.setYMin(l); plot.setYMax(h); }
+            if (chan != null) ctx.workspace().setChannelRange(chan, l, h);
+            syncRangeUi.run();
+        };
+
+        // Every range edit goes on the shared undo stack, so Ctrl+Z steps back out of an extend.
+        java.util.function.BiConsumer<Double, Double> setRange = (lo, hi) -> {
+            final double oldLo = xAxis ? plot.xMin() : plot.yMin();
+            final double oldHi = xAxis ? plot.xMax() : plot.yMax();
+            applyRange.accept(lo, hi);
+            final double newLo = xAxis ? plot.xMin() : plot.yMin();
+            final double newHi = xAxis ? plot.xMax() : plot.yMax();
+            if (oldLo != newLo || oldHi != newHi) {
+                pushUndo(() -> applyRange.accept(oldLo, oldHi),
+                         () -> applyRange.accept(newLo, newHi));
+            }
+        };
+
+        minField.setOnAction(ev -> {
+            try { setRange.accept(Double.parseDouble(minField.getText().trim()),
+                                  xAxis ? plot.xMax() : plot.yMax()); }
+            catch (NumberFormatException nf) { syncRangeUi.run(); }   // bad input -> show actual
+        });
+        maxField.setOnAction(ev -> {
+            try { setRange.accept(xAxis ? plot.xMin() : plot.yMin(),
+                                  Double.parseDouble(maxField.getText().trim())); }
+            catch (NumberFormatException nf) { syncRangeUi.run(); }
+        });
+
         extMinus.setOnAction(ev -> {
             double lo = xAxis ? plot.xMin() : plot.yMin();
             double hi = xAxis ? plot.xMax() : plot.yMax();
-            double newLo = lo < 0 ? lo * 10 : -Math.max(1000, Math.abs(hi) * 0.1);
-            if (xAxis) plot.setXMin(newLo); else plot.setYMin(newLo);
+            setRange.accept(lo < 0 ? lo * 10 : -Math.max(100, dataMax * 0.01), hi);
         });
         extPlus.setOnAction(ev -> {
+            double lo = xAxis ? plot.xMin() : plot.yMin();
             double hi = xAxis ? plot.xMax() : plot.yMax();
-            double newHi = hi > 0 ? hi * 10 : 1000;
-            if (xAxis) plot.setXMax(newHi); else plot.setYMax(newHi);
+            setRange.accept(lo, hi > 0 ? hi * 10 : 1000);
         });
-        // Revert just the range (undo Extend) without resetting the transform width like Auto does.
-        Button resetRange = new Button("Reset range");
-        resetRange.setOnAction(ev -> { if (xAxis) plot.resetXRange(); else plot.resetYRange(); });
+
+        // Must ALSO drop the stored lock, or applyUniversalRange() re-applies it on the next
+        // navigation and "reset" appears to do nothing.
+        Button resetRange = new Button("Fit to data");
+        resetRange.setOnAction(ev -> {
+            final double oldLo = xAxis ? plot.xMin() : plot.yMin();
+            final double oldHi = xAxis ? plot.xMax() : plot.yMax();
+            if (chan != null) ctx.workspace().clearChannelRange(chan);
+            if (xAxis) plot.resetXRange(); else plot.resetYRange();
+            syncRangeUi.run();
+            pushUndo(() -> applyRange.accept(oldLo, oldHi),
+                     () -> { if (chan != null) ctx.workspace().clearChannelRange(chan);
+                             if (xAxis) plot.resetXRange(); else plot.resetYRange();
+                             syncRangeUi.run(); });
+        });
+
+        syncRangeUi.run();
+        HBox rangeRow = new HBox(6, new Label("Min:"), minField, new Label("Max:"), maxField);
+        rangeRow.setAlignment(Pos.CENTER_LEFT);
         HBox extend = new HBox(6, extMinus, extPlus, resetRange);
         extend.setAlignment(Pos.CENTER_LEFT);
 
@@ -1331,7 +1427,7 @@ public class GraphWindowController {
         tfRow.setAlignment(Pos.CENTER_LEFT);
         HBox footer = new HBox(8, valLbl, auto);
         footer.setAlignment(Pos.CENTER_LEFT);
-        VBox box = new VBox(8, title, tfRow, hint, slider, extend, footer);
+        VBox box = new VBox(8, title, tfRow, hint, slider, rangeRow, extend, footer);
         box.setStyle("-fx-padding:12; -fx-min-width:240;");
 
         PopOver pop = new PopOver(box);
@@ -1582,7 +1678,11 @@ public class GraphWindowController {
             () -> { removeNode(addedNode); },
             () -> { reAddNode(addedNode, addedParent, addedIdx); }
         );
-        openChildForNode(node, false);   // auto-open without stealing focus from the drawing window
+        // Do NOT auto-open the new population. That comment ("without stealing focus") described the
+        // old behaviour, when every gate opened its OWN window so the drawing window stayed put.
+        // Once windows were unified to one per sample (BUG-10), openChild() navigates the EXISTING
+        // window instead - so this line silently drilled the user into the child they had just drawn,
+        // losing the parent view and its axes. FlowJo stays on the parent; double-click to enter.
     }
 
     private void onQuadrantDrawn(CytoPlot.Gate qg) {
@@ -1941,6 +2041,17 @@ public class GraphWindowController {
         if (undoStack.size() >= UNDO_LIMIT) undoStack.removeFirst();
         undoStack.addLast(new UndoEntry(undo, redo));
         redoStack.clear();
+        updateUndoButtons();
+    }
+
+    /**
+     * ArrayDeque is not observable, so there is no property to bind - refresh the two buttons at the
+     * end of every push/pop instead. Cheaper and clearer than wrapping the stacks in a synthetic
+     * property just to drive two disabled states.
+     */
+    private void updateUndoButtons() {
+        if (undoButton != null) undoButton.setDisable(undoStack.isEmpty());
+        if (redoButton != null) redoButton.setDisable(redoStack.isEmpty());
     }
 
     @FXML private void onUndo() { doUndo(); }
@@ -1952,6 +2063,7 @@ public class GraphWindowController {
         suppressUndo = true;
         try { e.undo().run(); } finally { suppressUndo = false; }
         if (redoStack.size() < UNDO_LIMIT) redoStack.addLast(e);
+        updateUndoButtons();
         statusLabel.setText("Undo. " + undoStack.size() + " action(s) remaining.");
     }
 
@@ -1961,6 +2073,7 @@ public class GraphWindowController {
         suppressUndo = true;
         try { e.redo().run(); } finally { suppressUndo = false; }
         if (undoStack.size() < UNDO_LIMIT) undoStack.addLast(e);
+        updateUndoButtons();
         statusLabel.setText("Redo.");
     }
 

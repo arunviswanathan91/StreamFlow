@@ -1,93 +1,113 @@
-# StreamFLOW — Java desktop UI (Phase 0)
+# StreamFLOW — JavaFX desktop app
 
-Native JavaFX desktop front-end for the StreamFLOW flow-cytometry suite. The
-heavy compute stays in R (Bioconductor / CytoExploreR) running as a background
-process; Java owns the window, file dialogs, and async orchestration. See
-`../engine/streamflow_engine.R` for the R side and the project plan for the full
-architecture.
+Native JavaFX front-end for StreamFLOW. Plotting and gating run **natively in Java**
+(`CytoPlot` renders off the FX thread); analysis runs in a headless **Python engine**
+(`../engine/streamflow_engine.py`, FlowKit/NumPy/SciPy/scikit-learn) spawned as a child process
+and driven over a JSON line protocol, with bulk event data shipped as little-endian `float32`
+blobs.
 
-This is **Phase 0**: the JavaFX ⇄ R bridge, the async job model, the app shell,
-and a developer console that proves the architecture end-to-end. The real
-analysis modules land in later phases.
+A legacy **R** engine (`../engine/streamflow_engine.R`) is retained for R-based plugins and for a
+subset of the test suite. The Python engine is the default everywhere the app actually runs —
+`run-dev.ps1` and `package.ps1` both select it explicitly.
+
+See [../STATUS.md](../STATUS.md) for what is built vs. open.
 
 ## Prerequisites
 
-The repo is **self-contained for building** — no system JDK or Maven needed:
+The repo bundles a JDK and Maven, so no system install is strictly required:
 
-- **JDK**: bundled **Microsoft Build of OpenJDK 25 (LTS)** at `../jdk-25.0.3+9`.
-- **Maven**: bundled **Apache Maven 3.9.16** at `../apache-maven-3.9.16`.
-- The `build.ps1` / `run-dev.ps1` scripts pin `JAVA_HOME`, use the bundled Maven,
-  and set `MAVEN_OPTS` to trust the **Windows certificate store** (so Maven Central
-  works behind a TLS-intercepting proxy/AV — otherwise you'd get a PKIX
-  "unable to find valid certification path" error).
-- **R** is the only external requirement: `jsonlite` for Phase 0, and from Phase 1
-  on the full Bioconductor/CytoExploreR stack. In a packaged build this is the
-  bundled `R-Portable`; in dev, point the scripts at any Rscript with `-Rscript`.
+- **JDK**: bundled Microsoft Build of OpenJDK at `../jdk-25.0.3+9`. The pom targets
+  `release 21`, so any JDK 21+ works — `build.ps1`/`package.ps1` fall back to `JAVA_HOME`.
+  `jpackage` is required for packaging.
+- **Maven**: bundled Apache Maven 3.9.16 at `../apache-maven-3.9.16`, with fallback to `mvn`
+  on PATH.
+- `build.ps1` / `run-dev.ps1` pin `JAVA_HOME` and set `MAVEN_OPTS` to trust the **Windows
+  certificate store**, so Maven Central works behind a TLS-intercepting proxy or AV (otherwise
+  you get a PKIX "unable to find valid certification path" error).
+- **Python**: a staged environment at `../engine/py-env` for development
+  (`../engine/stage-python.ps1`), or the relocatable `target/python` that packaging bundles.
+- **R** is optional — needed only for R-based plugins and the R-engine tests.
 
-> The repo lives in a OneDrive-synced folder, which can transiently lock
-> `target/`; if `mvn clean` fails to delete it, just `rm -rf target` and retry.
+> ⚠️ **OneDrive.** This repo syncs through OneDrive, which can leave files as placeholders that
+> native processes cannot read. Symptoms look like code bugs but are not: the bundled JDK fails
+> with `Error loading java.security file`, and Python tests fail with `OSError: [Errno 22]` on
+> FCS fixtures. Mark `jdk-*`, `test-assests` and `engine/py-env` as *Always keep on this device*,
+> or move the repo out of OneDrive. OneDrive can also transiently lock `target/` — if
+> `mvn clean` fails to delete it, retry.
 
-## Run the app (dev)
+## Run (dev)
 
 ```powershell
 # from app\
-./run-dev.ps1                                   # Rscript from PATH / bundled R-Portable
-./run-dev.ps1 -Rscript "C:\Program Files\R\R-4.4.2\bin\Rscript.exe"
+./run-dev.ps1          # builds, then launches via the JavaFX Maven plugin
+./build.ps1            # build only
 ```
 
-Then in the **Developer / Engine Console**:
-- **Ping / R Version** — basic round-trip over the stdio JSON protocol.
-- **Sleep (5s, cancellable)** — start it, then click the nav items and drag the
-  window: the UI stays fully responsive while R works (the freeze fix). Hit
-  **Cancel** to prove cooperative cancellation.
-- **Trigger Error** — shows the real R error message surfaced to the UI.
-- **Noisy stdout** — R does `cat()`/`print()`; the JSON stream stays intact
-  (proves the `sink(stderr())` guard).
-
-## Verify (Phase 0 gate)
+## Test
 
 ```powershell
-# from app\  — runs the protocol conformance test against a real R engine
-./build.ps1 -Rscript "C:\Program Files\R\R-4.4.2\bin\Rscript.exe"
+$env:JAVA_HOME = "C:\Program Files\Java\jdk-21.0.10"   # or the bundled JDK
+mvn -B clean test
 ```
 
-`ProtocolConformanceTest` asserts: ready handshake, echo/version round-trip,
-progress frames, cooperative cancel, error+traceback replies, malformed-request
-resilience, and that stray R stdout never corrupts the stream. (The test is
-skipped automatically if no Rscript is available.)
+The suite covers the FXML markup (`FxmlLoadTest` loads every FXML through a real `FXMLLoader`),
+pure-Java maths (`StatsTest`, `LogicleTest`, `CoordinateMapperTest`, `EmbeddingRulesTest`),
+plotting (`CytoPlot*Test`), the plugin registry, and the engine bridge.
 
-Orphan-safety check (manual): launch the app, find the child `Rscript.exe` in
-Task Manager, kill the `java`/JavaFX process — the engine should exit on its own
-within seconds (stdin EOF), leaving no lingering R process.
+> **Coverage caveat.** Most `bridge/` tests point `streamflow.engine` at the **R** script;
+> only `PyEngineTest` targets Python, and it covers 3 of 45 commands. A green build proves
+> less about the shipping engine than it appears to — see [../STATUS.md](../STATUS.md) (P0).
 
-## Build a Windows app (jpackage)
+Tests needing R or the large FCS fixtures self-skip via JUnit assumptions; a skipped test in CI
+is expected, not a failure.
 
-Produces a self-contained app-image (StreamFLOW.exe + bundled JRE + R), so end
-users need neither Java nor R:
+## Package a Windows app (jpackage)
+
+Produces a self-contained app-image (StreamFLOW.exe + private JRE + engine + portable Python),
+so end users need neither Java nor Python:
 
 ```powershell
-# 1) one-time / when R deps change — stage a minimal portable R (slow, ~1 GB):
-powershell -ExecutionPolicy Bypass -File engine\stage-r-portable.ps1
-# 2) build the app image (or add -Installer for an .exe, needs WiX):
-powershell -ExecutionPolicy Bypass -File app\package.ps1
-# output: app\target\dist\StreamFLOW\
+# 1) when Python deps change — stage the relocatable runtime into app\target\python:
+powershell -ExecutionPolicy Bypass -File ..\engine\stage-python.ps1
+
+# 2) optional: stage R too, only if you want the R plugin runway bundled:
+powershell -ExecutionPolicy Bypass -File ..\engine\stage-r-portable.ps1
+
+# 3) build — app-image (no WiX needed):
+powershell -ExecutionPolicy Bypass -File .\package.ps1 -SkipR -Version 1.2.0
+#    or a real installer (needs WiX 3.x on PATH):
+powershell -ExecutionPolicy Bypass -File .\package.ps1 -Installer -Version 1.2.0
+
+# output: app\target\dist\
 ```
 
-The app resolves the bundled engine + R-Portable via `-Dstreamflow.appDir`
-(set by `package.ps1`). *Status: scripts are ready; the first packaged build still
-needs a validation run (jpackage classpath + runtime path).*
+`package.ps1` deliberately does **not** run `mvn clean` — `target/python` and `target/R-Portable`
+are staged into `target` before it runs, and cleaning would delete them, producing an installer
+with no engine. It removes only the Maven build outputs.
+
+The packaged app resolves its bundled engine via `-Dstreamflow.appDir` and selects the Python
+engine via `-Dstreamflow.engine.kind=python`, both baked in by `package.ps1`.
+
+CI: `.github/workflows/release.yml` installs WiX and publishes the installer as a GitHub Release
+on a `v*` tag.
 
 ## Layout
 
 ```
 app/
-  pom.xml                         Maven build (OpenJFX, controlsfx, Jackson, JUnit)
-  run-dev.ps1 / build.ps1         JDK-pinned launchers
+  pom.xml                      Maven build (OpenJFX 21, ControlsFX, Ikonli, Jackson, PDFBox, JUnit 5)
+  run-dev.ps1 / build.ps1      JDK-pinned launchers
+  package.ps1                  jpackage packaging (app-image or .exe installer)
   src/main/java/org/streamflow/
-    StreamFlowApp.java            JavaFX entry point
-    bridge/                       R process + stdio JSON protocol + async jobs
-    ui/MainController.java         shell controller (Phase 0 dev console)
+    StreamFlowApp.java         JavaFX entry point
+    bridge/                    engine process + stdio JSON protocol + async job model
+                               (RBridge, EnginePaths, RJob, BridgeService, RProgress)
+    plugins/                   plugin discovery and registry
+    ui/                        27 controllers + CytoPlot (native plot/gating canvas),
+                               WorkspaceModel, GraphWindowController, Stats, AppSettings
   src/main/resources/org/streamflow/ui/
-    main.fxml, streamflow-dark.css
-  src/test/java/.../ProtocolConformanceTest.java
+    *.fxml, streamflow-dark.css
+  src/test/java/org/streamflow/
+    bridge/                    protocol conformance + per-command-family tests
+    ui/                        maths, plotting and FXML-integrity tests
 ```

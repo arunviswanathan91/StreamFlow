@@ -114,18 +114,27 @@ public final class RBridge implements AutoCloseable {
         return bridge;
     }
 
+    /**
+     * Which engine this bridge actually spawned. The class is still called {@code RBridge} for
+     * historical reasons, but the shipping engine is Python — messages that hardcoded "R engine"
+     * sent users hunting for an R install that is not required.
+     */
+    private static String engineKind() {
+        return EnginePaths.usePython() ? "Python" : "R";
+    }
+
     private void awaitReady() throws IOException {
         try {
             JsonNode ready = readyQueue.poll(READY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             if (ready == null) {
                 killProcessTree();
-                throw new IOException("R engine did not become ready within "
+                throw new IOException(engineKind() + " analysis engine did not become ready within "
                         + READY_TIMEOUT_MS + "ms");
             }
-            log.info("R engine ready: {}", ready);
+            log.info("{} engine ready: {}", engineKind(), ready);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IOException("Interrupted waiting for R engine", e);
+            throw new IOException("Interrupted waiting for the " + engineKind() + " engine", e);
         }
     }
 

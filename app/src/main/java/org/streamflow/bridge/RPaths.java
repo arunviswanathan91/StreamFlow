@@ -26,7 +26,11 @@ public final class RPaths {
     /** Directory the app is running from (jpackage app dir, or the working dir in dev). */
     public static Path appDir() {
         String override = System.getProperty("streamflow.appDir");
-        if (override != null && !override.isBlank()) return Paths.get(override);
+        // Normalise: the packaged launcher passes <image>\app\..\content (jpackage puts
+        // --app-content at the image root, one level up from $APPDIR). Leaving the ".." in makes
+        // every derived path confusing in logs and breaks naive path equality checks.
+        if (override != null && !override.isBlank())
+            return Paths.get(override).toAbsolutePath().normalize();
         return Paths.get("").toAbsolutePath();
     }
 
