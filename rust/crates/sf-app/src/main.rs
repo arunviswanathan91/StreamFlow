@@ -91,6 +91,18 @@ fn main() -> eframe::Result<()> {
         app.set_module(sf_app::ui::Module::Apoptosis);
         app.run_apoptosis();
     }
+    if args.iter().any(|a| a == "--auto-groups") {
+        let n = app.session.samples().len();
+        app.cmp.groups = (0..n).map(|i| if i < n / 2 { "A".to_string() } else { "B".to_string() }).collect();
+    }
+    if args.iter().any(|a| a == "--run-comparison") {
+        app.set_module(sf_app::ui::Module::StatsComparison);
+        app.run_comparison();
+    }
+    if args.iter().any(|a| a == "--run-kinetics") {
+        app.set_module(sf_app::ui::Module::Kinetic);
+        app.run_kinetics();
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

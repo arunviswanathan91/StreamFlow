@@ -41,6 +41,25 @@ pub fn erf(x: f64) -> f64 {
     x.signum() * (1.0 - erfc)
 }
 
+/// `erfc(x) = 1 - erf(x)` without losing the tail: for `x >= 2.5` the continued fraction is used directly,
+/// so `erfc(10)` keeps its ~1e-45 value instead of rounding to zero.
+pub fn erfc(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 2.5 {
+        return 1.0 - erf(x);
+    }
+    if x > 27.0 {
+        return 0.0;
+    }
+    let mut f = 0.0f64;
+    for k in (1..=60).rev() {
+        f = (k as f64 / 2.0) / (x + f);
+    }
+    (-x * x).exp() / ((x + f) * std::f64::consts::PI.sqrt())
+}
+
 #[derive(Debug, Clone)]
 pub struct Fit {
     pub params: Vec<f64>,

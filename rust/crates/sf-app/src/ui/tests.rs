@@ -653,3 +653,102 @@ fn analysis_screens_run_on_the_real_annexin_and_dna_files_and_show_honest_result
     settle(&mut app, &ctx);
     assert!(app.ana.prolif.is_some() || !app.status.is_empty());
 }
+
+// ---- stats comparison and kinetic screens -----------------------------------------------------------------
+
+fn multi_stain_app(n: usize) -> Option<App> {
+    let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test-assests/fcs/multi stain"));
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).ok()?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map_or(false, |x| x == "fcs")).collect();
+    files.sort();
+    files.truncate(n);
+    if files.len() < n {
+        eprintln!("SKIPPED: fixtures missing");
+        return None;
+    }
+    let mut app = App::new();
+    app.load_files(&files);
+    Some(app)
+}
+
+#[test]
+fn stats_comparison_screen_matches_the_tests_run_directly_and_reports_what_it_dropped() {
+    let Some(mut app) = multi_stain_app(8) else { return };
+    let ctx = egui::Context::default();
+    app.set_module(Module::StatsComparison);
+    settle(&mut app, &ctx);
+    // nothing assigned: a clear message
+    app.run_comparison();
+    assert!(app.status.contains("at least 2 groups"), "{}", app.status);
+    // two groups of four, median of the first fluorescence channel of all events
+    for i in 0..8 {
+        app.cmp.groups[i] = if i < 4 { "A".into() } else { "B".into() };
+    }
+    app.cmp.metric = crate::stats_table::Metric::COMMON.iter().position(|m| *m == crate::stats_table::Metric::Median).unwrap();
+    app.run_comparison();
+    let (label, c) = app.cmp.result.clone().expect(&app.status);
+    assert!(label.contains("All Events") && label.contains("Median"), "{label}");
+    assert_eq!(c.test, "Mann-Whitney U");
+    let (a, b) = (c.groups[0].values.clone(), c.groups[1].values.clone());
+    let mut all: Vec<f64> = a.iter().chain(&b).copied().collect();
+    all.sort_by(|x, y| x.total_cmp(y));
+    let ties = all.windows(2).any(|w| w[0] == w[1]);
+    assert_eq!(c.method, if ties { "asymptotic" } else { "exact" }, "SciPy's auto rule: exact for 4 v 4 only without ties; values {all:?}");
+    assert_eq!((a.len(), b.len()), (4, 4));
+    let direct = sf_core::htest::mann_whitney_u(&a, &b).unwrap();
+    assert_eq!(c.p, direct.p, "the screen reports exactly what the test returns on the same numbers");
+    // each value really is the median of that channel in that sample
+    let ch = app.cmp.channel.clone();
+    let m0 = app.session.population_values(0, GateTree::ROOT, &ch).unwrap();
+    assert!((a[0] - sf_core::stats::percentile(&m0, 50.0)).abs() < 1e-9);
+    settle(&mut app, &ctx);
+    // three groups -> Kruskal-Wallis
+    for i in 6..8 {
+        app.cmp.groups[i] = "C".into();
+    }
+    app.run_comparison();
+    assert!(app.cmp.result.as_ref().unwrap().1.test.starts_with("Kruskal-Wallis"));
+    // a population only some samples have is reported as dropped, not treated as zero
+    app.cmp.restrict = vec!["Nope".into()];
+    app.run_comparison();
+    assert!(app.cmp.result.is_none() && app.status.contains("at least 2 groups"), "{}", app.status);
+    // pairing needs equal sizes and exactly two groups
+    app.cmp.restrict.clear();
+    app.cmp.paired = true;
+    app.run_comparison();
+    assert!(app.status.contains("exactly two groups"), "{}", app.status);
+}
+
+#[test]
+fn kinetic_screen_uses_the_real_time_channel_and_names_the_samples_it_skips() {
+    let Some(mut app) = multi_stain_app(6) else { return };
+    let ctx = egui::Context::default();
+    app.set_module(Module::Kinetic);
+    settle(&mut app, &ctx);
+    assert_eq!(app.cmp.k_time, "Time");
+    for i in 0..6 {
+        app.cmp.groups[i] = if i % 2 == 0 { "even".into() } else { "odd".into() };
+    }
+    app.cmp.k_bins = 40;
+    app.run_kinetics();
+    let run = app.cmp.k_result.as_ref().expect(&app.status);
+    assert_eq!(run.series.len(), 2);
+    assert_eq!(run.series[0].n_samples + run.series[1].n_samples, 6);
+    assert_eq!(run.series[0].times.len(), 40);
+    assert!(run.skipped.is_empty());
+    assert!(run.series[0].mfi.iter().any(|v| v.is_finite()));
+    settle(&mut app, &ctx);
+    // a sample without a Time channel is listed as skipped, not silently dropped from the average
+    app.session.add_sample(LoadedSample::synthetic("notime.fcs", &["FITC-A"], vec![1e5], vec![1.0, 2.0, 3.0]));
+    settle(&mut app, &ctx);
+    app.cmp.k_sel = vec![true; 7];
+    app.run_kinetics();
+    let run = app.cmp.k_result.as_ref().expect(&app.status);
+    assert_eq!(run.skipped.len(), 1);
+    assert!(run.skipped[0].starts_with("notime.fcs"), "{:?}", run.skipped);
+    assert_eq!(run.series.iter().map(|s| s.n_samples).sum::<usize>(), 6);
+    // a population that does not exist: skipped with the reason, not an empty curve
+    app.cmp.k_time = "Time".into();
+    app.cmp.restrict = vec!["Nope".into()];
+    app.run_kinetics();
+    assert!(app.cmp.k_result.is_none());
+}
