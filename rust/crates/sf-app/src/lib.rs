@@ -13,6 +13,8 @@ pub mod plot_figure;
 pub mod gate_edit;
 pub mod jobs;
 pub mod layout;
+pub mod layout_doc;
+pub mod layout_render;
 pub mod sample;
 pub mod session;
 pub mod spectral_app;

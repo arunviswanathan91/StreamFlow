@@ -9,6 +9,7 @@ use sf_core::scale::ScaleSpec;
 use sf_gating::{Gate, GateKind, GateTree, NodeKind};
 use workstation::Tab;
 use crate::embed;
+use crate::layout_doc::LayerRole;
 
 fn app_with_sample() -> App {
     let mut app = App::new();
@@ -1182,3 +1183,126 @@ fn the_layout_screen_builds_pages_for_real_samples_and_writes_a_valid_pdf_and_sv
     app.lay.spec.cols = 10;
     assert!(app.build_layout().unwrap_err().contains("smaller than 90 pt"));
 }
+
+// ---- the layout editor -------------------------------------------------------------------------------------------
+
+fn editor_app() -> (App, egui::Context) {
+    let ctx = egui::Context::default();
+    let mut app = two_sample_app();
+    app.set_module(Module::Layout);
+    app.lay.tab = super::layout_view::LayTab::Editor;
+    settle(&mut app, &ctx);
+    (app, ctx)
+}
+
+fn page_pt(app: &App, fx: f32, fy: f32) -> Pos2 {
+    let (rect, _) = app.lay.ed.canvas.expect("the canvas is drawn");
+    Pos2::new(rect.left() + fx * rect.width(), rect.top() + fy * rect.height())
+}
+
+fn drag_sample(app: &mut App, ctx: &egui::Context, name: &str, to: Pos2) {
+    let from = row(app, name);
+    drag(app, ctx, from, to);
+}
+
+fn row(app: &App, name: &str) -> Pos2 {
+    app.lay.ed.sample_rows.iter().find(|(n, _)| n == name).expect("sample row").1.center()
+}
+
+#[test]
+fn dragging_samples_onto_the_page_makes_tiles_and_overlays_and_tiles_move_and_resize() {
+    let (mut app, ctx) = editor_app();
+    assert_eq!(app.lay.ed.sample_rows.len(), 2);
+    assert!(app.lay.ed.doc.tiles.is_empty());
+    // drag t.fcs from the list to the left part of the page -> a new tile with that sample as its layer
+    { let to = page_pt(&app, 0.25, 0.4); drag_sample(&mut app, &ctx, "t.fcs", to); }
+    settle(&mut app, &ctx);
+    assert_eq!(app.lay.ed.doc.tiles.len(), 1, "{}", app.status);
+    let tile = app.lay.ed.doc.tiles[0].clone();
+    assert_eq!(tile.layers.len(), 1);
+    assert_eq!((tile.layers[0].sample.as_str(), tile.layers[0].role), ("t.fcs", LayerRole::Iterator));
+    let (page_w, page_h) = (app.lay.ed.doc.page().width, app.lay.ed.doc.page().height);
+    assert!((tile.x + tile.w / 2.0 - 0.25 * page_w).abs() < 4.0 && (tile.y + tile.h / 2.0 - 0.4 * page_h).abs() < 4.0, "the tile is centred where it was dropped: {tile:?}");
+    assert_eq!(app.lay.ed.selected, Some(super::layout_editor::Sel::Tile(tile.id)));
+    // drop u.fcs ONTO that tile -> an overlay layer with its own colour, not a second tile
+    let on_tile = page_pt(&app, (tile.x + tile.w / 2.0) / page_w, (tile.y + tile.h / 2.0) / page_h);
+    { let to = on_tile; drag_sample(&mut app, &ctx, "u.fcs", to); }
+    settle(&mut app, &ctx);
+    assert_eq!(app.lay.ed.doc.tiles.len(), 1, "{}", app.status);
+    let layers = &app.lay.ed.doc.tiles[0].layers;
+    assert_eq!(layers.iter().map(|l| l.sample.as_str()).collect::<Vec<_>>(), vec!["t.fcs", "u.fcs"]);
+    assert_ne!(layers[0].color, layers[1].color);
+    // dropping the same sample again is refused with a message
+    { let to = on_tile; drag_sample(&mut app, &ctx, "u.fcs", to); }
+    assert_eq!(app.lay.ed.doc.tiles[0].layers.len(), 2);
+    assert!(app.status.contains("already on that tile"), "{}", app.status);
+    // a drop on empty page space makes a second tile that starts like the first
+    app.lay.ed.doc.tiles[0].population = vec![];
+    app.lay.ed.doc.tiles[0].x_chan = "CD3-A".into();
+    { let to = page_pt(&app, 0.8, 0.75); drag_sample(&mut app, &ctx, "u.fcs", to); }
+    settle(&mut app, &ctx);
+    assert_eq!(app.lay.ed.doc.tiles.len(), 2);
+    assert_eq!(app.lay.ed.doc.tiles[1].x_chan, "CD3-A", "a new tile copies the axes of the selected one");
+
+    // move the first tile by dragging its body
+    let (_, scale) = app.lay.ed.canvas.unwrap();
+    let t0 = app.lay.ed.doc.tiles[0].clone();
+    let body = page_pt(&app, (t0.x + 40.0) / page_w, (t0.y + 40.0) / page_h);
+    drag(&mut app, &ctx, body, Pos2::new(body.x + 50.0, body.y + 30.0));
+    let t0b = app.lay.ed.doc.tile(t0.id).unwrap().clone();
+    assert!(((t0b.x - t0.x) * scale - 50.0).abs() < 3.0 && ((t0b.y - t0.y) * scale - 30.0).abs() < 3.0, "moved by the drag: {t0:?} -> {t0b:?}");
+    assert_eq!((t0b.w, t0b.h), (t0.w, t0.h));
+    // resize from the bottom-right handle
+    let handle = page_pt(&app, (t0b.x + t0b.w) / page_w, (t0b.y + t0b.h) / page_h);
+    drag(&mut app, &ctx, handle, Pos2::new(handle.x + 40.0, handle.y + 20.0));
+    let t0c = app.lay.ed.doc.tile(t0.id).unwrap().clone();
+    assert!(((t0c.w - t0b.w) * scale - 40.0).abs() < 3.0 && ((t0c.h - t0b.h) * scale - 20.0).abs() < 3.0, "{t0b:?} -> {t0c:?}");
+    assert_eq!((t0c.x, t0c.y), (t0b.x, t0b.y), "resizing keeps the corner");
+    // Delete removes the selected tile
+    pointer(&mut app, &ctx, vec![key(egui::Key::Delete, false, false)]);
+    assert_eq!(app.lay.ed.doc.tiles.len(), 1);
+}
+
+#[test]
+fn the_editor_runs_a_batch_with_controls_and_tokens_and_the_layout_survives_a_saved_workspace() {
+    let (mut app, ctx) = editor_app();
+    { let to = page_pt(&app, 0.3, 0.45); drag_sample(&mut app, &ctx, "t.fcs", to); }
+    settle(&mut app, &ctx);
+    let id = app.lay.ed.doc.tiles[0].id;
+    {
+        let t = app.lay.ed.doc.tile_mut(id).unwrap();
+        t.x_chan = "CD3-A".into();
+        t.kind = crate::density::PlotKind::Histogram;
+        t.add_layer("u.fcs", LayerRole::Control);
+    }
+    app.lay.ed.doc.add_text((30.0, 20.0), "[File_Name] — page [Page] of [Pages]");
+    settle(&mut app, &ctx); // the editor view draws with the overlay and the control in italics
+    let pages = app.editor_run_batch(Some(&ctx)).unwrap();
+    assert_eq!(pages, 2, "one page per sample");
+    assert!(app.lay.ed.batch[0].texts().contains(&"t — page 1 of 2".to_string()), "{:?}", app.lay.ed.batch[0].texts());
+    assert!(app.lay.ed.batch[1].texts().contains(&"u — page 2 of 2".to_string()));
+    let pdf = scratch("editor_batch.pdf");
+    app.write_batch_pdf(&pdf).unwrap();
+    assert_eq!(crate::figure::validate_pdf(&std::fs::read(&pdf).unwrap()), Ok(2));
+    app.lay.ed.preview = Some(1);
+    settle(&mut app, &ctx); // a batch page can be previewed on the canvas
+    app.lay.ed.preview = None;
+    // save the workspace document and open it in a fresh app with the same samples
+    let doc_json = app.workspace_document().write();
+    let mut other = two_sample_app();
+    other.apply_workspace_document(&sf_core::json::Json::parse(&doc_json).unwrap()).unwrap();
+    assert_eq!(other.lay.ed.doc, app.lay.ed.doc, "tiles, layers, roles and text boxes survive");
+    // a damaged layout is reported, not silently dropped
+    let mut j = sf_core::json::Json::parse(&doc_json).unwrap();
+    if let sf_core::json::Json::Obj(o) = &mut j {
+        o.insert("layout".into(), sf_core::json::Json::Num(1.0));
+    }
+    let mut third = two_sample_app();
+    let notes = third.apply_workspace_document(&j).unwrap();
+    assert!(notes.iter().any(|n| n.contains("saved layout could not be read")), "{notes:?}");
+    // an empty layout cannot be run
+    let (mut empty, _) = editor_app();
+    assert!(empty.editor_run_batch(None).unwrap_err().contains("empty"));
+    assert!(empty.write_batch_pdf(&scratch("never.pdf")).unwrap_err().contains("run the batch first"));
+}
+
