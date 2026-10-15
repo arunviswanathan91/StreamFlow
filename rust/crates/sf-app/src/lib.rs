@@ -6,6 +6,7 @@ pub mod comp_auto;
 pub mod density;
 pub mod drawing;
 pub mod embed;
+pub mod gate_edit;
 pub mod jobs;
 pub mod sample;
 pub mod session;

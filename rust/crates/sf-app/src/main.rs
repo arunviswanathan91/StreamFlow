@@ -103,6 +103,28 @@ fn main() -> eframe::Result<()> {
         app.set_module(sf_app::ui::Module::Kinetic);
         app.run_kinetics();
     }
+    if args.iter().any(|a| a == "--select-gate") {
+        // select the first gate drawn on the open tab (for screenshots of the move/resize handles)
+        if let Some(si) = (!app.session.samples().is_empty()).then_some(0) {
+            if let Some(first) = app.session.tree(si).children(GateTree::ROOT).ok().and_then(|c| c.first().copied()) {
+                app.session.selected = Some((si, first));
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--demo-gates") {
+        // draw a rectangle, an ellipse and a polygon on the first window, selecting the ellipse (for screenshots)
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            if let Some(r) = app.session.auto_range(id) {
+                let (w, h) = (r.x1 - r.x0, r.y1 - r.y0);
+                let _ = app.session.commit_shape(id, &sf_app::drawing::Shape::Rect { x0: r.x0 + 0.1 * w, x1: r.x0 + 0.35 * w, y0: r.y0 + 0.55 * h, y1: r.y0 + 0.85 * h }, "Rect");
+                if let Ok(n) = app.session.commit_shape(id, &sf_app::drawing::Shape::Ellipse { cx: r.x0 + 0.6 * w, cy: r.y0 + 0.35 * h, rx: 0.2 * w, ry: 0.12 * h }, "Ellipse") {
+                    let sample = app.session.window(id).map_or(0, |w| w.sample);
+                    app.session.selected = Some((sample, n));
+                }
+                let _ = app.session.commit_shape(id, &sf_app::drawing::Shape::Polygon(vec![(r.x0 + 0.55 * w, r.y0 + 0.65 * h), (r.x0 + 0.9 * w, r.y0 + 0.7 * h), (r.x0 + 0.75 * w, r.y0 + 0.92 * h)]), "Poly");
+            }
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }
