@@ -125,6 +125,15 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    if args.iter().any(|a| a == "--run-cross-sample") {
+        app.set_module(sf_app::ui::Module::CrossSample);
+        app.run_cross_sample();
+    }
+    if args.iter().any(|a| a == "--run-classifier") {
+        app.set_module(sf_app::ui::Module::Classifier);
+        app.run_cross_sample();
+        app.run_classifier();
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

@@ -1,6 +1,7 @@
 //! StreamFLOW numerics. All statistics live in [`stats`] (one place, by project convention).
 
 pub mod analysis;
+pub mod classify;
 pub mod cluster;
 pub mod compensation;
 pub mod discovery;
