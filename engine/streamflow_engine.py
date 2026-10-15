@@ -56,6 +56,7 @@ STATE = {
     "comp_matrix": None, # {channels, matrix, fk_matrix} after extract_spillover/compute_spillover
     "comp_applied": False,
     "transforms": {},    # {channel: {method, cofactor}} after apply_transformation
+    "comp_failures": {}, # {file: reason} when lazy compensation failed for a sample
 }
 
 def _basenames():
@@ -210,13 +211,18 @@ def _get_events(i, a):
     sub = np.asarray(ev[:, cols], dtype="<f4")
     n = sub.shape[0]
     cap = int(a.get("n", 500000))
+    ev_seed = int(a.get("seed", 12345))
     if n > cap:
-        sub = sub[np.random.choice(n, cap, replace=False)]
+        # Seeded. This subset is what Java renders AND gates on, so an unseeded draw made the same
+        # workspace show different events - and different gate statistics - on every reload.
+        # Same reproducibility contract as `subsample` below.
+        sub = sub[np.random.default_rng(ev_seed).choice(n, cap, replace=False)]
     path = os.path.join(CONTROL_DIR, "sfev_%s_%d.bin" % (i, int(time.time() * 1000)))
     sub.tofile(path)  # native little-endian float32, row-major
     ranges = {c: [float(np.min(sub[:, j])), float(np.max(sub[:, j]))] for j, c in enumerate(chans)}
     return {"file": path, "channels": chans, "rows": int(sub.shape[0]),
-            "cols": len(chans), "total": int(n), "ranges": ranges}
+            "cols": len(chans), "total": int(n), "ranges": ranges,
+            "subsampled": bool(n > cap), "seed": ev_seed}
 
 @command("sample_path")
 def _sample_path(i, a):
@@ -334,6 +340,14 @@ def _sample_by_name(name):
         names = [m["name"] for m in metas]
         if name in names:
             idx = names.index(name)
+        else:
+            # Fail loudly. This used to fall through to idx=0, so a typo'd or stale sample name
+            # silently analysed the FIRST sample and reported the result under the requested name -
+            # a wrong-sample answer indistinguishable from a correct one. An omitted/empty `name`
+            # still means "the first sample" (the documented default), which is why this is inside
+            # `if name:`.
+            raise ValueError("Unknown sample %r. Loaded samples: %s"
+                             % (name, ", ".join(names) if names else "(none)"))
     f = metas[idx]["file"]
     s = STATE["cache"].get(f)
     if s is None:
@@ -343,8 +357,12 @@ def _sample_by_name(name):
                 STATE["comp_matrix"].get("fk_matrix") is not None:
             try:
                 s.apply_compensation(STATE["comp_matrix"]["fk_matrix"])
-            except Exception:
-                pass
+            except Exception as exc:
+                # Never swallow: this one sample stays UNCOMPENSATED while its siblings are
+                # compensated, so every downstream statistic silently mixes the two populations.
+                # Record it so callers can surface it, and log to stderr for the Java side.
+                STATE.setdefault("comp_failures", {})[f] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                print("compensation FAILED for %s (%s) - sample left uncompensated" % (f, exc))
         STATE["cache"][f] = s
     return s
 
@@ -564,17 +582,35 @@ def _run_dimredux(i, a):
     send_progress(i, 0.2, "Running %s on %d events from %d sample(s) (%s transform)…"
                   % (method.upper(), X.shape[0], len(samples), actual_xform))
 
+    # `backend` names the library that actually produced the coordinates. openTSNE and sklearn's
+    # TSNE differ numerically, so a result that doesn't say which one ran is not reproducible.
+    # Same honesty contract as cluster_embedding's `actual`/`requested`.
     if method == "tsne":
+        # Both implementations misbehave when perplexity approaches the sample size; the usual
+        # guard is perplexity < (n-1)/3.
+        perp = min(float(a.get("perplexity", 30)), max(2.0, (X.shape[0] - 1) / 3.0))
         try:
             from openTSNE import TSNE
-            coords = np.array(TSNE(perplexity=30, n_jobs=4, random_state=seed).fit(X))
+            coords = np.array(TSNE(perplexity=perp, n_jobs=4, random_state=seed).fit(X))
+            backend = "openTSNE"
         except ImportError:
             from sklearn.manifold import TSNE as skTSNE
-            coords = skTSNE(n_components=2, perplexity=30, random_state=seed).fit_transform(X)
+            coords = skTSNE(n_components=2, perplexity=perp, random_state=seed).fit_transform(X)
+            backend = "sklearn.manifold.TSNE"
+        params = {"perplexity": round(float(perp), 3)}
     else:
         try:
             import umap
-            coords = umap.UMAP(n_components=2, random_state=seed).fit_transform(X)
+            n_neighbors = int(a.get("n_neighbors", 15))
+            min_dist = float(a.get("min_dist", 0.1))
+            densmap = bool(a.get("densmap", False))
+            kw = dict(n_components=2, n_neighbors=n_neighbors, min_dist=min_dist, random_state=seed)
+            # Only pass densmap when asked, so an older umap-learn without the flag still runs.
+            if densmap:
+                kw["densmap"] = True
+            coords = umap.UMAP(**kw).fit_transform(X)
+            backend = "umap-learn (densMAP)" if densmap else "umap-learn"
+            params = {"n_neighbors": n_neighbors, "min_dist": min_dist, "densmap": densmap}
         except ImportError:
             raise ValueError("umap-learn is not installed. Run: pip install umap-learn")
 
@@ -604,6 +640,7 @@ def _run_dimredux(i, a):
             "rows": int(out.shape[0]), "cols": int(out.shape[1]),
             "samples": list(samples), "features": list(features),
             "method": method, "n_features": len(features), "seed": seed,
+            "backend": backend, "params": params,
             "transform": actual_xform, "cofactor": cofactor}
 
 
@@ -908,7 +945,10 @@ def _run_clustering(i, a):
 
     ev = np.asarray(s.get_events(source="raw"))
     n_total = ev.shape[0]
-    idx = np.random.choice(n_total, min(n_events, n_total), replace=False)
+    # Seeded. These events feed the reported cluster percentages and medians, so an unseeded draw
+    # made the same input produce different numbers on every run.
+    seed = int(a.get("seed", 42))
+    idx = np.random.default_rng(seed).choice(n_total, min(n_events, n_total), replace=False)
     cols = [pnn.index(c) for c in fluor]
     X = ev[np.ix_(idx, cols)].astype("float32")
     # Honour the Transformation tab rather than silently assuming arcsinh(150).
@@ -929,13 +969,13 @@ def _run_clustering(i, a):
             # error (bad input, etc.) and must propagate with its real message.
             send_progress(i, 0.5, "PhenoGraph unavailable (%s) — using k-means." % type(exc).__name__)
             from sklearn.cluster import MiniBatchKMeans
-            labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3).fit_predict(X)
+            labels = MiniBatchKMeans(n_clusters=k, random_state=seed, n_init=3).fit_predict(X)
             n_clusters = k; actual = "kmeans"
     elif method == "flowsom":
         try:
             import anndata as ad
             import flowsom as fs
-            fsom = fs.FlowSOM(ad.AnnData(X), n_clusters=k, cols_to_use=list(range(X.shape[1])), seed=42)
+            fsom = fs.FlowSOM(ad.AnnData(X), n_clusters=k, cols_to_use=list(range(X.shape[1])), seed=seed)
             raw = list(np.asarray(fsom.metacluster_labels).tolist())
             remap = {v: j for j, v in enumerate(sorted(set(raw)))}
             labels = np.array([remap[v] for v in raw], dtype=int)
@@ -943,11 +983,11 @@ def _run_clustering(i, a):
         except ImportError as exc:
             send_progress(i, 0.5, "FlowSOM unavailable (%s) — using k-means." % type(exc).__name__)
             from sklearn.cluster import MiniBatchKMeans
-            labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3).fit_predict(X)
+            labels = MiniBatchKMeans(n_clusters=k, random_state=seed, n_init=3).fit_predict(X)
             n_clusters = k; actual = "kmeans"
     else:
         from sklearn.cluster import MiniBatchKMeans
-        labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3).fit_predict(X)
+        labels = MiniBatchKMeans(n_clusters=k, random_state=seed, n_init=3).fit_predict(X)
         n_clusters = k; actual = "kmeans"
 
     send_progress(i, 0.75, "Building heatmap…")
@@ -966,7 +1006,8 @@ def _run_clustering(i, a):
                     for c in range(n_clusters)]
     medians_out = [[round(float(cluster_medians[c, f]), 4) for f in range(len(fluor))]
                    for c in range(n_clusters)]
-    return {"method": actual, "k": n_clusters, "n": int(len(idx)),
+    return {"method": actual, "requested": method, "k": n_clusters, "n": int(len(idx)),
+            "seed": seed,
             "clusters": clusters_out, "channels": list(fluor), "medians": medians_out}
 
 
@@ -2501,15 +2542,22 @@ def _run_kinetic(i, a):
     per_sample = {}
     t_min, t_max = float("inf"), float("-inf")
 
+    skipped = []
     for name in sample_names:
         try:
             s = _sample_by_name(name)
             ev = s.as_dataframe(
                 source="comp" if STATE.get("comp_applied") else "raw",
                 col_multi_index=False)
-        except Exception:
+        except Exception as exc:
+            # Report rather than drop. A kinetics curve computed from 3 of 8 samples looks exactly
+            # like one computed from all 8. Mirrors load_wsp's existing `skipped` contract.
+            skipped.append({"sample": name,
+                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:200])})
             continue
         if time_ch not in ev.columns or channel not in ev.columns:
+            skipped.append({"sample": name,
+                            "reason": "missing channel %r or %r" % (time_ch, channel)})
             continue
         if gate_polygons:
             pnn = list(ev.columns)
@@ -2553,7 +2601,8 @@ def _run_kinetic(i, a):
 
     return {"groups": group_results,
             "channel": channel, "time_channel": time_ch,
-            "bins": bins_n, "n_samples": len(per_sample)}
+            "bins": bins_n, "n_samples": len(per_sample),
+            "n_requested": len(sample_names), "n_skipped": len(skipped), "skipped": skipped}
 
 
 # ---- analysis A6: sample classifier (PCA + optional Random Forest) ---------

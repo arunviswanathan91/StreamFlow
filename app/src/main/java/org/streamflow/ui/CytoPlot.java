@@ -931,6 +931,18 @@ public class CytoPlot extends Region {
         g.fillRect(0, 0, getWidth(), getHeight());
         if (data == null || xChan == null) return;
 
+        // The logicle LUTs are built in recomputeRanges(), which runs only inside the DEBOUNCED
+        // scheduleCompute() (50ms after invalidate()). Several public setters paint SYNCHRONOUSLY
+        // though - setFmo/setFmoVisible/setHighlight - and applyAxes() calls setView() (invalidate,
+        // deferred) immediately followed by setFmo() (paint, now). On the first open of a sample
+        // whose X axis is logicle, that painted before any LUT existed and drawAxes -> pxX -> sxv
+        // dereferenced a null xLogicle, killing the whole Graph Window before it appeared.
+        // Build the LUTs on demand here rather than NPE; this is a no-op once they exist.
+        if ((logicleLike(xScale) && xLogicle == null)
+                || (!isHistogram() && logicleLike(yScale) && yLogicle == null)) {
+            recomputeRanges();
+        }
+
         double px = plotLeft(), py = plotTop(), pw = plotW(), ph = plotH();
         // Light mode: white the plot plus its axis margins only (exactly the region Copy/export crops
         // to), so there is no white overhang. Dark mode keeps navy margins with light axis text.

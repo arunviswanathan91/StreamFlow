@@ -57,10 +57,35 @@ if (-not (Test-Path (Join-Path $pyportable "python.exe"))) {
 # NOTE: deliberately NOT `mvn clean` — target\python (stage-python.ps1) and target\R-Portable
 # (the release workflow) are staged INTO target before this runs, and `clean` would delete them,
 # producing an installer with no engine. Remove only the Maven build outputs instead.
-foreach ($d in @("classes", "test-classes", "libs", "content", "dist",
+#
+# Removal is retried: background file scanners keep handles open on recently written files, so a
+# delete right after a previous build can fail with "because it is being used by another
+# process". Observed culprit here was WinZip Background Tools (WzBGTools64.exe); OneDrive,
+# search indexers and AV behave the same way. Retrying beats aborting the build.
+# To identify a persistent holder, query the Restart Manager API for the locked file.
+function Remove-BuildDir([string]$path) {
+    if (-not (Test-Path $path)) { return }
+    for ($try = 1; $try -le 5; $try++) {
+        try {
+            Remove-Item -Recurse -Force $path -ErrorAction Stop
+            return
+        } catch {
+            if ($try -eq 5) {
+                throw ("Could not delete $path after 5 attempts: " + $_.Exception.Message +
+                       "`nA file in it is locked by a background scanner (WinZip/OneDrive/AV/indexer)." +
+                       "`nClose that process (or exclude app\target from it) and retry.")
+            }
+            Write-Host ("  locked, retrying in 3s ({0}/5): {1}" -f $try, (Split-Path $path -Leaf))
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
+# NOTE: "content" is deliberately absent - it is staged under $env:TEMP now (see step 2). A tree
+# left at target\content by an older build is stale and intentionally ignored.
+foreach ($d in @("classes", "test-classes", "libs", "dist",
                  "generated-sources", "maven-status", "surefire-reports")) {
-    $p = Join-Path $here "target\$d"
-    if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+    Remove-BuildDir (Join-Path $here "target\$d")
 }
 Get-ChildItem (Join-Path $here "target") -Filter "streamflow-*.jar" -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
@@ -78,7 +103,19 @@ Copy-Item $jar.FullName (Join-Path $here "target\libs\") -Force
 # 2) Stage app content (engine scripts + portable Python + R-Portable) next to the launcher.
 #    Excludes engine/vendor (R package SOURCE — only needed at R-Portable stage time)
 #    and engine/py-env (the dev venv — the relocatable target\python is bundled instead).
-$content = Join-Path $here "target\content"
+#    Staged OUTSIDE the repo, under $env:TEMP. This tree is a throwaway ~1 GB copy of the portable
+#    Python; writing it into app\target meant a background file scanner could hold handles on
+#    the freshly written files and break the NEXT build's cleanup, and (because this repo sits in
+#    OneDrive) that gigabyte got synced as pure build output. jpackage does not care where it lives.
+#    IMPORTANT: --app-content copies the given directory INTO the image keeping its NAME, so the
+#    leaf MUST stay "content" - the launcher looks for <image>\content. Staging it as
+#    "streamflow-content-<pid>" produced an image with <image>\streamflow-content-1234\ and an
+#    app that could not find its engine. Hence <temp>\streamflow-pkg-<pid>\content.
+$stageRoot = Join-Path $env:TEMP ("streamflow-pkg-" + $PID)
+$content   = Join-Path $stageRoot "content"
+# Sweep any tree left behind by an earlier failed run.
+Get-ChildItem $env:TEMP -Directory -Filter "streamflow-pkg-*" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
 if (Test-Path $content) { Remove-Item -Recurse -Force $content }
 New-Item -ItemType Directory -Force -Path $content | Out-Null
 robocopy (Join-Path $repo "engine") (Join-Path $content "engine") /E /XD "vendor" "py-env" "__pycache__" /NFL /NDL /NJH /NJS | Out-Null
@@ -87,8 +124,18 @@ if ($bundleR) { robocopy $rportable (Join-Path $content "R-Portable") /E /NFL /N
 
 # 3) jpackage app-image (JavaFX runs from the classpath; the openjfx win jars carry natives).
 $dist = Join-Path $here "target\dist"
-if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+Remove-BuildDir $dist
 $type = if ($Installer) { "exe" } else { "app-image" }
+# NOTE: --main-class is org.streamflow.Launcher, NOT StreamFlowApp. jpackage puts the OpenJFX jars
+# on the CLASSPATH, and the JVM refuses to launch a main class that extends Application in that
+# configuration ("JavaFX runtime components are missing"). Because StreamFLOW.exe is a windowed
+# binary with no console, that error is invisible and the app just does nothing when clicked.
+# Launcher does not extend Application. Do not point this back at StreamFlowApp.
+#
+# NOTE: jpackage places --app-content at the IMAGE ROOT, while $APPDIR is <image>\app - so the
+# bundled engine lives at <image>\content, one level UP from $APPDIR. An earlier build passed
+# "-Dstreamflow.appDir=$APPDIR\content", a directory that never exists, so the packaged app could
+# not find its engine or Python at all. Do not "simplify" the ..\ away.
 Write-Host "Running jpackage ($type)…"
 & (Join-Path $jdk "bin\jpackage.exe") `
     --type $type `
@@ -96,14 +143,17 @@ Write-Host "Running jpackage ($type)…"
     --app-version $Version `
     --input (Join-Path $here "target\libs") `
     --main-jar $jarName `
-    --main-class "org.streamflow.StreamFlowApp" `
+    --main-class "org.streamflow.Launcher" `
     --app-content $content `
     --icon (Join-Path $repo "build\icon.ico") `
     --dest $dist `
-    --java-options "-Dstreamflow.appDir=`$APPDIR\content" `
+    --java-options "-Dstreamflow.appDir=`$APPDIR\..\content" `
     --java-options "-Dstreamflow.engine.kind=python" `
     --vendor "StreamFLOW"
 if ($LASTEXITCODE -ne 0) { throw "jpackage failed (exit $LASTEXITCODE)." }
+
+# jpackage has copied the content tree into the image; the staging copy is no longer needed.
+Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue
 
 Write-Host "Built -> $dist"
 Get-ChildItem $dist | ForEach-Object { Write-Host ("  {0}" -f $_.Name) }

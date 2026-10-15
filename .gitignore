@@ -1,6 +1,8 @@
 AUDIT_REPORT.md
 BUILDING.md
 MANUAL_TESTING.md
+IDEA.md
+audit-build.bat
 
 .claude/
 .claude.json
