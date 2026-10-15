@@ -134,6 +134,39 @@ fn main() -> eframe::Result<()> {
         app.run_cross_sample();
         app.run_classifier();
     }
+    if (flag("axes").is_some() || flag("fmo-from").is_some() || args.iter().any(|a| a == "--strip")) && app.session.windows.is_empty() && !app.session.samples().is_empty() {
+        let _ = app.open_tab(0, GateTree::ROOT);
+    }
+    if let Some(ax) = flag("axes") {
+        // --axes=X,Y : show these channels on the first window
+        if let (Some(id), Some((x, y))) = (app.session.windows.first().map(|w| w.id), ax.split_once(',')) {
+            if let Some(win) = app.session.window_mut(id) {
+                win.x_chan = x.to_string();
+                win.y_chan = y.to_string();
+            }
+            app.refit_window(id);
+        }
+    }
+    if let Some(name) = flag("fmo-from") {
+        // --fmo-from=unstained : use the first sample whose name contains this as the FMO control, then come back
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            let back = app.session.window(id).map_or(0, |w| w.sample);
+            if let Some(si) = app.session.samples().iter().position(|s| s.name.to_lowercase().contains(&name.to_lowercase())) {
+                if app.session.retarget_window(id, si).is_ok() {
+                    match app.session.set_fmo_from_window(id, 95.0) {
+                        Ok(done) => app.set_status(format!("FMO from {name}: {done:?}")),
+                        Err(e) => app.set_status(e),
+                    }
+                    let _ = app.session.retarget_window(id, back);
+                }
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--strip") {
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            app.set_strip_open(id, true);
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

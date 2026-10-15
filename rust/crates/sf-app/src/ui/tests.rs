@@ -921,3 +921,146 @@ fn cross_sample_without_gates_says_so() {
     assert!(app.status.contains("no gated populations"), "{}", app.status);
     assert!(app.xs.matrix.is_none());
 }
+
+// ---- FMO reference lines and the compare strip -------------------------------------------------------------------
+
+fn two_sample_app() -> App {
+    let mut app = app_with_sample();
+    let mut rng = Rng::new(11);
+    // a second sample with the same panel but a shifted CD3 distribution
+    let events = (0..3000).flat_map(|_| [(rng.next_f64() * 200_000.0) as f32, (rng.next_f64() * 100_000.0) as f32, (rng.next_f64() * 20_000.0 + 4_000.0) as f32, (rng.next_f64() * 20_000.0 - 500.0) as f32]).collect();
+    app.session.add_sample(LoadedSample::synthetic("u.fcs", &["FSC-A", "SSC-A", "CD3-A", "CD4-A"], vec![262_144.0; 4], events));
+    app
+}
+
+#[test]
+fn fmo_level_is_the_percentile_of_the_population_and_survives_a_saved_workspace() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    let done = app.session.set_fmo_from_window(w, 95.0).unwrap();
+    assert_eq!(done.iter().map(|d| d.0.as_str()).collect::<Vec<_>>(), vec!["CD3-A", "CD4-A"], "both shown channels are set on a 2-D plot");
+    let vals = app.session.population_values(0, GateTree::ROOT, "CD3-A").unwrap();
+    let want = sf_core::stats::percentile(&vals, 95.0);
+    assert_eq!(app.session.fmo("CD3-A").unwrap().level, want);
+    assert_eq!(app.session.fmo("CD3-A").unwrap().n, 3000);
+    // about 5% of the control's own events sit at or above its 95th percentile
+    let above = app.session.fraction_above_fmo(0, GateTree::ROOT, "CD3-A").unwrap();
+    assert!((above - 0.05).abs() < 0.005, "{above}");
+    // a histogram only sets the X channel
+    app.session.clear_fmo("CD4-A");
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Histogram;
+    let done = app.session.set_fmo_from_window(w, 99.0).unwrap();
+    assert_eq!(done.len(), 1);
+    assert!(app.session.fmo("CD4-A").is_none());
+    assert!(app.session.set_fmo_from_window(w, 120.0).is_err());
+    // saved with the workspace and restored
+    let doc = app.session.to_workspace_json();
+    let mut other = app_with_sample();
+    other.session.apply_workspace_json(&doc).unwrap();
+    assert_eq!(other.session.fmo("CD3-A"), app.session.fmo("CD3-A"));
+    // clearing
+    other.session.clear_fmo("CD3-A");
+    assert!(other.session.fmo("CD3-A").is_none());
+}
+
+#[test]
+fn an_fmo_line_is_dragged_with_the_pointer_without_panning_or_touching_gates() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    app.ws.graphs.get_mut(&w).unwrap().refit = true;
+    settle(&mut app, &ctx);
+    let range = app.ws.graphs[&w].range.unwrap();
+    let map = Mapper { rect: plot, range };
+    let (xs, ws_) = (app.session.window(w).unwrap().x_scale.clone(), app.session.window(w).unwrap().clone());
+    app.session.set_fmo_from_window(w, 90.0).unwrap();
+    settle(&mut app, &ctx);
+    let t = xs.build().unwrap();
+    let before = app.session.fmo("CD3-A").unwrap().level;
+    let line = map.to_screen((t.forward(before), range.y0));
+    assert!(line.x > plot.left() && line.x < plot.right(), "the line is inside the plot at {line:?}");
+    // drag the vertical line 80 px to the left at mid height (it sits near the right edge of the view)
+    let a = Pos2::new(line.x, plot.center().y);
+    let b = Pos2::new(a.x - 80.0, a.y);
+    drag(&mut app, &ctx, a, b);
+    let after = app.session.fmo("CD3-A").unwrap().level;
+    let want = t.inverse(map.to_data(b).0);
+    assert!(after < before && (after - want).abs() < 0.02 * want.abs().max(1.0), "moved {before} -> {after}, expected about {want}");
+    assert_eq!(app.ws.graphs[&w].range.unwrap(), range, "dragging an FMO line must not pan the plot");
+    assert!(app.status.contains("moved"), "{}", app.status);
+    assert!(children(&app).is_empty() && !app.session.can_undo(0), "no gate was created or edited");
+    let _ = ws_;
+    // hiding the lines frees that spot again: a drag there pans instead
+    app.ws.graphs.get_mut(&w).unwrap().style.fmo = false;
+    settle(&mut app, &ctx);
+    let line2 = map.to_screen((t.forward(after), range.y0));
+    drag(&mut app, &ctx, Pos2::new(line2.x, plot.center().y), Pos2::new(line2.x - 60.0, plot.center().y));
+    assert_eq!(app.session.fmo("CD3-A").unwrap().level, after, "a hidden line cannot be grabbed");
+    assert_ne!(app.ws.graphs[&w].range.unwrap(), range, "the drag panned the view instead");
+}
+
+#[test]
+fn the_compare_strip_shows_every_sample_on_the_same_view_and_a_click_switches_sample() {
+    let ctx = egui::Context::default();
+    let mut app = two_sample_app();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    // a gate drawn on sample 0 and applied to sample 1, so the strip has gates to overlay
+    app.session.window_mut(w).unwrap().x_scale = ScaleSpec::Identity;
+    app.session.window_mut(w).unwrap().y_scale = ScaleSpec::Identity;
+    let r = app.ws.graphs[&w].range.unwrap();
+    let kid = app.session.commit_shape(w, &Shape::Rect { x0: r.x0, x1: (r.x0 + r.x1) / 2.0, y0: r.y0, y1: r.y1 }, "Left").unwrap();
+    app.session.apply_to_all(0, kid).unwrap();
+    app.ws.graphs.get_mut(&w).unwrap().strip_open = true;
+    settle(&mut app, &ctx);
+    settle(&mut app, &ctx);
+    let g = &app.ws.graphs[&w];
+    assert_eq!(g.strip.len(), 2, "one picture per sample");
+    assert_eq!(g.strip_rects.len(), 2);
+    let range_now = g.range.unwrap();
+    assert_eq!(app.session.window(w).unwrap().sample, 0);
+    // click the second card: the plot switches to that sample but keeps the same view
+    let card = g.strip_rects.iter().find(|(s, _)| *s == 1).unwrap().1;
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(card.center())]);
+    pointer(&mut app, &ctx, vec![button(card.center(), true)]);
+    pointer(&mut app, &ctx, vec![button(card.center(), false)]);
+    frame(&mut app, &ctx);
+    assert_eq!(app.session.window(w).unwrap().sample, 1, "{}", app.status);
+    assert_eq!(app.ws.graphs[&w].range.unwrap(), range_now, "switching sample keeps the view");
+    // a population that one sample lacks is said so, not drawn empty
+    app.session.delete(1, app.session.tree(1).find(&["Left"]).unwrap()).unwrap();
+    app.ws.graphs.get_mut(&w).unwrap().refit = false;
+    settle(&mut app, &ctx);
+    // an unreachable channel shows 'channel not in this sample' without panicking
+    app.ws.graphs.get_mut(&w).unwrap().strip.clear();
+    settle(&mut app, &ctx);
+}
+
+
+#[test]
+fn fit_all_widens_the_shared_view_to_every_samples_population() {
+    let ctx = egui::Context::default();
+    let mut app = two_sample_app();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    app.session.window_mut(w).unwrap().x_scale = ScaleSpec::Identity;
+    app.session.window_mut(w).unwrap().y_scale = ScaleSpec::Identity;
+    app.refit_window(w);
+    settle(&mut app, &ctx);
+    let own = app.ws.graphs[&w].range.unwrap();
+    let win = app.session.window(w).unwrap().clone();
+    app.fit_all_samples(w, &win);
+    let all = app.ws.graphs[&w].range.unwrap();
+    // sample 1's CD3 runs up to 24 000, sample 0's only to 19 500: the union is wider than either alone
+    assert!(all.x1 > own.x1 + 1000.0, "{own:?} -> {all:?}");
+    for si in 0..2 {
+        let v = app.session.population_values(si, GateTree::ROOT, "CD3-A").unwrap();
+        assert!(v.iter().all(|x| *x >= all.x0 && *x <= all.x1), "sample {si} fits");
+    }
+    assert!(all.is_valid());
+}

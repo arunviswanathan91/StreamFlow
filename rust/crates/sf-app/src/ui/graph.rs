@@ -1,6 +1,6 @@
 //! One graph tab: toolbar, breadcrumb, axis controls, the density canvas with gates, and the options panel.
 
-use super::{theme, workstation::Tab, App};
+use super::{cross_view::short_all, theme, workstation::Tab, App};
 use crate::axis::ticks;
 use crate::density::{bin, histogram, render, render_dots, PlotKind, Range};
 use crate::drawing::{Drawing, Shape, Tool};
@@ -9,7 +9,8 @@ use crate::session::{default_scale, GraphWindow};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions};
 use sf_core::scale::ScaleSpec;
 use sf_core::stats;
-use sf_gating::{Gate, GateKind, NodeId, NodeKind};
+use sf_gating::{Gate, GateKind, GateTree, NodeId, NodeKind};
+use std::collections::HashMap;
 
 /// Display-space <-> screen mapping of a plot area (y grows upward in data, downward on screen).
 #[derive(Debug, Clone, Copy)]
@@ -39,11 +40,13 @@ pub struct GateStyle {
     pub width: f32,
     pub labels: bool,
     pub fill: bool,
+    /// Draw the FMO reference lines.
+    pub fmo: bool,
 }
 
 impl Default for GateStyle {
     fn default() -> Self {
-        GateStyle { color: theme::GATE_RED, width: 1.8, labels: true, fill: false }
+        GateStyle { color: theme::GATE_RED, width: 1.8, labels: true, fill: false, fmo: true }
     }
 }
 
@@ -67,6 +70,20 @@ pub struct GraphUi {
     hist: Vec<f32>,
     /// A gate being moved or resized: nothing is committed until the button is released.
     pub edit: Option<EditDrag>,
+    /// Dragging an FMO line: `true` = the X channel's line.
+    pub fmo_drag: Option<bool>,
+    /// The compare strip under the plot is open.
+    pub strip_open: bool,
+    pub strip: HashMap<usize, (u64, StripThumb)>,
+    /// Where each sample's card was drawn last frame (for hit-testing and tests).
+    pub strip_rects: Vec<(usize, Rect)>,
+}
+
+/// One sample's picture in the compare strip.
+#[derive(Clone)]
+pub enum StripThumb {
+    Tex(TextureHandle),
+    Hist(Vec<f32>),
 }
 
 /// One in-progress move / resize of a gate.
@@ -81,7 +98,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new() }
     }
 }
 
@@ -183,6 +200,8 @@ impl App {
         egui::TopBottomPanel::bottom("g_hint").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
             theme::caption(ui, "P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan");
         });
+        let strip_open = self.ws.graphs.get(&id).map_or(false, |g| g.strip_open);
+        egui::TopBottomPanel::bottom("g_strip").resizable(false).exact_height(236.0).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_animated_inside(ui, strip_open, |ui| self.compare_strip(ui, ctx, id, &w));
         let open = self.ws.options_open;
         egui::SidePanel::right("g_opts").resizable(true).default_width(250.0).width_range(200.0..=380.0).frame(egui::Frame::none().fill(theme::PANEL_2).inner_margin(egui::Margin::same(10.0))).show_animated_inside(ui, open, |ui| self.graph_options(ui, id, &w));
         egui::CentralPanel::default().frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::same(8.0))).show_inside(ui, |ui| self.graph_canvas(ui, ctx, id));
@@ -320,6 +339,16 @@ impl App {
                     g.refit = true;
                 }
             }
+            let fmo_set = self.session.fmo(&w.x_chan).is_some() || (w.kind != PlotKind::Histogram && self.session.fmo(&w.y_chan).is_some());
+            if ui.button(if fmo_set { "⌖ Clear FMO" } else { "⌖ Set FMO" }).on_hover_text("Use this population as the FMO control: its 95th percentile becomes a dashed reference line on every plot of the channel").clicked() {
+                self.toggle_fmo(id, w);
+            }
+            let strip_open = self.ws.graphs.get(&id).map_or(false, |g| g.strip_open);
+            if theme::toggle(ui, strip_open, "⇔ Compare").on_hover_text("This population on the same axes and view across every sample").clicked() {
+                if let Some(g) = self.ws.graphs.get_mut(&id) {
+                    g.strip_open = !g.strip_open;
+                }
+            }
             if theme::toggle(ui, self.ws.options_open, "⚙ Options").clicked() {
                 self.ws.options_open = !self.ws.options_open;
             }
@@ -361,7 +390,7 @@ impl App {
                 let s = self.session.sample(w.sample);
                 let (xi, yi) = (s.channel_index(&w.x_chan), s.channel_index(&w.y_chan));
                 let version = self.session.version(w.sample);
-                let key = hash_of((version, w.node, &w.x_chan, &w.y_chan));
+                let key = hash_of((version, w.node, &w.x_chan, &w.y_chan, self.session.fmo(&w.x_chan).map(|f| f.level.to_bits()), self.session.fmo(&w.y_chan).map(|f| f.level.to_bits())));
                 let cached = self.ws.graphs.get(&id).and_then(|g| g.summary.as_ref()).filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
                 let rows = match cached {
                     Some(r) => r,
@@ -377,6 +406,9 @@ impl App {
                                         rows.push((format!("{chan} median"), format!("{:.1}", stats::median(&vals))));
                                         rows.push((format!("{chan} mean"), format!("{:.1}", stats::mean(&vals))));
                                         rows.push((format!("{chan} CV %"), format!("{:.1}", stats::cv(&vals))));
+                                        if let Some(frac) = self.session.fraction_above_fmo(w.sample, w.node, chan) {
+                                            rows.push((format!("{chan} ≥ FMO"), format!("{:.2} %", 100.0 * frac)));
+                                        }
                                     }
                                 }
                             }
@@ -438,6 +470,42 @@ impl App {
                     ui.checkbox(&mut g.style.labels, "Show names and %");
                     ui.checkbox(&mut g.style.fill, "Tint inside");
                 }
+            });
+            egui::CollapsingHeader::new("FMO reference").default_open(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Percentile");
+                    ui.add(egui::DragValue::new(&mut self.ws.fmo_pct).range(50.0..=100.0).speed(0.1));
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Set from this population").clicked() {
+                        let pct = self.ws.fmo_pct;
+                        self.status = match self.session.set_fmo_from_window(id, pct) {
+                            Ok(done) => format!("FMO set at the {pct:.0}th percentile: {}.", done.iter().map(|(c, l)| format!("{c} = {l:.0}")).collect::<Vec<_>>().join(", ")),
+                            Err(e) => format!("Could not set the FMO: {e}"),
+                        };
+                        if let Some(g) = self.ws.graphs.get_mut(&id) {
+                            g.summary = None;
+                        }
+                    }
+                    if ui.button("Clear all").clicked() {
+                        let keys: Vec<String> = self.session.fmo_all().keys().cloned().collect();
+                        keys.iter().for_each(|k| self.session.clear_fmo(k));
+                        if let Some(g) = self.ws.graphs.get_mut(&id) {
+                            g.summary = None;
+                        }
+                    }
+                });
+                if let Some(g) = self.ws.graphs.get_mut(&id) {
+                    ui.checkbox(&mut g.style.fmo, "Show FMO lines");
+                }
+                let levels: Vec<(String, String)> = self.session.fmo_all().iter().map(|(c, f)| (c.clone(), format!("{:.0}   (P{:.0} of {} events, {})", f.level, f.percentile, f.n, f.source))).collect();
+                if levels.is_empty() {
+                    theme::caption(ui, "No FMO set. Open the FMO control, then press Set FMO.");
+                }
+                for (c, t) in levels {
+                    ui.label(RichText::new(format!("{c}: {t}")).size(11.5));
+                }
+                theme::caption(ui, "A visual guide for placing positive gates. Drag a dashed line to adjust it. It does not gate anything by itself.");
             });
             egui::CollapsingHeader::new("Compensation").default_open(false).show(ui, |ui| {
                 let s = self.session.sample(w.sample);
@@ -543,6 +611,9 @@ impl App {
         let style = self.ws.graphs[&id].style.clone();
         self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
         self.draw_child_gates(&painter, &map, &w, &style, id);
+        if style.fmo {
+            self.draw_fmo(&painter, &map, &w, true);
+        }
         draw_in_progress(&painter, &map, &w.drawing, w.tool);
 
         // ---- zoom & pan
@@ -564,7 +635,7 @@ impl App {
                 }
             }
         }
-        if w.tool == Tool::Pointer && resp.dragged() && self.ws.graphs[&id].edit.is_none() {
+        if w.tool == Tool::Pointer && resp.dragged() && self.ws.graphs[&id].edit.is_none() && self.ws.graphs[&id].fmo_drag.is_none() {
             let d = resp.drag_delta();
             let (dx, dy) = ((d.x / plot.width()) as f64 * (range.x1 - range.x0), (d.y / plot.height()) as f64 * (range.y1 - range.y0));
             if let Some(r) = self.ws.graphs.get_mut(&id).unwrap().range.as_mut() {
@@ -692,6 +763,251 @@ impl App {
         }
     }
 
+    /// Open or close the compare strip of a graph window.
+    pub fn set_strip_open(&mut self, id: u64, open: bool) {
+        self.ws.graphs.entry(id).or_insert_with(GraphUi::new).strip_open = open;
+    }
+
+    /// Make a graph window fit its view to the population on its next frame.
+    pub fn refit_window(&mut self, id: u64) {
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.refit = true;
+        }
+    }
+
+    /// Set the FMO reference from this population, or clear it when one is already set for the shown channel(s).
+    fn toggle_fmo(&mut self, id: u64, w: &GraphWindow) {
+        let mut shown = vec![w.x_chan.clone()];
+        if w.kind != PlotKind::Histogram {
+            shown.push(w.y_chan.clone());
+        }
+        if shown.iter().any(|c| self.session.fmo(c).is_some()) {
+            shown.iter().for_each(|c| self.session.clear_fmo(c));
+            self.status = format!("FMO reference cleared for {}.", shown.join(", "));
+        } else {
+            let pct = self.ws.fmo_pct;
+            self.status = match self.session.set_fmo_from_window(id, pct) {
+                Ok(done) => format!("FMO set at the {pct:.0}th percentile: {}.", done.iter().map(|(c, l)| format!("{c} = {l:.0}")).collect::<Vec<_>>().join(", ")),
+                Err(e) => format!("Could not set the FMO: {e}"),
+            };
+        }
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.summary = None;
+        }
+    }
+
+    /// Dashed FMO reference lines for the window's channels, on the window's own scales.
+    fn draw_fmo(&self, painter: &egui::Painter, map: &Mapper, w: &GraphWindow, handles: bool) {
+        let colour = Color32::from_rgb(142, 68, 173);
+        let stroke = Stroke::new(1.5_f32, colour);
+        let painter = painter.with_clip_rect(map.rect.expand(3.0));
+        let square = |c: Pos2| {
+            if handles {
+                let r = Rect::from_center_size(c, egui::vec2(8.0, 8.0));
+                painter.rect_filled(r, 1.0, colour);
+            }
+        };
+        if let (Some(f), Ok(t)) = (self.session.fmo(&w.x_chan), w.x_scale.build()) {
+            let x = t.forward(f.level);
+            let sx = map.to_screen((x, map.range.y0)).x;
+            if x.is_finite() && sx >= map.rect.left() && sx <= map.rect.right() {
+                painter.extend(egui::Shape::dashed_line(&[Pos2::new(sx, map.rect.top()), Pos2::new(sx, map.rect.bottom())], stroke, 6.0, 4.0));
+                if handles {
+                    painter.text(Pos2::new(sx + 3.0, map.rect.top() + 12.0), Align2::LEFT_TOP, "FMO", FontId::proportional(10.5), colour);
+                }
+                square(Pos2::new(sx, map.rect.top()));
+                square(Pos2::new(sx, map.rect.bottom()));
+            }
+        }
+        if w.kind != PlotKind::Histogram {
+            if let (Some(f), Ok(t)) = (self.session.fmo(&w.y_chan), w.y_scale.build()) {
+                let y = t.forward(f.level);
+                let sy = map.to_screen((map.range.x0, y)).y;
+                if y.is_finite() && sy >= map.rect.top() && sy <= map.rect.bottom() {
+                    painter.extend(egui::Shape::dashed_line(&[Pos2::new(map.rect.left(), sy), Pos2::new(map.rect.right(), sy)], stroke, 6.0, 4.0));
+                    if handles {
+                        painter.text(Pos2::new(map.rect.left() + 4.0, sy - 2.0), Align2::LEFT_BOTTOM, "FMO", FontId::proportional(10.5), colour);
+                    }
+                    square(Pos2::new(map.rect.left(), sy));
+                    square(Pos2::new(map.rect.right(), sy));
+                }
+            }
+        }
+    }
+
+    /// Which FMO line (`true` = the X channel's) is within a few pixels of a screen point.
+    fn fmo_hit(&self, w: &GraphWindow, map: &Mapper, p: Pos2) -> Option<bool> {
+        if let (Some(f), Ok(t)) = (self.session.fmo(&w.x_chan), w.x_scale.build()) {
+            let sx = map.to_screen((t.forward(f.level), map.range.y0)).x;
+            if (p.x - sx).abs() <= 6.0 {
+                return Some(true);
+            }
+        }
+        if w.kind != PlotKind::Histogram {
+            if let (Some(f), Ok(t)) = (self.session.fmo(&w.y_chan), w.y_scale.build()) {
+                let sy = map.to_screen((map.range.x0, t.forward(f.level))).y;
+                if (p.y - sy).abs() <= 6.0 {
+                    return Some(false);
+                }
+            }
+        }
+        None
+    }
+
+    /// The compare strip: this window's population on the same axes and view range in every sample, each with its
+    /// own gates. Clicking a card shows that sample in the plot above.
+    fn compare_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: u64, w: &GraphWindow) {
+        let Some(range) = self.ws.graphs.get(&id).and_then(|g| g.range).filter(|r| r.is_valid()) else {
+            theme::caption(ui, "Nothing to compare yet: this plot has no view range.");
+            return;
+        };
+        let path = self.session.tree(w.sample).path(w.node).unwrap_or_default();
+        let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let n = self.session.samples().len();
+        let names = short_all(&self.session.samples().iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+        let pop = if path.is_empty() { "All Events".to_string() } else { path.join(" ▸ ") };
+        let mut fit_all = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Compare").strong());
+            if ui.small_button("⤢ Fit all").on_hover_text("Widen the shared view so every sample's population fits").clicked() {
+                fit_all = true;
+            }
+            theme::caption(ui, format!("{pop} across {n} samples · same axes, scales and view as the plot above · click a sample to show it"));
+        });
+        if fit_all {
+            self.fit_all_samples(id, w);
+        }
+        let mut jump: Option<usize> = None;
+        let mut rects: Vec<(usize, Rect)> = Vec::new();
+        let hist = w.kind == PlotKind::Histogram;
+        egui::ScrollArea::horizontal().id_salt(("strip", id)).auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                for si in 0..n {
+                    let node = if refs.is_empty() { Some(GateTree::ROOT) } else { self.session.tree(si).find(&refs) };
+                    let current = si == w.sample;
+                    egui::Frame::none().fill(theme::PANEL_2).rounding(8.0).stroke(Stroke::new(if current { 2.0_f32 } else { 0.0_f32 }, theme::ACCENT)).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(200.0);
+                            ui.label(RichText::new(&names[si]).size(11.5).strong());
+                            let Some(node) = node else {
+                                ui.add_space(64.0);
+                                theme::caption(ui, "no such population");
+                                ui.add_space(64.0);
+                                return;
+                            };
+                            let count = self.session.count(si, node);
+                            let parent = self.session.tree(si).parent(node).ok().flatten().map(|p| self.session.count(si, p)).unwrap_or(self.session.sample(si).n_events).max(1);
+                            match self.strip_thumb(ctx, id, si, node, w, range) {
+                                Some(thumb) => {
+                                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(200.0, 150.0), Sense::click());
+                                    rects.push((si, rect));
+                                    let p = ui.painter_at(rect);
+                                    p.rect_filled(rect, 0.0, Color32::WHITE);
+                                    match &thumb {
+                                        StripThumb::Tex(t) => {
+                                            p.image(t.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                        }
+                                        StripThumb::Hist(h) => {
+                                            let bw = rect.width() / h.len().max(1) as f32;
+                                            for (i, v) in h.iter().enumerate() {
+                                                let x = rect.left() + i as f32 * bw;
+                                                p.rect_filled(Rect::from_min_max(Pos2::new(x, rect.bottom() - v * 0.94 * rect.height()), Pos2::new(x + bw + 0.5, rect.bottom())), 0.0, Color32::from_rgba_unmultiplied(0, 140, 200, 160));
+                                            }
+                                        }
+                                    }
+                                    let map = Mapper { rect, range };
+                                    let kids: Vec<Gate> = self.session.tree(si).children(node).map(|c| c.to_vec()).unwrap_or_default().into_iter().filter_map(|k| match self.session.tree(si).kind(k) {
+                                        Ok(NodeKind::Gate(g)) if gate_on_axes(g, w) => Some(g.clone()),
+                                        _ => None,
+                                    }).collect();
+                                    for g in &kids {
+                                        draw_gate(&p, &map, g, Stroke::new(1.3_f32, theme::GATE_RED), hist, false);
+                                    }
+                                    self.draw_fmo(&p, &map, w, false);
+                                    if resp.on_hover_text("Click to show this sample").clicked() {
+                                        jump = Some(si);
+                                    }
+                                }
+                                None => {
+                                    ui.add_space(64.0);
+                                    theme::caption(ui, "channel not in this sample");
+                                    ui.add_space(64.0);
+                                }
+                            }
+                            theme::caption(ui, format!("{count} events · {:.1}% of parent", 100.0 * count as f64 / parent as f64));
+                        });
+                    });
+                }
+            });
+        });
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.strip_rects = rects;
+        }
+        if let Some(si) = jump {
+            if si != w.sample {
+                match self.session.retarget_window(id, si) {
+                    Ok(()) => {
+                        if let Some(g) = self.ws.graphs.get_mut(&id) {
+                            g.key = 0;
+                        }
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+        }
+    }
+
+    /// Set the window's view to the union of every sample's population on these axes.
+    pub fn fit_all_samples(&mut self, id: u64, w: &GraphWindow) {
+        let path = self.session.tree(w.sample).path(w.node).unwrap_or_default();
+        let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for si in 0..self.session.samples().len() {
+            let node = if refs.is_empty() { Some(GateTree::ROOT) } else { self.session.tree(si).find(&refs) };
+            let Some(node) = node else { continue };
+            let Ok(pts) = self.session.population_points(si, node, &w.x_chan, &w.y_chan, &w.x_scale, &w.y_scale) else { continue };
+            for (a, b) in pts.iter().filter(|p| p.0.is_finite() && p.1.is_finite()) {
+                x0 = x0.min(*a);
+                x1 = x1.max(*a);
+                y0 = y0.min(*b);
+                y1 = y1.max(*b);
+            }
+        }
+        if !(x1 > x0 && y1 > y0) {
+            self.status = "No sample has events on these axes.".into();
+            return;
+        }
+        let (px, py) = (0.01 * (x1 - x0), 0.01 * (y1 - y0));
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.range = Some(Range { x0: x0 - px, x1: x1 + px, y0: y0 - py, y1: y1 + py });
+            g.refit = false;
+            g.key = 0;
+        }
+    }
+
+    /// A cached picture of one sample's population on the window's axes and view range.
+    fn strip_thumb(&mut self, ctx: &egui::Context, id: u64, si: usize, node: NodeId, w: &GraphWindow, range: Range) -> Option<StripThumb> {
+        let key = hash_of((self.session.version(si), node, &w.x_chan, &w.y_chan, w.x_scale.to_text(), w.y_scale.to_text(), range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits(), w.kind as u8));
+        if let Some((k, t)) = self.ws.graphs.get(&id).and_then(|g| g.strip.get(&si)) {
+            if *k == key {
+                return Some(t.clone());
+            }
+        }
+        let pts = self.session.population_points(si, node, &w.x_chan, &w.y_chan, &w.x_scale, &w.y_scale).ok()?;
+        let thumb = if w.kind == PlotKind::Histogram {
+            let h = histogram(pts.iter().map(|p| p.0), range.x0, range.x1, 64);
+            let mx = h.iter().copied().max().unwrap_or(1).max(1) as f32;
+            StripThumb::Hist(h.into_iter().map(|c| c as f32 / mx).collect())
+        } else {
+            let grid = bin(pts.iter().copied(), range, 100, 75);
+            let px = if w.kind == PlotKind::Dot { render_dots(&grid, [31, 111, 235]) } else { render(&grid) };
+            let pixels: Vec<Color32> = px.into_iter().map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])).collect();
+            StripThumb::Tex(ctx.load_texture(format!("strip{id}_{si}"), egui::ColorImage { size: [100, 75], pixels }, TextureOptions::NEAREST))
+        };
+        self.ws.graphs.get_mut(&id)?.strip.insert(si, (key, thumb.clone()));
+        Some(thumb)
+    }
+
     /// Move / resize the gates of this window with the Pointer tool: press on a handle (or inside a gate) and drag.
     /// The result is previewed live and committed as one undo step when the button is released; Esc cancels.
     fn gate_edit_input(&mut self, ctx: &egui::Context, id: u64, w: &GraphWindow, resp: &egui::Response, map: &Mapper, hist: bool) {
@@ -705,6 +1021,35 @@ impl App {
         let (plot, range) = (map.rect, map.range);
         let tol = (7.0 / plot.width() as f64 * (range.x1 - range.x0), 7.0 / plot.height() as f64 * (range.y1 - range.y0));
         let y_mid = (range.y0 + range.y1) / 2.0;
+        // an FMO line is grabbed before any gate
+        let show_fmo = self.ws.graphs.get(&id).map_or(true, |g| g.style.fmo);
+        if resp.drag_started() && show_fmo {
+            if let Some(o) = ctx.input(|i| i.pointer.press_origin()).filter(|p| plot.contains(*p)) {
+                if let Some(is_x) = self.fmo_hit(w, map, o) {
+                    self.ws.graphs.get_mut(&id).unwrap().fmo_drag = Some(is_x);
+                }
+            }
+        }
+        if let Some(is_x) = self.ws.graphs.get(&id).and_then(|g| g.fmo_drag) {
+            let (chan, scale) = if is_x { (w.x_chan.clone(), w.x_scale.clone()) } else { (w.y_chan.clone(), w.y_scale.clone()) };
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let d = map.to_data(Pos2::new(p.x.clamp(plot.left(), plot.right()), p.y.clamp(plot.top(), plot.bottom())));
+                    if let Ok(t) = scale.build() {
+                        self.session.move_fmo(&chan, t.inverse(if is_x { d.0 } else { d.1 }));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            if resp.drag_stopped() {
+                self.ws.graphs.get_mut(&id).unwrap().fmo_drag = None;
+                if let Some(f) = self.session.fmo(&chan) {
+                    self.status = format!("FMO level for {chan} moved to {:.0}.", f.level);
+                }
+                self.ws.graphs.get_mut(&id).unwrap().summary = None;
+            }
+            return;
+        }
         if resp.drag_started() {
             let origin = ctx.input(|i| i.pointer.press_origin()).filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
             if let Some(o) = origin {
@@ -715,6 +1060,12 @@ impl App {
         if !editing {
             // show what a press here would grab
             if let Some(pos) = resp.hover_pos().filter(|p| plot.contains(*p)) {
+                if show_fmo {
+                    if let Some(is_x) = self.fmo_hit(w, map, pos) {
+                        ctx.set_cursor_icon(if is_x { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
+                        return;
+                    }
+                }
                 let at = map.to_data(pos);
                 let selected = self.session.selected.filter(|(s, _)| *s == w.sample).map(|(_, n)| n);
                 let icon = selected.and_then(|n| match self.session.tree(w.sample).kind(n) {
