@@ -10,7 +10,7 @@ const G1: Color32 = Color32::from_rgb(0x4C, 0xAF, 0x50);
 const S_PHASE: Color32 = Color32::from_rgb(0xF5, 0xA6, 0x23);
 const G2: Color32 = Color32::from_rgb(0xE0, 0x55, 0x55);
 const FIT: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
-const GEN: [Color32; 8] = [
+pub(super) const GEN: [Color32; 8] = [
     Color32::from_rgb(0x1F, 0x77, 0xB4),
     Color32::from_rgb(0xFF, 0x7F, 0x0E),
     Color32::from_rgb(0x2C, 0xA0, 0x2C),
@@ -458,7 +458,7 @@ fn phase_card(ui: &mut egui::Ui, name: &str, pct: f64, colour: Color32, cv: Opti
     });
 }
 
-fn plot_area(ui: &mut egui::Ui, height: f32) -> Rect {
+pub(super) fn plot_area(ui: &mut egui::Ui, height: f32) -> Rect {
     let w = ui.available_width().min(900.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, height), Sense::hover());
     ui.painter().rect_filled(rect, 6.0, theme::INPUT);
@@ -466,24 +466,25 @@ fn plot_area(ui: &mut egui::Ui, height: f32) -> Rect {
 }
 
 /// Data-to-screen mapping for one plot, with a margin for the axis labels.
-struct Frame {
-    rect: Rect,
-    x0: f64,
-    x1: f64,
-    y0: f64,
-    y1: f64,
+pub(super) struct Frame {
+    pub(super) rect: Rect,
+    pub(super) x0: f64,
+    pub(super) x1: f64,
+    pub(super) y0: f64,
+    pub(super) y1: f64,
+    pub(super) x_ticks: bool,
 }
 
 impl Frame {
-    fn new(outer: Rect, x0: f64, x1: f64, y0: f64, y1: f64) -> Frame {
-        Frame { rect: Rect::from_min_max(Pos2::new(outer.left() + 46.0, outer.top() + 10.0), Pos2::new(outer.right() - 12.0, outer.bottom() - 24.0)), x0, x1, y0, y1 }
+    pub(super) fn new(outer: Rect, x0: f64, x1: f64, y0: f64, y1: f64) -> Frame {
+        Frame { rect: Rect::from_min_max(Pos2::new(outer.left() + 46.0, outer.top() + 10.0), Pos2::new(outer.right() - 12.0, outer.bottom() - 24.0)), x0, x1, y0, y1, x_ticks: true }
     }
-    fn to_screen(&self, x: f64, y: f64) -> Pos2 {
+    pub(super) fn to_screen(&self, x: f64, y: f64) -> Pos2 {
         let fx = ((x - self.x0) / (self.x1 - self.x0)) as f32;
         let fy = ((y - self.y0) / (self.y1 - self.y0)) as f32;
         Pos2::new(self.rect.left() + fx * self.rect.width(), self.rect.bottom() - fy * self.rect.height())
     }
-    fn draw_axes(&self, ui: &egui::Ui) {
+    pub(super) fn draw_axes(&self, ui: &egui::Ui) {
         let p = ui.painter();
         let grid = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
         for k in 0..=4 {
@@ -491,11 +492,13 @@ impl Frame {
             let (y, x) = (self.rect.bottom() - f * self.rect.height(), self.rect.left() + f * self.rect.width());
             p.line_segment([Pos2::new(self.rect.left(), y), Pos2::new(self.rect.right(), y)], grid);
             p.text(Pos2::new(self.rect.left() - 4.0, y), Align2::RIGHT_CENTER, short(self.y0 + (self.y1 - self.y0) * f as f64), FontId::proportional(10.0), theme::MUTED);
-            p.text(Pos2::new(x, self.rect.bottom() + 3.0), Align2::CENTER_TOP, short(self.x0 + (self.x1 - self.x0) * f as f64), FontId::proportional(10.0), theme::MUTED);
+            if self.x_ticks {
+                p.text(Pos2::new(x, self.rect.bottom() + 3.0), Align2::CENTER_TOP, short(self.x0 + (self.x1 - self.x0) * f as f64), FontId::proportional(10.0), theme::MUTED);
+            }
         }
         p.rect_stroke(self.rect, 0.0, Stroke::new(1.0_f32, Color32::from_gray(70)));
     }
-    fn bars(&self, ui: &egui::Ui, x: &[f64], y: &[f64], colour: Color32) {
+    pub(super) fn bars(&self, ui: &egui::Ui, x: &[f64], y: &[f64], colour: Color32) {
         let p = ui.painter_at(self.rect);
         let w = ((self.rect.width() / x.len() as f32) - 0.5).max(1.0);
         for (xv, yv) in x.iter().zip(y) {
@@ -504,11 +507,11 @@ impl Frame {
             p.rect_filled(Rect::from_min_max(Pos2::new(top.x - w / 2.0, top.y), Pos2::new(top.x + w / 2.0, base.y)), 0.0, colour);
         }
     }
-    fn line(&self, ui: &egui::Ui, x: &[f64], y: &[f64], colour: Color32, width: f32) {
+    pub(super) fn line(&self, ui: &egui::Ui, x: &[f64], y: &[f64], colour: Color32, width: f32) {
         let pts: Vec<Pos2> = x.iter().zip(y).map(|(a, b)| self.to_screen(*a, *b)).collect();
         ui.painter_at(self.rect).add(Shape::line(pts, Stroke::new(width, colour)));
     }
-    fn vline(&self, ui: &egui::Ui, x: f64, colour: Color32, label: &str) {
+    pub(super) fn vline(&self, ui: &egui::Ui, x: f64, colour: Color32, label: &str) {
         if x < self.x0 || x > self.x1 {
             return;
         }
@@ -519,7 +522,7 @@ impl Frame {
             p.text(Pos2::new(a.x + 3.0, self.rect.top() + 2.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), colour);
         }
     }
-    fn hline(&self, ui: &egui::Ui, y: f64, colour: Color32) {
+    pub(super) fn hline(&self, ui: &egui::Ui, y: f64, colour: Color32) {
         if y < self.y0 || y > self.y1 {
             return;
         }

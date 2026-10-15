@@ -8,6 +8,7 @@ pub mod embedmetrics;
 pub mod fitting;
 pub mod flowjo;
 pub mod graphcluster;
+pub mod htest;
 pub mod json;
 pub mod kmeans;
 pub mod linalg;
