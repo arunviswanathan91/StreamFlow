@@ -35,7 +35,7 @@ impl Default for State {
 
 /// The names with the prefix they all share removed (cut at a `_` / space so no word is split), then shortened.
 /// Falls back to plain shortening when stripping would leave a name empty.
-fn short_all(names: &[String]) -> Vec<String> {
+pub(super) fn short_all(names: &[String]) -> Vec<String> {
     let clean: Vec<String> = names.iter().map(|n| n.trim_end_matches(".fcs").trim_end_matches(".FCS").to_string()).collect();
     let mut prefix: Vec<char> = clean.first().map(|n| n.chars().collect()).unwrap_or_default();
     for n in &clean[clean.len().min(1)..] {

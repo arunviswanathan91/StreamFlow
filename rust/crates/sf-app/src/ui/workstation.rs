@@ -27,6 +27,8 @@ pub struct State {
     pub tree_sample: usize,
     pub overview_x: String,
     pub overview_y: String,
+    /// Percentile used when an FMO control sets its reference level.
+    pub fmo_pct: f64,
     thumbs: HashMap<(usize, u64), (u64, TextureHandle)>,
 }
 
@@ -43,6 +45,7 @@ impl Default for State {
             tree_sample: 0,
             overview_x: String::new(),
             overview_y: String::new(),
+            fmo_pct: 95.0,
             thumbs: HashMap::new(),
         }
     }

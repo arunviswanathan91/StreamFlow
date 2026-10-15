@@ -71,6 +71,18 @@ pub struct GraphWindow {
     pub kind: PlotKind,
 }
 
+/// A fluorescence-minus-one reference level: where the control's signal ends in one channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fmo {
+    /// In raw channel units (the line is drawn at the level's position on whatever scale a plot uses).
+    pub level: f64,
+    /// Where it came from, e.g. `FMO CD25.fcs · Lymphocytes ▸ CD3+`.
+    pub source: String,
+    /// Events the percentile was taken over.
+    pub n: usize,
+    pub percentile: f64,
+}
+
 pub struct Session {
     samples: Vec<LoadedSample>,
     states: Vec<SampleState>,
@@ -79,6 +91,7 @@ pub struct Session {
     pub selected: Option<(usize, NodeId)>,
     /// Messages for the status bar / log (load problems, evaluation warnings...).
     pub log: Vec<String>,
+    fmo: BTreeMap<String, Fmo>,
 }
 
 impl Default for Session {
@@ -89,7 +102,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![] }
+        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new() }
     }
 
     pub fn samples(&self) -> &[LoadedSample] {
@@ -533,6 +546,60 @@ impl Session {
         &self.samples[i]
     }
 
+    // ---- FMO reference levels --------------------------------------------------------------------
+
+    pub fn fmo(&self, channel: &str) -> Option<&Fmo> {
+        self.fmo.get(channel)
+    }
+
+    pub fn fmo_all(&self) -> &BTreeMap<String, Fmo> {
+        &self.fmo
+    }
+
+    pub fn clear_fmo(&mut self, channel: &str) {
+        self.fmo.remove(channel);
+    }
+
+    /// Move an existing level (dragging its line); the source and percentile it was set with are kept.
+    pub fn move_fmo(&mut self, channel: &str, level: f64) {
+        if let (Some(f), true) = (self.fmo.get_mut(channel), level.is_finite()) {
+            f.level = level;
+        }
+    }
+
+    /// Record the `percentile` of the window's population as the FMO level of the channel(s) it shows (the Y channel
+    /// only when the plot is not a histogram). Returns `(channel, level)` for each one set.
+    pub fn set_fmo_from_window(&mut self, id: u64, percentile: f64) -> Result<Vec<(String, f64)>, String> {
+        let w = self.window(id).ok_or("no such window")?.clone();
+        if !(0.0..=100.0).contains(&percentile) {
+            return Err("the percentile must be between 0 and 100".into());
+        }
+        let mut channels = vec![w.x_chan.clone()];
+        if w.kind != PlotKind::Histogram && w.y_chan != w.x_chan {
+            channels.push(w.y_chan.clone());
+        }
+        let source = format!("{} · {}", self.samples[w.sample].name, self.states[w.sample].tree.path(w.node).map(|p| if p.is_empty() { "All Events".to_string() } else { p.join(" ▸ ") }).unwrap_or_default());
+        let mut done = Vec::new();
+        for ch in channels {
+            let vals: Vec<f64> = self.population_values(w.sample, w.node, &ch)?.into_iter().filter(|v| v.is_finite()).collect();
+            if vals.is_empty() {
+                return Err(format!("there are no events with a value for {ch} in this population"));
+            }
+            let level = sf_core::stats::percentile(&vals, percentile);
+            self.fmo.insert(ch.clone(), Fmo { level, source: source.clone(), n: vals.len(), percentile });
+            done.push((ch, level));
+        }
+        Ok(done)
+    }
+
+    /// Fraction (0..=1) of a population's events at or above the channel's FMO level.
+    pub fn fraction_above_fmo(&mut self, sample: usize, node: NodeId, channel: &str) -> Option<f64> {
+        let level = self.fmo.get(channel)?.level;
+        let vals = self.population_values(sample, node, channel).ok()?;
+        let finite: Vec<f64> = vals.into_iter().filter(|v| v.is_finite()).collect();
+        (!finite.is_empty()).then(|| finite.iter().filter(|&&v| v >= level).count() as f64 / finite.len() as f64)
+    }
+
     // ---- workspace persistence ------------------------------------------------------------------
 
     pub fn to_workspace_json(&self) -> Json {
@@ -553,7 +620,11 @@ impl Session {
                 comp = comp.with(&s.name, Json::obj().with("detectors", det).with("spill", sp).with("source", Json::Str(c.source.clone())));
             }
         }
-        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp)
+        let mut fmo = Json::obj();
+        for (ch, f) in &self.fmo {
+            fmo = fmo.with(ch, Json::obj().with("level", Json::num(f.level)).with("source", Json::Str(f.source.clone())).with("n", Json::num(f.n as f64)).with("percentile", Json::num(f.percentile)));
+        }
+        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo)
     }
 
     /// Replace the gating trees of the currently loaded samples with those in a saved workspace (matched by
@@ -579,6 +650,20 @@ impl Session {
         }
         let (mut loaded, mut warnings) = workspace_from_json(gates, "All Events").map_err(|e| e.to_string())?;
         warnings.extend(notes);
+        self.fmo.clear();
+        if let Some(Json::Obj(fmo)) = doc.get("fmo") {
+            for (ch, f) in fmo {
+                match f.get("level").and_then(Json::as_f64).filter(|v| v.is_finite()) {
+                    Some(level) => {
+                        let source = f.get("source").and_then(Json::as_str).unwrap_or("workspace").to_string();
+                        let n = f.get("n").and_then(Json::as_f64).unwrap_or(0.0) as usize;
+                        let percentile = f.get("percentile").and_then(Json::as_f64).unwrap_or(95.0);
+                        self.fmo.insert(ch.clone(), Fmo { level, source, n, percentile });
+                    }
+                    None => warnings.push(format!("the saved FMO level for {ch} is not a number and was ignored")),
+                }
+            }
+        }
         for i in 0..self.samples.len() {
             let name = self.samples[i].name.clone();
             if let Some(sg) = loaded.remove(&name) {
