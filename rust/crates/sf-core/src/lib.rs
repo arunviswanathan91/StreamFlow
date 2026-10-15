@@ -1,9 +1,11 @@
 //! StreamFLOW numerics. All statistics live in [`stats`] (one place, by project convention).
 
+pub mod analysis;
 pub mod cluster;
 pub mod compensation;
 pub mod discovery;
 pub mod embedmetrics;
+pub mod fitting;
 pub mod flowjo;
 pub mod graphcluster;
 pub mod json;
@@ -12,6 +14,7 @@ pub mod linalg;
 pub mod logicle;
 pub mod rng;
 pub mod scale;
+pub mod signal;
 pub mod spectral;
 pub mod xml;
 pub mod stats;

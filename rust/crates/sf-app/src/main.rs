@@ -72,6 +72,25 @@ fn main() -> eframe::Result<()> {
             Err(e) => app.set_status(e),
         }
     }
+    if let Some(i) = flag("analysis-sample").and_then(|v| v.parse::<usize>().ok()) {
+        app.ana.sample = i.min(app.session.samples().len().saturating_sub(1));
+    }
+    if let Some(c) = flag("analysis-channel") {
+        app.ana.cycle_channel = c.clone();
+        app.ana.prolif_channel = c;
+    }
+    if args.iter().any(|a| a == "--run-cell-cycle") {
+        app.set_module(sf_app::ui::Module::CellCycle);
+        app.run_cell_cycle();
+    }
+    if args.iter().any(|a| a == "--run-proliferation") {
+        app.set_module(sf_app::ui::Module::Proliferation);
+        app.run_proliferation();
+    }
+    if args.iter().any(|a| a == "--run-apoptosis") {
+        app.set_module(sf_app::ui::Module::Apoptosis);
+        app.run_apoptosis();
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

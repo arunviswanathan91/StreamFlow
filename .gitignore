@@ -103,3 +103,16 @@ test-assests/
 test-assets/
 test-data/
 *.fcs
+
+# Markdown / instructional documents are kept local, not in the repo
+*.md
+*.mdc
+AGENTS.md
+GEMINI.md
+.github/copilot-instructions.md
+docs/
+
+# Rust build output and scratch screenshots
+rust/target/
+app_*.png
+ana_*.png

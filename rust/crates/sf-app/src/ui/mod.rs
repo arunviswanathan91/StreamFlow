@@ -2,6 +2,7 @@
 //! host, and a status strip. All state lives in [`Session`]; each module draws it and forwards input.
 
 mod comp_view;
+mod analysis_view;
 mod discover_view;
 mod export_view;
 mod graph;
@@ -110,6 +111,7 @@ pub struct App {
     pub(crate) comp: comp_view::State,
     pub(crate) export: export_view::State,
     pub disc: discover_view::State,
+    pub ana: analysis_view::State,
     pub(crate) disc_last_click: Option<(f64, eframe::egui::Pos2)>,
     pub spec: spectral_view::State,
     pub(crate) status: String,
@@ -142,6 +144,7 @@ impl App {
             comp: comp_view::State::default(),
             export: export_view::State::default(),
             disc: discover_view::State::default(),
+            ana: analysis_view::State::default(),
             disc_last_click: None,
             spec: spectral_view::State::default(),
             status: "Open FCS files from the File menu (Ctrl+O).".into(),
@@ -239,6 +242,9 @@ impl App {
             Module::DimReduction => self.dimred(ui, ctx),
             Module::Clustering => self.clustering(ui, ctx),
             Module::Spectral => self.spectral(ui),
+            Module::CellCycle => self.cell_cycle_screen(ui),
+            Module::Proliferation => self.proliferation_screen(ui),
+            Module::Apoptosis => self.apoptosis_screen(ui),
             Module::Export => self.export_module(ui),
             Module::AnalysisLog => self.analysis_log(ui),
             other => modules::placeholder(ui, other),
