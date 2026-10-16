@@ -42,11 +42,14 @@ pub struct GateStyle {
     pub fill: bool,
     /// Draw the FMO reference lines.
     pub fmo: bool,
+    /// Show each gate's % of parent and event count / its median(s).
+    pub freqs: bool,
+    pub medians: bool,
 }
 
 impl Default for GateStyle {
     fn default() -> Self {
-        GateStyle { color: theme::GATE_RED, width: 1.8, labels: true, fill: false, fmo: true }
+        GateStyle { color: theme::GATE_RED, width: 1.8, labels: true, fill: false, fmo: true, freqs: true, medians: false }
     }
 }
 
@@ -522,7 +525,9 @@ impl App {
                         ui.color_edit_button_srgba(&mut g.style.color);
                     });
                     ui.add(egui::Slider::new(&mut g.style.width, 0.8..=4.0).text("Width"));
-                    ui.checkbox(&mut g.style.labels, "Show names and %");
+                    ui.checkbox(&mut g.style.labels, "Show gate names");
+                    ui.checkbox(&mut g.style.freqs, "Show gate frequencies");
+                    ui.checkbox(&mut g.style.medians, "Show gate medians");
                     ui.checkbox(&mut g.style.fill, "Tint inside");
                 }
             });
@@ -664,8 +669,8 @@ impl App {
         painter.rect_filled(plot, 0.0, Color32::WHITE);
         self.paint_population(ctx, id, &w, &map, &painter);
         let curve = self.ws.graphs.get(&id).and_then(|g| g.curve.clone());
-        let show_grid = self.ws.graphs.get(&id).map_or(true, |g| g.plot.grid);
-        draw_axes(&painter, &map, &w, hist, curve.as_ref(), show_grid);
+        let st = self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default();
+        draw_axes(&painter, &map, &w, hist, curve.as_ref(), &st);
         let style = self.ws.graphs[&id].style.clone();
         self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
         self.draw_child_gates(&painter, &map, &w, &style, id);
@@ -1391,10 +1396,32 @@ impl App {
                     painter.rect_stroke(r, 1.0, Stroke::new(1.2_f32, Color32::from_rgb(40, 40, 40)));
                 }
             }
-            if style.labels {
+            if style.labels || style.freqs || style.medians {
                 if let Some(a) = anchor {
                     let count = self.session.count(w.sample, k);
-                    let mut text = format!("{name}\n{:.1}%  ({count})", 100.0 * count as f64 / parent_count as f64);
+                    let mut text = String::new();
+                    if style.labels {
+                        text.push_str(&name);
+                    }
+                    if style.freqs {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&format!("{:.1}%  ({count})", 100.0 * count as f64 / parent_count as f64));
+                    }
+                    if style.medians {
+                        let mut chans = vec![w.x_chan.clone()];
+                        if w.kind != PlotKind::Histogram {
+                            chans.push(w.y_chan.clone());
+                        }
+                        for ch in chans {
+                            let m = crate::stats_table::node_stat(&mut self.session, w.sample, k, crate::stats_table::Metric::Median, &ch);
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&format!("Median {ch}: {}", m.map_or("–".to_string(), |v| format!("{v:.0}"))));
+                        }
+                    }
                     for line in self.gate_stat_lines(w.sample, k) {
                         text.push('\n');
                         text.push_str(&line);
@@ -1479,7 +1506,9 @@ fn draw_histogram(painter: &egui::Painter, map: &Mapper, c: &HistCurve, style: &
     }
 }
 
-fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, show_grid: bool) {
+fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, st: &PlotStyle) {
+    let (show_grid, sci) = (st.grid, st.sci);
+    let lab = |l: &str| if sci { crate::axis::sci_label(l) } else { l.to_string() };
     let axis = Stroke::new(1.0_f32, Color32::from_gray(150));
     let grid = Stroke::new(if show_grid { 0.5_f32 } else { 0.0 }, if show_grid { Color32::from_gray(228) } else { Color32::TRANSPARENT });
     let text = theme::TEXT;
@@ -1489,7 +1518,7 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve
         if t.major {
             p.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], grid);
             p.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x, r.bottom() + 5.0)], axis);
-            p.text(Pos2::new(x, r.bottom() + 7.0), Align2::CENTER_TOP, &t.label, FontId::proportional(10.5), text);
+            p.text(Pos2::new(x, r.bottom() + 7.0), Align2::CENTER_TOP, lab(&t.label), FontId::proportional(10.5), text);
         } else {
             p.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x, r.bottom() + 2.5)], axis);
         }
@@ -1500,7 +1529,7 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve
             if t.major {
                 p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], grid);
                 p.line_segment([Pos2::new(r.left() - 5.0, y), Pos2::new(r.left(), y)], axis);
-                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, &t.label, FontId::proportional(10.5), text);
+                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, lab(&t.label), FontId::proportional(10.5), text);
             } else {
                 p.line_segment([Pos2::new(r.left() - 2.5, y), Pos2::new(r.left(), y)], axis);
             }
@@ -1511,7 +1540,7 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve
                 let y = r.bottom() - frac as f32 * r.height();
                 p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], grid);
                 p.line_segment([Pos2::new(r.left() - 5.0, y), Pos2::new(r.left(), y)], axis);
-                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, label, FontId::proportional(10.5), text);
+                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, lab(&label), FontId::proportional(10.5), text);
             }
             p.text(Pos2::new(r.left() + 4.0, r.top() + 3.0), Align2::LEFT_TOP, c.y_label, FontId::proportional(11.5), Color32::from_gray(60));
         }
