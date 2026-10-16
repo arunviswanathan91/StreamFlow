@@ -303,6 +303,10 @@ impl App {
                 }
             }
         });
+        let (pages, cur) = (std::mem::take(&mut self.lay.ed.batch), self.lay.ed.preview.unwrap_or(0));
+        let stem = self.lay.ed.doc.name.clone();
+        self.page_image_row(ui, &pages, cur, &stem);
+        self.lay.ed.batch = pages;
         if !self.lay.ed.notes.is_empty() {
             ui.label(RichText::new(format!("{} problem(s):", self.lay.ed.notes.len())).color(theme::WARN).size(12.0));
             egui::ScrollArea::vertical().id_salt("led_notes").max_height(110.0).show(ui, |ui| {

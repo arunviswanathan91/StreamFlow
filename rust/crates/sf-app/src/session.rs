@@ -16,7 +16,7 @@ use sf_core::compensation::Mode;
 use sf_core::json::Json;
 use sf_core::scale::ScaleSpec;
 use sf_gating::workspace::{workspace_from_json, workspace_to_json, SampleGates};
-use sf_gating::{Evaluation, EventView, GateTree, NodeId, NodeKind, NodeMeta};
+use sf_gating::{Evaluation, EventView, GateKind, GateTree, NodeId, NodeKind, NodeMeta};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -434,6 +434,131 @@ impl Session {
             self.selected = None;
         }
         self.touch(sample);
+    }
+
+    // ---- gate operations from the right-click menus ------------------------------------------------
+
+    /// The gate of a population, if it is a real gate (not the root, a Boolean or a quadrant sector).
+    pub fn gate_of(&self, sample: usize, node: NodeId) -> Option<sf_gating::Gate> {
+        match self.states.get(sample)?.tree.kind(node) {
+            Ok(NodeKind::Gate(g)) => Some(g.clone()),
+            _ => None,
+        }
+    }
+
+    /// Turn a rectangle or an ellipse into the polygon with the same outline (an ellipse becomes a 48-sided one),
+    /// so its corners can then be moved one by one. One undo step; the population and what is gated below it stay.
+    pub fn convert_to_polygon(&mut self, sample: usize, node: NodeId) -> Result<usize, String> {
+        let g = self.gate_of(sample, node).ok_or("That population is not a gate")?;
+        let (xs, ys) = match g.kind {
+            GateKind::Rectangle => {
+                let (x0, x1, y0, y1) = (g.xs.iter().cloned().fold(f64::MAX, f64::min), g.xs.iter().cloned().fold(f64::MIN, f64::max), g.ys.iter().cloned().fold(f64::MAX, f64::min), g.ys.iter().cloned().fold(f64::MIN, f64::max));
+                (vec![x0, x1, x1, x0], vec![y0, y0, y1, y1])
+            }
+            GateKind::Ellipse => {
+                let (x0, x1, y0, y1) = (g.xs.iter().cloned().fold(f64::MAX, f64::min), g.xs.iter().cloned().fold(f64::MIN, f64::max), g.ys.iter().cloned().fold(f64::MAX, f64::min), g.ys.iter().cloned().fold(f64::MIN, f64::max));
+                let (cx, cy, rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0) / 2.0, (y1 - y0) / 2.0);
+                let (c, s) = (g.angle.cos(), g.angle.sin());
+                (0..48)
+                    .map(|k| {
+                        let t = k as f64 * std::f64::consts::TAU / 48.0;
+                        let (dx, dy) = (rx * t.cos(), ry * t.sin());
+                        (cx + dx * c - dy * s, cy + dx * s + dy * c)
+                    })
+                    .unzip()
+            }
+            GateKind::Polygon => return Err("It is already a polygon".into()),
+            _ => return Err("Only rectangle and ellipse gates can be converted to a polygon".into()),
+        };
+        let mut poly = sf_gating::Gate::new(GateKind::Polygon, &g.x_chan, g.y_chan.as_deref(), xs, ys).map_err(|e| e.to_string())?;
+        poly.invert = g.invert;
+        poly.x_scale = g.x_scale.clone();
+        poly.y_scale = g.y_scale.clone();
+        self.snapshot(sample);
+        if let Err(e) = self.states[sample].tree.convert_to_polygon(node, poly) {
+            self.discard_snapshot(sample);
+            return Err(e.to_string());
+        }
+        self.touch(sample);
+        Ok(self.count(sample, node))
+    }
+
+    /// Add a corner to a polygon gate, on the edge nearest to `at` (display-space coordinates). One undo step.
+    pub fn add_polygon_node(&mut self, sample: usize, node: NodeId, at: (f64, f64)) -> Result<usize, String> {
+        let mut g = self.gate_of(sample, node).ok_or("That population is not a gate")?;
+        if !matches!(g.kind, GateKind::Polygon) {
+            return Err("Only polygon gates have corners to add".into());
+        }
+        let n = g.xs.len();
+        let mut best = (f64::MAX, 0usize, (0.0, 0.0));
+        for i in 0..n {
+            let (a, b) = ((g.xs[i], g.ys[i]), (g.xs[(i + 1) % n], g.ys[(i + 1) % n]));
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l2 = dx * dx + dy * dy;
+            let t = if l2 > 0.0 { (((at.0 - a.0) * dx + (at.1 - a.1) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            let p = (a.0 + t * dx, a.1 + t * dy);
+            let d = (p.0 - at.0).powi(2) + (p.1 - at.1).powi(2);
+            if d < best.0 {
+                best = (d, i, p);
+            }
+        }
+        g.xs.insert(best.1 + 1, best.2 .0);
+        g.ys.insert(best.1 + 1, best.2 .1);
+        self.edit_gate(sample, node, g)
+    }
+
+    /// Make the population an exclusion gate (everything the gate does NOT contain) or undo that. One undo step.
+    pub fn toggle_exclusion(&mut self, sample: usize, node: NodeId) -> Result<bool, String> {
+        let g = self.gate_of(sample, node).ok_or("That population is not a gate")?;
+        let now = !g.invert;
+        self.edit_gate(sample, node, g.inverted())?;
+        Ok(now)
+    }
+
+    /// Add a copy of `gate` under `parent` of `sample` (the pasted gate keeps its channels and scales). One undo step.
+    pub fn paste_gate(&mut self, sample: usize, parent: NodeId, gate: sf_gating::Gate, name: &str) -> Result<NodeId, String> {
+        if matches!(gate.kind, GateKind::Indexed(_)) {
+            return Err("Subsample and plugin populations hold event numbers of one file and cannot be pasted".into());
+        }
+        if !self.states[sample].tree.is_alive(parent) {
+            return Err("That population no longer exists".into());
+        }
+        let have = self.sample(sample).channels.clone();
+        for c in std::iter::once(&gate.x_chan).chain(gate.y_chan.iter()) {
+            if !have.contains(c) {
+                return Err(format!("This file has no channel '{c}', so the gate cannot be pasted here"));
+            }
+        }
+        self.snapshot(sample);
+        match self.states[sample].tree.replace_gate(parent, name, gate) {
+            Ok(n) => {
+                self.touch(sample);
+                Ok(n)
+            }
+            Err(e) => {
+                self.discard_snapshot(sample);
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// A random subsample of `n` events of a population, as a new population named `name` (seeded, so the same
+    /// request gives the same events). One undo step.
+    pub fn subsample(&mut self, sample: usize, node: NodeId, n: usize, seed: u64, name: &str) -> Result<NodeId, String> {
+        if n == 0 {
+            return Err("Choose at least one event".into());
+        }
+        let rows: Vec<usize> = {
+            let ev = self.evaluation(sample)?;
+            ev.masks.get(node).and_then(|m| m.as_ref()).ok_or("That population no longer exists")?.indices()
+        };
+        if n >= rows.len() {
+            return Err(format!("The population has only {} events; choose fewer", rows.len()));
+        }
+        let pick = sf_core::rng::Rng::new(seed).choose_sorted(rows.len(), n);
+        let ids: Vec<u32> = pick.into_iter().map(|i| rows[i] as u32).collect();
+        let made = self.add_index_populations(sample, node, vec![(name.to_string(), ids)])?;
+        Ok(made[0])
     }
 
     /// Swap a window's X and Y axes (channels and scales). Gates drawn on the old axes stay put and are hidden while the
@@ -1251,5 +1376,116 @@ mod navigation_and_plot_tests {
         assert_eq!((pa.len(), pb.len()), (600, 600));
         assert!(pa != pb);
         assert!(s.population_points(a, GateTree::ROOT, "CD3", "SSC-A", &id, &id).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gate_op_tests {
+    use super::*;
+    use sf_gating::{Gate, GateKind};
+
+    fn session_with_sample() -> (Session, usize) {
+        let mut s = Session::new();
+        let channels: Vec<String> = ["FSC-A", "SSC-A"].iter().map(|c| c.to_string()).collect();
+        let n = 2000;
+        let data: Vec<f32> = (0..n).flat_map(|i| [((i * 37) % 1000) as f32, ((i * 11) % 500) as f32]).collect();
+        let _ = &channels;
+        let idx = s.add_sample(crate::sample::LoadedSample::synthetic("t.fcs", &["FSC-A", "SSC-A"], vec![1000.0, 1000.0], data));
+        (s, idx)
+    }
+
+    fn add(s: &mut Session, si: usize, g: Gate, name: &str) -> NodeId {
+        s.paste_gate(si, GateTree::ROOT, g, name).unwrap()
+    }
+
+    #[test]
+    fn rectangles_and_ellipses_become_polygons_with_the_same_members() {
+        let (mut s, si) = session_with_sample();
+        let r = add(&mut s, si, Gate::new(GateKind::Rectangle, "FSC-A", Some("SSC-A"), vec![100.0, 600.0], vec![50.0, 300.0]).unwrap(), "R");
+        let before = s.count(si, r);
+        assert!(before > 0);
+        s.convert_to_polygon(si, r).unwrap();
+        assert!(matches!(s.gate_of(si, r).unwrap().kind, GateKind::Polygon));
+        // a polygon with the rectangle's corners is half-open-agnostic: allow only events on the border to differ
+        let after = s.count(si, r);
+        assert!((after as i64 - before as i64).abs() < before as i64 / 20 + 5, "{before} vs {after}");
+        let e = add(&mut s, si, Gate::new(GateKind::Ellipse, "FSC-A", Some("SSC-A"), vec![200.0, 800.0], vec![100.0, 400.0]).unwrap(), "E");
+        let eb = s.count(si, e);
+        s.convert_to_polygon(si, e).unwrap();
+        let ea = s.count(si, e);
+        assert!((ea as i64 - eb as i64).abs() < eb as i64 / 10 + 5, "48-gon ~ ellipse: {eb} vs {ea}");
+        assert!(s.convert_to_polygon(si, e).unwrap_err().contains("already"));
+        // one undo step each
+        assert!(s.undo(si));
+        assert!(matches!(s.gate_of(si, e).unwrap().kind, GateKind::Ellipse));
+        assert!(s.convert_to_polygon(si, GateTree::ROOT).is_err());
+    }
+
+    #[test]
+    fn a_node_is_inserted_on_the_nearest_edge_and_changes_nothing_else() {
+        let (mut s, si) = session_with_sample();
+        let p = add(&mut s, si, Gate::new(GateKind::Polygon, "FSC-A", Some("SSC-A"), vec![0.0, 400.0, 400.0, 0.0], vec![0.0, 0.0, 300.0, 300.0]).unwrap(), "P");
+        let n0 = s.count(si, p);
+        s.add_polygon_node(si, p, (200.0, -30.0)).unwrap();
+        let g = s.gate_of(si, p).unwrap();
+        assert_eq!(g.xs, vec![0.0, 200.0, 400.0, 400.0, 0.0]);
+        assert_eq!(g.ys, vec![0.0, 0.0, 0.0, 300.0, 300.0], "the new corner sits on the bottom edge");
+        assert_eq!(s.count(si, p), n0, "a corner on a straight edge changes no membership");
+        s.add_polygon_node(si, p, (0.0, 250.0)).unwrap();
+        assert_eq!(s.gate_of(si, p).unwrap().xs.len(), 6);
+        assert!(s.undo(si) && s.undo(si));
+        assert_eq!(s.gate_of(si, p).unwrap().xs.len(), 4);
+        let r = add(&mut s, si, Gate::new(GateKind::Rectangle, "FSC-A", Some("SSC-A"), vec![0.0, 10.0], vec![0.0, 10.0]).unwrap(), "R");
+        assert!(s.add_polygon_node(si, r, (1.0, 1.0)).is_err());
+    }
+
+    #[test]
+    fn exclusion_flips_the_population_to_its_complement_and_back() {
+        let (mut s, si) = session_with_sample();
+        let r = add(&mut s, si, Gate::new(GateKind::Rectangle, "FSC-A", Some("SSC-A"), vec![100.0, 600.0], vec![50.0, 300.0]).unwrap(), "R");
+        let inside = s.count(si, r);
+        assert_eq!(s.toggle_exclusion(si, r), Ok(true));
+        assert_eq!(s.count(si, r) + inside, 2000, "inside and outside partition the parent");
+        assert_eq!(s.toggle_exclusion(si, r), Ok(false));
+        assert_eq!(s.count(si, r), inside);
+    }
+
+    #[test]
+    fn a_pasted_gate_lands_under_the_chosen_population_in_any_sample_and_checks_its_channels() {
+        let (mut s, si) = session_with_sample();
+        let g = Gate::new(GateKind::Rectangle, "FSC-A", Some("SSC-A"), vec![0.0, 500.0], vec![0.0, 250.0]).unwrap();
+        let a = s.paste_gate(si, GateTree::ROOT, g.clone(), "A").unwrap();
+        let b = s.paste_gate(si, a, g.clone(), "B").unwrap();
+        assert_eq!(s.tree(si).parent(b).unwrap(), Some(a));
+        let missing = Gate::new(GateKind::Interval, "CD3-A", None, vec![0.0, 1.0], vec![]).unwrap();
+        assert!(s.paste_gate(si, a, missing, "C").unwrap_err().contains("CD3-A"));
+        assert!(s.paste_gate(si, a, Gate::indexed(vec![1, 2]), "I").unwrap_err().contains("cannot be pasted"));
+        assert!(s.undo(si));
+        assert!(!s.tree(si).is_alive(b));
+    }
+
+    #[test]
+    fn a_subsample_is_seeded_sorted_inside_the_population_and_undoable() {
+        let (mut s, si) = session_with_sample();
+        let r = add(&mut s, si, Gate::new(GateKind::Rectangle, "FSC-A", Some("SSC-A"), vec![0.0, 600.0], vec![0.0, 300.0]).unwrap(), "R");
+        let total = s.count(si, r);
+        let a = s.subsample(si, r, 100, 7, "100 events").unwrap();
+        assert_eq!(s.count(si, a), 100);
+        let rows = |s: &mut Session, n: NodeId| match s.gate_of(si, n).unwrap().kind {
+            GateKind::Indexed(v) => v,
+            _ => panic!(),
+        };
+        let first = rows(&mut s, a);
+        assert!(first.windows(2).all(|w| w[0] < w[1]), "ascending, distinct");
+        let parent_rows: std::collections::HashSet<usize> = s.evaluation(si).unwrap().masks[r].as_ref().unwrap().indices().into_iter().collect();
+        assert!(first.iter().all(|i| parent_rows.contains(&(*i as usize))), "all events come from the parent");
+        let b = s.subsample(si, r, 100, 7, "again").unwrap();
+        assert_eq!(rows(&mut s, b), first, "same seed, same events");
+        let c = s.subsample(si, r, 100, 8, "other").unwrap();
+        assert_ne!(rows(&mut s, c), first);
+        assert!(s.subsample(si, r, 0, 1, "x").is_err());
+        assert!(s.subsample(si, r, total, 1, "x").unwrap_err().contains("only"));
+        assert!(s.undo(si));
+        assert!(!s.tree(si).is_alive(c));
     }
 }

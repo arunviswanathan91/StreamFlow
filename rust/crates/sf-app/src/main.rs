@@ -256,6 +256,28 @@ fn main() -> eframe::Result<()> {
             *st = st.clone().clamped();
         }
     }
+    // open the plot export editor on the first graph window (screenshots)
+    if args.iter().any(|a| a == "--export-editor") {
+        if app.session.windows.is_empty() && !app.session.samples().is_empty() {
+            let _ = app.open_tab(0, GateTree::ROOT);
+        }
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            app.open_plot_export(id);
+        }
+    }
+    // `--dialog=stat|history|keywords|color|subsample` opens a right-click dialog on the first gate (screenshots)
+    if let Some(d) = flag("dialog") {
+        if let Some(&si) = app.session.windows.first().map(|w| &w.sample) {
+            let node = app.session.tree(si).children(GateTree::ROOT).ok().and_then(|c| c.first().copied()).unwrap_or(GateTree::ROOT);
+            let ch = app.session.sample(si).channels[0].clone();
+            if d == "stat" {
+                app.gate_add_stat(si, node, sf_app::stats_table::Metric::Median, &ch);
+                app.gate_add_stat(si, node, sf_app::stats_table::Metric::Cv, &ch);
+                app.gate_set_color(si, node, Some([20, 140, 60]));
+            }
+            app.set_dialog(&d, si, node, &ch);
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

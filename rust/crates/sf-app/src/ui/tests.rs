@@ -1436,3 +1436,207 @@ fn transpose_and_next_previous_axis_walk_the_channels_and_keep_gates_on_their_ow
     settle(&mut app, &ctx);
     assert!(app.ws.graphs[&w].tex.is_some());
 }
+
+#[test]
+fn the_export_editor_changes_size_resolution_format_and_content_and_previews_it() {
+    use crate::ui::plot_export::{Format, Unit};
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    app.refit_window(w);
+    settle(&mut app, &ctx);
+    app.open_plot_export(w);
+    settle(&mut app, &ctx);
+    assert!(app.pexp.open == Some(w));
+    assert!(app.pexp.preview_ready(), "the dialog drew a preview");
+    let mut set = app.pexp.set.clone();
+    // PNG: pixel size follows size x dpi, and the file records the dpi
+    set.format = Format::Png;
+    set.width_pt = 216.0;
+    set.height_pt = 144.0;
+    set.dpi = 300.0;
+    let bytes = app.export_bytes(w, &set, "t").unwrap();
+    let dec = png::Decoder::new(std::io::Cursor::new(&bytes));
+    let rd = dec.read_info().unwrap();
+    assert_eq!((rd.info().width, rd.info().height), (900, 600));
+    set.dpi = 150.0;
+    let b2 = app.export_bytes(w, &set, "t").unwrap();
+    assert_eq!(png::Decoder::new(std::io::Cursor::new(&b2)).read_info().unwrap().info().width, 450);
+    // a different unit is the same size
+    assert!((Unit::Cm.to_points(7.62, 300.0) - 216.0).abs() < 0.1);
+    // vector formats honour the size (points) and are valid
+    set.format = Format::Pdf;
+    let pdf = app.export_bytes(w, &set, "t").unwrap();
+    assert_eq!(crate::figure::validate_pdf(&pdf), Ok(1));
+    assert!(String::from_utf8_lossy(&pdf).contains("/MediaBox [0 0 216 144]"), "page is 216 x 144 pt");
+    set.format = Format::Svg;
+    let svg = String::from_utf8(app.export_bytes(w, &set, "t").unwrap()).unwrap();
+    assert!(svg.contains("width=\"216pt\"") && svg.contains("height=\"144pt\""));
+    // content switches: gates, titles, footer, grid and style
+    let base_items = app.export_figure(w, &set).unwrap().count();
+    let mut no_titles = set.clone();
+    no_titles.titles = false;
+    no_titles.footer = false;
+    let f = app.export_figure(w, &no_titles).unwrap();
+    assert!(app.export_figure(w, &set).unwrap().texts().len() > f.texts().len(), "titles and footer are removed");
+    let mut no_grid = set.clone();
+    no_grid.style.grid = false;
+    assert!(app.export_figure(w, &no_grid).unwrap().count() < base_items, "grid lines are removed");
+    let mut hist = set.clone();
+    hist.style.hist_y = crate::density::HistY::Count;
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Histogram;
+    assert!(app.export_figure(w, &hist).unwrap().texts().contains(&"Count".to_string()));
+    // a transparent PNG has transparent corners; an opaque one does not
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Pseudocolor;
+    set.format = Format::Png;
+    set.transparent = true;
+    let dec = png::Decoder::new(std::io::Cursor::new(app.export_bytes(w, &set, "t").unwrap()));
+    let mut rd = dec.read_info().unwrap();
+    let mut buf = vec![0; rd.output_buffer_size().unwrap()];
+    rd.next_frame(&mut buf).unwrap();
+    assert_eq!(buf[3], 0, "top-left pixel is clear");
+    // too large is refused with a reason, never a crash
+    set.transparent = false;
+    set.width_pt = 2880.0;
+    set.height_pt = 2880.0;
+    set.dpi = 1200.0;
+    assert!(app.export_bytes(w, &set, "t").unwrap_err().contains("too large"));
+    // closing
+    app.pexp.open = None;
+    settle(&mut app, &ctx);
+}
+
+fn right_click(app: &mut App, ctx: &egui::Context, pos: Pos2) {
+    pointer(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+    let ev = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+    pointer(app, ctx, vec![ev(true)]);
+    pointer(app, ctx, vec![ev(false)]);
+    frame(app, ctx);
+}
+
+#[test]
+fn right_clicking_a_gate_or_the_plot_opens_its_menu_and_every_menu_action_works() {
+    use crate::stats_table::Metric;
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    let range = app.ws.graphs[&w].range.unwrap();
+    let map = Mapper { rect: plot, range };
+    let at = |fx: f32, fy: f32| Pos2::new(plot.left() + fx * plot.width(), plot.top() + fy * plot.height());
+    app.session.window_mut(w).unwrap().tool = Tool::Rectangle;
+    settle(&mut app, &ctx);
+    drag(&mut app, &ctx, at(0.25, 0.75), at(0.60, 0.30));
+    let kid = children(&app)[0];
+    app.session.window_mut(w).unwrap().tool = Tool::Pointer;
+    settle(&mut app, &ctx);
+    let _ = map;
+
+    // right-click inside the gate: its menu, with the gate selected
+    right_click(&mut app, &ctx, at(0.42, 0.52));
+    assert_eq!(app.ws.graphs[&w].menu.map(|m| m.1), Some(Some(kid)), "the gate under the pointer is the target");
+    assert_eq!(app.session.selected, Some((0, kid)));
+    assert!(app.dlg.plot_menus_shown > 0, "the gate menu was laid out");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Escape, false, false)]);
+    let shown = app.dlg.plot_menus_shown;
+    // right-click on empty plot: the plot's own menu
+    right_click(&mut app, &ctx, at(0.9, 0.1));
+    assert_eq!(app.ws.graphs[&w].menu.map(|m| m.1), Some(None));
+    assert!(app.dlg.plot_menus_shown > shown, "and so was the plot menu");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Escape, false, false)]);
+
+    // ---- the actions
+    let n0 = app.session.count(0, kid);
+    app.gate_to_polygon(0, kid);
+    assert!(matches!(gate_of(&app, kid).kind, GateKind::Polygon), "{}", app.status);
+    let corners = gate_of(&app, kid).xs.len();
+    let g = gate_of(&app, kid);
+    app.gate_add_node(0, kid, ((g.xs[0] + g.xs[1]) / 2.0, g.ys[0] - 1.0));
+    assert_eq!(gate_of(&app, kid).xs.len(), corners + 1);
+    app.gate_to_polygon(0, kid);
+    assert!(app.status.contains("already"), "{}", app.status);
+    // copy then paste under All Events (and into a gate); the pasted gate counts the same events
+    app.gate_copy(0, kid);
+    assert!(app.ws.gate_clip.is_some());
+    app.gate_paste(0, GateTree::ROOT);
+    assert!(app.status.contains("Pasted"), "{}", app.status);
+    assert_eq!(children(&app).len(), 2);
+    let pasted = *children(&app).last().unwrap();
+    assert_eq!(app.session.count(0, pasted), app.session.count(0, kid));
+    // exclusion
+    app.gate_exclusion(0, pasted);
+    assert_eq!(app.session.count(0, pasted) + app.session.count(0, kid), app.session.samples()[0].n_events);
+    app.gate_exclusion(0, pasted);
+    // colour and statistics on the label
+    app.gate_set_color(0, kid, Some([10, 200, 30]));
+    assert_eq!(app.ws.gate_colors[&(0, kid)], [10, 200, 30]);
+    let ch = app.session.samples()[0].channels[0].clone();
+    app.gate_add_stat(0, kid, Metric::Median, &ch);
+    app.gate_add_stat(0, kid, Metric::Median, &ch);
+    app.gate_add_stat(0, kid, Metric::Count, &ch);
+    let lines = app.gate_stat_lines(0, kid);
+    assert_eq!(lines.len(), 2, "a repeated statistic is added once: {lines:?}");
+    let want = crate::stats_table::node_stat(&mut app.session, 0, kid, Metric::Median, &ch).unwrap();
+    assert_eq!(lines[0], format!("Median {ch}: {want:.1}"));
+    assert_eq!(lines[1], format!("Count: {}", app.session.count(0, kid)));
+    // the number agrees with the Statistics table (one source of maths)
+    let t = crate::stats_table::compute(&mut app.session, &[0], &[Metric::Median], Some(&ch));
+    let row = t.rows.iter().find(|r| r.population == app.session.tree(0).path(kid).unwrap()).unwrap();
+    assert_eq!(row.values[0], Some(want));
+    // the gate statistic is recomputed after an edit (cache keyed on the sample's version)
+    let g = gate_of(&app, kid);
+    let mut moved = g.clone();
+    moved.xs.iter_mut().for_each(|v| *v = *v * 0.4 + (range.x0 + range.x1) * 0.05);
+    moved.ys.iter_mut().for_each(|v| *v = *v * 0.5);
+    app.session.edit_gate(0, kid, moved).unwrap();
+    let again = app.gate_stat_lines(0, kid);
+    assert_eq!(again[1], format!("Count: {}", app.session.count(0, kid)), "the label follows the gate, not a stale cache");
+    app.gate_remove_stat(0, kid, 0);
+    assert_eq!(app.gate_stat_lines(0, kid).len(), 1);
+    // FCS export of a population reads back with the same events
+    let bytes = app.population_fcs_bytes(0, kid).unwrap();
+    let f = sf_fcs::Fcs::parse(&bytes).unwrap();
+    assert_eq!(f.n_events, app.session.count(0, kid));
+    assert_eq!(f.n_params(), app.session.samples()[0].channels.len());
+    // apply to all, delete, undo
+    app.gate_apply_all(0, kid);
+    app.gate_delete(0, pasted);
+    assert!(!app.session.tree(0).is_alive(pasted));
+    assert!(app.session.undo(0));
+    assert!(app.session.tree(0).is_alive(pasted));
+    let _ = n0;
+    // every dialog draws without trouble
+    app.dlg.color = Some((0, kid, [1, 2, 3]));
+    app.dlg.stat = Some((0, kid, 3, ch.clone()));
+    app.dlg.subsample = Some((0, kid, 10));
+    app.dlg.keywords = Some(0);
+    app.dlg.history = Some((0, kid));
+    settle(&mut app, &ctx);
+    app.dlg.subsample = Some((0, GateTree::ROOT, 50));
+    settle(&mut app, &ctx);
+    assert!(app.dlg.color.is_some() && app.dlg.history.is_some());
+}
+
+#[test]
+fn layout_pages_save_as_png_at_the_chosen_resolution() {
+    let (mut app, ctx) = editor_app();
+    { let to = page_pt(&app, 0.3, 0.45); drag_sample(&mut app, &ctx, "t.fcs", to); }
+    settle(&mut app, &ctx);
+    app.editor_run_batch(Some(&ctx)).unwrap();
+    app.pexp.set.dpi = 100.0;
+    let page = app.lay.ed.batch[0].clone();
+    let p = scratch("page.png");
+    let msg = app.save_page_png(&page, &p).unwrap();
+    let (w, h) = crate::raster::pixel_size(&page, 100.0);
+    assert!(msg.contains(&format!("{w} x {h}")), "{msg}");
+    let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&p).unwrap()));
+    let info = dec.read_info().unwrap();
+    assert_eq!((info.info().width, info.info().height), (w, h));
+    app.pexp.set.dpi = 200.0;
+    app.save_page_png(&page, &p).unwrap();
+    let info = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&p).unwrap())).read_info().unwrap();
+    assert_eq!(info.info().width, w * 2);
+    // the screens that hold the buttons still draw with pages built
+    settle(&mut app, &ctx);
+}

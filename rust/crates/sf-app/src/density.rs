@@ -147,6 +147,8 @@ pub struct PlotStyle {
     // ---- arrangement
     /// Histograms of the X and Y parameters along the edges of a two-parameter plot.
     pub adjunct: bool,
+    /// Light grid lines at the major ticks.
+    pub grid: bool,
 }
 
 impl Default for PlotStyle {
@@ -168,6 +170,7 @@ impl Default for PlotStyle {
             outliers: false,
             outlier_size: 0,
             adjunct: false,
+            grid: true,
         }
     }
 }

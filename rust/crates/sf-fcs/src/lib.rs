@@ -10,6 +10,9 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+mod write;
+pub use write::to_bytes as write_fcs;
+
 #[derive(Debug)]
 pub enum FcsError {
     Io(std::io::Error),

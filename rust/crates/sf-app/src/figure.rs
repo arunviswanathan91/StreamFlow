@@ -212,7 +212,7 @@ pub fn text_width(text: &str, size: f32, bold: bool) -> f32 {
 }
 
 /// Baseline origin of a text item: where its first glyph starts, in figure coordinates.
-fn origin(t: &Text) -> (f32, f32) {
+pub(crate) fn origin(t: &Text) -> (f32, f32) {
     let w = text_width(&t.text, t.size, t.bold);
     if t.vertical {
         let start = match t.align {

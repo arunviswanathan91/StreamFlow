@@ -7,6 +7,8 @@ mod compare_view;
 mod cross_view;
 mod discover_view;
 mod layout_editor;
+mod gate_menu;
+mod plot_export;
 mod plot_style_ui;
 mod layout_view;
 mod export_view;
@@ -118,6 +120,8 @@ pub struct App {
     pub(crate) stats: stats_view::State,
     pub(crate) comp: comp_view::State,
     pub(crate) export: export_view::State,
+    pub(crate) pexp: plot_export::State,
+    pub(crate) dlg: gate_menu::Dialogs,
     pub disc: discover_view::State,
     pub ana: analysis_view::State,
     pub cmp: compare_view::State,
@@ -155,6 +159,8 @@ impl App {
             stats: stats_view::State::default(),
             comp: comp_view::State::default(),
             export: export_view::State::default(),
+            pexp: plot_export::State::default(),
+            dlg: gate_menu::Dialogs::default(),
             disc: discover_view::State::default(),
             ana: analysis_view::State::default(),
             cmp: compare_view::State::default(),
@@ -302,6 +308,8 @@ impl App {
             Module::AnalysisLog => self.analysis_log(ui),
             other => modules::placeholder(ui, other),
         });
+        self.plot_export_window(ctx);
+        self.context_dialogs(ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -512,6 +520,11 @@ struct Capture {
     dest: CaptureDest,
     frames: u32,
     requested: bool,
+}
+
+/// Put straight RGBA pixels on the clipboard as an image.
+pub(crate) fn copy_rgba_to_clipboard(width: usize, height: usize, rgba: &[u8]) -> Result<(), String> {
+    arboard::Clipboard::new().and_then(|mut c| c.set_image(arboard::ImageData { width, height, bytes: std::borrow::Cow::Borrowed(rgba) })).map_err(|e| e.to_string())
 }
 
 fn copy_to_clipboard(img: &egui::ColorImage) -> Result<(), String> {

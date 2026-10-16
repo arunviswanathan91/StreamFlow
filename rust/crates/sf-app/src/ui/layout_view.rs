@@ -17,6 +17,15 @@ pub enum LayTab {
     Editor,
 }
 
+/// What the single-plot export shows.
+#[derive(Debug, Clone, Copy)]
+pub struct FigOpts {
+    pub gates: bool,
+    pub fmo: bool,
+    pub titles: bool,
+    pub footer: bool,
+}
+
 pub struct State {
     pub tab: LayTab,
     pub ed: super::layout_editor::State,
@@ -239,17 +248,24 @@ impl App {
 
     /// The window's plot as a figure: its population, axes, scales, current view, gates and FMO lines.
     pub fn window_figure(&mut self, id: u64, width: f32, height: f32) -> Result<Figure, String> {
+        let style = self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default();
+        let fmo = self.ws.graphs.get(&id).map_or(true, |g| g.style.fmo);
+        self.window_figure_with(id, width, height, &FigOpts { gates: true, fmo, titles: true, footer: true }, style)
+    }
+
+    /// The same, with the export editor's choices: what to show and which plot style to use.
+    pub fn window_figure_with(&mut self, id: u64, width: f32, height: f32, opts: &FigOpts, style: PlotStyle) -> Result<Figure, String> {
         let w = self.session.window(id).ok_or("no such window")?.clone();
         let range = self.ws.graphs.get(&id).and_then(|g| g.range).filter(|r| r.is_valid()).ok_or("this plot has no view to export yet")?;
-        let (show_gates, show_fmo) = self.ws.graphs.get(&id).map_or((true, true), |g| (true, g.style.fmo));
-        let req = BatchRequest { population: self.session.tree(w.sample).path(w.node).unwrap_or_default(), x_chan: w.x_chan.clone(), y_chan: w.y_chan.clone(), x_scale: w.x_scale.clone(), y_scale: w.y_scale.clone(), kind: w.kind, style: self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default(), samples: vec![w.sample], view: View::Fixed(range), show_gates, show_fmo };
+        let (show_gates, show_fmo) = (opts.gates, opts.fmo);
+        let req = BatchRequest { population: self.session.tree(w.sample).path(w.node).unwrap_or_default(), x_chan: w.x_chan.clone(), y_chan: w.y_chan.clone(), x_scale: w.x_scale.clone(), y_scale: w.y_scale.clone(), kind: w.kind, style: style.clone(), samples: vec![w.sample], view: View::Fixed(range), show_gates, show_fmo };
         let (common, cells) = collect(&mut self.session, &req)?;
         let cell = &cells[0];
         let pts = cell.points.as_ref().ok_or_else(|| cell.note.clone().unwrap_or_else(|| "no data".into()))?;
         Ok(plot_figure(&PlotSpec {
             width,
             height,
-            captions: vec![cell.sample.trim_end_matches(".fcs").to_string(), pop_label(&req.population)],
+            captions: if opts.titles { vec![cell.sample.trim_end_matches(".fcs").to_string(), pop_label(&req.population)] } else { vec![] },
             points: pts,
             layers: vec![],
             legend: false,
@@ -262,7 +278,7 @@ impl App {
             y_scale: common.y_scale.clone(),
             gates: cell.gates.clone(),
             fmo: common.fmo.clone(),
-            footer: Some(format!("{} events · {:.1}% of parent", cell.events, cell.parent_pct)),
+            footer: if opts.footer { Some(format!("{} events · {:.1}% of parent", cell.events, cell.parent_pct)) } else { None },
         }))
     }
 
@@ -368,6 +384,9 @@ impl App {
                 }
             }
         });
+        let (pages, cur) = (std::mem::take(&mut self.lay.pages), self.lay.page);
+        self.page_image_row(ui, &pages, cur, "layout");
+        self.lay.pages = pages;
         if !self.lay.notes.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(format!("{} plot(s) could not be drawn:", self.lay.notes.len())).color(theme::WARN).size(12.0));

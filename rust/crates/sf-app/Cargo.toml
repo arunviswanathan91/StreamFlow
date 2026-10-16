@@ -20,5 +20,6 @@ sf-gating = { path = "../sf-gating" }
 eframe = "0.29"
 rfd = "0.15"
 png = "0.18"
+ab_glyph = "0.2"
 miniz_oxide = "0.8"
 arboard = { version = "3", default-features = false, features = ["image-data"] }

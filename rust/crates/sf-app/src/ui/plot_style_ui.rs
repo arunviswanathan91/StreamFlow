@@ -64,6 +64,7 @@ pub(super) fn plot_style_controls(ui: &mut egui::Ui, kind: PlotKind, s: &mut Plo
         }
         PlotKind::Pseudocolor | PlotKind::Dot => {}
     }
+    ui.checkbox(&mut s.grid, "Show grid");
     if kind != PlotKind::Histogram {
         ui.checkbox(&mut s.adjunct, "Adjunct histograms").on_hover_text("Histograms of the X and Y parameters along the edges of the plot (shown in exports and layouts)");
     }

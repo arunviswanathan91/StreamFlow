@@ -301,6 +301,7 @@ pub fn style_to_json(s: &PlotStyle) -> Json {
         .with("outliers", Json::Bool(s.outliers))
         .with("outlier_size", Json::num(s.outlier_size as f64))
         .with("adjunct", Json::Bool(s.adjunct))
+        .with("grid", Json::Bool(s.grid))
 }
 
 /// Read the options back; anything missing keeps its default, an unknown name is an error.
@@ -333,6 +334,7 @@ pub fn style_from_json(j: &Json) -> Result<PlotStyle, String> {
         outliers: flag("outliers", d.outliers),
         outlier_size: num("outlier_size", d.outlier_size as f64).max(0.0) as usize,
         adjunct: flag("adjunct", d.adjunct),
+        grid: flag("grid", d.grid),
     }
     .clamped())
 }
