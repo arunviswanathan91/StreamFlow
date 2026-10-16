@@ -1942,3 +1942,62 @@ fn crowded_axis_labels_are_thinned_so_none_overlap() {
     });
     assert!(kept_total >= 2 && kept_total < 12, "kept {kept_total}");
 }
+
+#[test]
+fn the_compensation_wizard_calculates_from_real_controls_and_its_windows_draw() {
+    let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test-assests/fcs/multi stain"));
+    if !dir.join("fitc alone.fcs").exists() {
+        eprintln!("SKIPPED: fixtures missing");
+        return;
+    }
+    let ctx = egui::Context::default();
+    let mut app = App::new();
+    let files: Vec<std::path::PathBuf> = ["fitc alone", "pe alone", "apc alone", "AF700 alone", "bv421 alone", "bv711 alone", "unstained"].iter().map(|n| dir.join(format!("{n}.fcs"))).collect();
+    app.load_files(&files);
+    app.set_module(Module::Compensation);
+    settle(&mut app, &ctx);
+    app.open_comp_wizard();
+    settle(&mut app, &ctx);
+    assert_eq!(app.comp.wiz.rows.iter().filter(|r| r.detector.is_some()).count(), 6, "six controls recognised from the file names");
+    assert_eq!(app.comp.wiz.unstained, Some(6));
+    // the classic median method needs a clear positive population: this APC control has only a thin bright tail, and
+    // the wizard says so instead of guessing
+    app.comp.wiz.opt.method = crate::comp_wizard::Method::Medians;
+    app.wizard_calculate();
+    let e = app.comp.wiz.result.clone().unwrap().unwrap_err();
+    assert!(e.contains("apc alone") && e.contains("positive"), "{e}");
+    let mut got = Vec::new();
+    for method in [crate::comp_wizard::Method::Slope, crate::comp_wizard::Method::Refined] {
+        app.comp.wiz.opt.method = method;
+        app.wizard_calculate();
+        let r = app.comp.wiz.result.clone().unwrap().unwrap_or_else(|e| panic!("{method:?}: {e}"));
+        assert_eq!(r.matrix.detectors.len(), 6);
+        assert!(r.condition.is_finite() && r.condition < 30.0, "{method:?}: condition {}", r.condition);
+        assert!(r.reports.iter().all(|c| !c.badges.iter().any(|b| b.blocks())), "{method:?}: {:?}", r.reports.iter().map(|c| &c.badges).collect::<Vec<_>>());
+        got.push(r.matrix.spill.clone());
+    }
+    // the methods are different estimators but must agree on a clean data set
+    let worst = |a: &Vec<f64>, b: &Vec<f64>| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+    eprintln!("slope vs refined: {:.4}", worst(&got[0], &got[1]));
+    assert!(worst(&got[0], &got[1]) < 0.25);
+    app.comp.wiz.opt.method = crate::comp_wizard::Method::Refined;
+    // the windows draw: results tabs, an opened control with a hand-set limit, and the matrix goes to the editor
+    for tab in [comp_wizard_view::Tab::Summary, comp_wizard_view::Tab::Spread, comp_wizard_view::Tab::Cosine] {
+        app.comp.wiz.show = tab;
+        settle(&mut app, &ctx);
+    }
+    app.comp.wiz.inspect = Some(1);
+    settle(&mut app, &ctx);
+    app.comp.wiz.rows[1].manual = Some((300.0, 3000.0));
+    app.wizard_calculate();
+    settle(&mut app, &ctx);
+    let r = app.comp.wiz.result.clone().unwrap().unwrap();
+    let c = r.reports.iter().find(|c| c.sample == 1).unwrap();
+    assert_eq!((c.neg_max, c.pos_min), (300.0, 3000.0));
+    app.comp.use_matrix(r.matrix.clone(), r.notes.clone());
+    assert_eq!(app.comp.matrix_for_test().unwrap().detectors, r.matrix.detectors);
+    // no controls assigned: a clear message, not a crash
+    app.comp.wiz.rows.iter_mut().for_each(|r| r.detector = None);
+    app.wizard_calculate();
+    assert!(app.comp.wiz.result.as_ref().unwrap().is_err());
+}

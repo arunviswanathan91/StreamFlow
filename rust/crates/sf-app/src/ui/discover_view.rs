@@ -58,6 +58,7 @@ pub struct State {
     pub perplexity: f64,
     pub seed: u64,
     pub restrict: Vec<String>,
+    pub clean: crate::qc_clean::CleanSpec,
     pub cluster_method: ClusterMethod,
     pub k: usize,
     pub name_method: NameMethod,
@@ -95,6 +96,7 @@ impl Default for State {
             perplexity: 30.0,
             seed: 42,
             restrict: vec![],
+            clean: Default::default(),
             cluster_method: ClusterMethod::FlowSom,
             k: 8,
             name_method: NameMethod::ZScore,
@@ -212,6 +214,7 @@ impl App {
             transform: if self.disc.cofactor > 0.0 { FeatureTransform::Arcsinh(self.disc.cofactor) } else { FeatureTransform::None },
             method: if self.disc.umap { Method::Umap { n_neighbors: self.disc.n_neighbors, min_dist: self.disc.min_dist } } else { Method::Tsne { perplexity: self.disc.perplexity } },
             seed: self.disc.seed,
+            clean: self.disc.clean.clone(),
         })
     }
 
@@ -330,6 +333,37 @@ impl App {
                     }
                 }
             });
+        }
+        theme::section(ui, "Clean-up (technical noise)");
+        {
+            let c = &mut self.disc.clean;
+            ui.checkbox(&mut c.margins, "Margin / saturated events").on_hover_text("Events pinned at the top of a channel's range, or at zero on scatter");
+            ui.checkbox(&mut c.debris, "Debris (keep the main FSC/SSC population)");
+            ui.checkbox(&mut c.doublets, "Doublets (FSC-A vs FSC-H)").on_hover_text("Drops events whose area is too large for their height");
+            ui.checkbox(&mut c.flow_rate, "Flow-rate anomalies (Time)").on_hover_text("Removes time slices whose event rate is far from the median: clogs, bubbles, restarts");
+            let mut dead_on = c.dead.is_some();
+            let chans: Vec<String> = self.disc.features.iter().map(|(n, _)| n.clone()).collect();
+            let guess = chans.iter().find(|n| { let u = n.to_ascii_uppercase(); u.contains("LIVE") || u.contains("DEAD") || u.contains("VIAB") || u.contains("ZOMBIE") || u.contains("7AAD") || u.contains("DAPI") || u.contains("PI-") }).cloned().or_else(|| chans.first().cloned());
+            if ui.checkbox(&mut dead_on, "Dead cells (viability dye)").changed() {
+                c.dead = if dead_on { guess.map(|ch| crate::qc_clean::DeadSpec { channel: ch, threshold: None }) } else { None };
+            }
+            if let Some(d) = c.dead.as_mut() {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("disc_dead_chan").width(150.0).selected_text(d.channel.clone()).show_ui(ui, |ui| {
+                        for ch in &chans {
+                            ui.selectable_value(&mut d.channel, ch.clone(), ch);
+                        }
+                    });
+                    let mut manual = d.threshold.is_some();
+                    if ui.checkbox(&mut manual, "limit").changed() {
+                        d.threshold = if manual { Some(1000.0) } else { None };
+                    }
+                    if let Some(t) = d.threshold.as_mut() {
+                        ui.add(egui::DragValue::new(t).speed(10.0));
+                    }
+                });
+                theme::caption(ui, "Events at or above the limit are dead; automatic finds the edge of the live population.");
+            }
         }
         theme::section(ui, "Markers");
         egui::ScrollArea::vertical().id_salt("disc_feats").max_height(150.0).show(ui, |ui| {

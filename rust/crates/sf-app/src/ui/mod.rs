@@ -4,6 +4,7 @@
 mod comp_view;
 mod analysis_view;
 mod activity;
+mod comp_wizard_view;
 mod compare_view;
 mod cross_view;
 mod discover_view;
@@ -321,6 +322,7 @@ impl App {
         self.plot_export_window(ctx);
         self.context_dialogs(ctx);
         self.group_export_window(ctx);
+        self.comp_wizard_window(ctx);
         self.activity(ctx);
     }
 
