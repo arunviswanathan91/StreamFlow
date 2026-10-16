@@ -80,6 +80,14 @@ impl App {
         w.open = true;
     }
 
+    /// Open the wizard on the Compensation screen, calculate, and optionally open one control (screenshots, checks).
+    pub fn demo_comp_wizard(&mut self, inspect: Option<usize>) {
+        self.set_module(super::Module::Compensation);
+        self.open_comp_wizard();
+        self.wizard_calculate();
+        self.comp.wiz.inspect = inspect;
+    }
+
     fn wiz_setups(&self) -> Vec<ControlSetup> {
         self.comp.wiz.rows.iter().enumerate().filter_map(|(i, r)| r.detector.clone().map(|d| ControlSetup { sample: i, detector: d, manual: r.manual })).collect()
     }
@@ -122,14 +130,15 @@ impl App {
         let mut wiz = std::mem::take(&mut self.comp.wiz);
         let mut open = true;
         let (mut calc, mut use_it, mut inspect_click) = (false, false, None::<usize>);
-        egui::Window::new("Compensation wizard").open(&mut open).collapsible(false).resizable(true).default_size([960.0, 640.0]).default_pos([140.0, 70.0]).show(ctx, |ui| {
+        let max_h = (ctx.screen_rect().height() - 90.0).max(300.0);
+        egui::Window::new("Compensation wizard").open(&mut open).collapsible(false).resizable(true).default_size([960.0, max_h.min(640.0)]).max_height(max_h).default_pos([140.0, 50.0]).show(ctx, |ui| egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             theme::caption(ui, "Assign each single-stain control to the detector it stains, optionally an unstained tube, choose how the matrix is calculated, and check the result before using it.");
             ui.horizontal_top(|ui| {
                 // ---- left: controls table
                 ui.vertical(|ui| {
                     ui.set_width(470.0);
                     ui.label(RichText::new("Controls").strong());
-                    egui::ScrollArea::vertical().id_salt("wiz_rows").max_height(300.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("wiz_rows").max_height(230.0).show(ui, |ui| {
                         egui::Grid::new("wiz_grid").spacing([8.0, 4.0]).striped(true).show(ui, |ui| {
                             for h in ["Sample", "Parameter", "Negative | Positive", ""] {
                                 ui.label(RichText::new(h).size(11.0).color(theme::MUTED));
@@ -284,7 +293,7 @@ impl App {
                     }
                 }
             }
-        });
+        }));
         if let Some(i) = inspect_click {
             wiz.inspect = Some(i);
         }

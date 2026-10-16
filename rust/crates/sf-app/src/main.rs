@@ -314,6 +314,10 @@ fn main() -> eframe::Result<()> {
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }
+    // `--comp-wizard` / `--comp-wizard=N`: the compensation wizard, calculated, with control N opened (screenshots)
+    if let Some(v) = args.iter().find_map(|a| a.strip_prefix("--comp-wizard")) {
+        app.demo_comp_wizard(v.strip_prefix('=').and_then(|n| n.parse().ok()));
+    }
     if flag("nav").as_deref() == Some("collapsed") {
         app.set_nav_expanded(false);
     }
