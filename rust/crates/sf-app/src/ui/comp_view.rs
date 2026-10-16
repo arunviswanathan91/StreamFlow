@@ -9,18 +9,23 @@ use sf_core::compensation::Mode;
 
 #[derive(Default)]
 pub struct State {
-    sample: usize,
+    pub(super) wiz: super::comp_wizard_view::WizState,
+    pub(super) sample: usize,
     /// Per sample: the detector it is a single-stain control for.
     controls: Vec<Option<String>>,
     slope: bool,
-    notes: Vec<String>,
+    pub(super) notes: Vec<String>,
     /// The matrix being edited (not applied until the user says so).
-    matrix: Option<CompInfo>,
-    for_sample: Option<usize>,
+    pub(super) matrix: Option<CompInfo>,
+    pub(super) for_sample: Option<usize>,
     non_negative: bool,
 }
 
 /// Fluorescence detectors of a sample: area channels that are not scatter, time or already compensated.
+pub(super) fn fluor_detectors(channels: &[String]) -> Vec<String> {
+    detectors_of(channels)
+}
+
 fn detectors_of(channels: &[String]) -> Vec<String> {
     channels
         .iter()
@@ -148,7 +153,10 @@ impl App {
                         };
                     }
                 }
-                egui::CollapsingHeader::new("Compute from single-stain controls").default_open(false).show(ui, |ui| {
+                if ui.add(egui::Button::new(RichText::new("Compensation wizard…").strong()).fill(theme::ACCENT_DIM).min_size(egui::vec2(240.0, 30.0))).on_hover_text("Assign single-stain and unstained controls, mark negative and positive events, calculate with a chosen method and check the quality").clicked() {
+                    self.open_comp_wizard();
+                }
+                egui::CollapsingHeader::new("Quick compute from controls").default_open(false).show(ui, |ui| {
                     let dets = detectors_of(self.session.sample(0).base_channels());
                     if self.comp.controls.len() != n {
                         self.comp.controls = (0..n).map(|i| detector_from_name(&self.session.samples()[i].name, &dets)).collect();
@@ -256,6 +264,12 @@ impl App {
 }
 
 impl State {
+    /// Put a calculated matrix in the editor (not applied until the user presses Apply).
+    pub(super) fn use_matrix(&mut self, m: CompInfo, notes: Vec<String>) {
+        self.matrix = Some(m);
+        self.notes = notes;
+    }
+
     /// The matrix currently being edited (tests).
     #[cfg(test)]
     pub fn matrix_for_test(&self) -> Option<CompInfo> {

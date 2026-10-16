@@ -3,6 +3,8 @@
 
 pub mod axis;
 pub mod comp_auto;
+pub mod comp_wizard;
+pub mod qc_clean;
 pub mod cross_sample;
 pub mod density;
 pub mod drawing;

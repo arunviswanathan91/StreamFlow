@@ -57,6 +57,8 @@ pub struct EmbedRequest {
     pub transform: FeatureTransform,
     pub method: Method,
     pub seed: u64,
+    /// Technical noise removed from every sample before events are drawn.
+    pub clean: crate::qc_clean::CleanSpec,
 }
 
 /// The pooled events, ready to embed.
@@ -123,7 +125,14 @@ pub fn build_input(session: &mut Session, req: &EmbedRequest) -> Result<EmbedInp
             .iter()
             .map(|f| session.sample(si).channel_index(f).ok_or_else(|| format!("{name}: channel '{f}' is not in this sample")))
             .collect::<Result<_, _>>()?;
-        let eligible: Vec<usize> = session.evaluation(si)?.masks.get(node).and_then(|m| m.as_ref()).ok_or("population has no events")?.indices();
+        let mut eligible: Vec<usize> = session.evaluation(si)?.masks.get(node).and_then(|m| m.as_ref()).ok_or("population has no events")?.indices();
+        if req.clean.any() {
+            let (keep, steps) = crate::qc_clean::keep_mask(session.sample(si), &req.clean);
+            eligible.retain(|&r| keep[r]);
+            if let Some(m) = crate::qc_clean::summary(&steps) {
+                notes.push(format!("{name}: {m}"));
+            }
+        }
         if eligible.is_empty() {
             notes.push(format!("{name}: the population is empty, skipped"));
             continue;
@@ -464,7 +473,31 @@ mod tests {
     }
 
     fn req(samples: Vec<usize>, per: usize) -> EmbedRequest {
-        EmbedRequest { samples, restrict: vec![], per_sample: per, features: ["CD3", "CD4", "CD8", "FoxP3"].iter().map(|s| s.to_string()).collect(), transform: FeatureTransform::Arcsinh(150.0), method: Method::Umap { n_neighbors: 15, min_dist: 0.1 }, seed: 7 }
+        EmbedRequest { samples, restrict: vec![], per_sample: per, features: ["CD3", "CD4", "CD8", "FoxP3"].iter().map(|s| s.to_string()).collect(), transform: FeatureTransform::Arcsinh(150.0), method: Method::Umap { n_neighbors: 15, min_dist: 0.1 }, seed: 7, clean: Default::default() }
+    }
+
+    #[test]
+    fn technical_noise_is_removed_before_events_are_drawn_and_the_removal_is_reported() {
+        // 2000 events: every fifth is a doublet (area twice the height-implied area) and every tenth is dead
+        let mut s = Session::new();
+        let mut rng = Rng::new(3);
+        let mut ev = Vec::new();
+        for i in 0..2000 {
+            let a = 100_000.0 + 8_000.0 * normal(&mut rng);
+            let (fa, fh) = if i % 5 == 0 { (a * 1.9, a * 0.8) } else { (a, a * 0.8) };
+            let via = if i % 10 == 3 { 9000.0 } else { 80.0 + 30.0 * normal(&mut rng) };
+            ev.extend_from_slice(&[fa as f32, fh as f32, via as f32, (500.0 + 100.0 * normal(&mut rng)) as f32, (500.0 + 100.0 * normal(&mut rng)) as f32]);
+        }
+        s.add_sample(LoadedSample::synthetic("n.fcs", &["FSC-A", "FSC-H", "Viability-A", "CD3", "CD4"], vec![262_144.0; 5], ev));
+        let mut r = req(vec![0], 2000);
+        r.features = vec!["CD3".into(), "CD4".into()];
+        let plain = build_input(&mut s, &r).unwrap();
+        assert_eq!(plain.n(), 2000);
+        r.clean = crate::qc_clean::CleanSpec { doublets: true, dead: Some(crate::qc_clean::DeadSpec { channel: "Viability-A".into(), threshold: None }), ..Default::default() };
+        let cleaned = build_input(&mut s, &r).unwrap();
+        assert!(cleaned.n() < 1500 && cleaned.n() > 1100, "kept {}", cleaned.n());
+        assert!(cleaned.rows.iter().all(|&(_, row)| row % 5 != 0 && row % 10 != 3), "no flagged event is pooled");
+        assert!(cleaned.notes.iter().any(|n| n.contains("doublets") && n.contains("dead cells")), "{:?}", cleaned.notes);
     }
 
     #[test]
