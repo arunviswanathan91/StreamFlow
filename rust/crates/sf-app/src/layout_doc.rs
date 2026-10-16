@@ -7,7 +7,7 @@
 //! * **Text boxes** may hold tokens (`[File_Name]`, `[Keyword]`, `[Page]`, ...) replaced for every page.
 //! * The whole document is saved in the workspace file.
 
-use crate::density::{PlotKind, Range};
+use crate::density::{HistStyle, HistY, PlotKind, PlotStyle, Range};
 use crate::layout::PageSetup;
 use sf_core::json::Json;
 use sf_core::scale::ScaleSpec;
@@ -52,6 +52,8 @@ pub struct Tile {
     pub x_chan: String,
     pub y_chan: String,
     pub kind: PlotKind,
+    /// Histogram, contour and density options.
+    pub style: PlotStyle,
     /// `None`: the default scale for the channel.
     pub x_scale: Option<ScaleSpec>,
     pub y_scale: Option<ScaleSpec>,
@@ -66,7 +68,7 @@ pub struct Tile {
 
 impl Tile {
     pub fn new(id: u32, x: f32, y: f32, w: f32, h: f32) -> Tile {
-        Tile { id, x, y, w, h, population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, x_scale: None, y_scale: None, view: ViewMode::Lock, layers: vec![], show_gates: true, show_fmo: true, legend: true, title: "[File_Name]".into() }
+        Tile { id, x, y, w, h, population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, style: PlotStyle::default(), x_scale: None, y_scale: None, view: ViewMode::Lock, layers: vec![], show_gates: true, show_fmo: true, legend: true, title: "[File_Name]".into() }
     }
 
     pub fn contains(&self, p: (f32, f32)) -> bool {
@@ -263,11 +265,76 @@ impl LayoutDoc {
 }
 
 fn kind_name(k: PlotKind) -> &'static str {
-    match k {
-        PlotKind::Pseudocolor => "pseudocolor",
-        PlotKind::Dot => "dot",
-        PlotKind::Histogram => "histogram",
+    k.key()
+}
+
+fn rgb_json(c: [u8; 3]) -> Json {
+    Json::Arr(c.iter().map(|v| Json::num(*v as f64)).collect())
+}
+
+fn rgb_from(j: Option<&Json>, default: [u8; 3]) -> [u8; 3] {
+    match j.and_then(Json::as_arr) {
+        Some(a) if a.len() == 3 => {
+            let v: Vec<f64> = a.iter().filter_map(Json::as_f64).collect();
+            if v.len() == 3 { [v[0] as u8, v[1] as u8, v[2] as u8] } else { default }
+        }
+        _ => default,
     }
+}
+
+/// Every plot option, so a saved layout draws the same histogram and contour next time.
+pub fn style_to_json(s: &PlotStyle) -> Json {
+    Json::obj()
+        .with("hist_y", Json::Str(s.hist_y.key().into()))
+        .with("hist_style", Json::Str(s.hist_style.key().into()))
+        .with("hist_smooth", Json::Bool(s.hist_smooth))
+        .with("hist_bandwidth", Json::num(s.hist_bandwidth))
+        .with("hist_fill", rgb_json(s.hist_fill))
+        .with("hist_fill_alpha", Json::num(s.hist_fill_alpha as f64))
+        .with("hist_line", rgb_json(s.hist_line))
+        .with("smooth", Json::Bool(s.smooth))
+        .with("smooth_strength", Json::num(s.smooth_strength as f64))
+        .with("contour_levels", Json::num(s.contour_levels as f64))
+        .with("contour_smooth", Json::Bool(s.contour_smooth))
+        .with("contour_strength", Json::num(s.contour_strength as f64))
+        .with("contour_color", rgb_json(s.contour_color))
+        .with("outliers", Json::Bool(s.outliers))
+        .with("outlier_size", Json::num(s.outlier_size as f64))
+        .with("adjunct", Json::Bool(s.adjunct))
+}
+
+/// Read the options back; anything missing keeps its default, an unknown name is an error.
+pub fn style_from_json(j: &Json) -> Result<PlotStyle, String> {
+    let d = PlotStyle::default();
+    let num = |k: &str, default: f64| j.get(k).and_then(Json::as_f64).unwrap_or(default);
+    let flag = |k: &str, default: bool| j.get(k).and_then(Json::as_bool).unwrap_or(default);
+    let hist_y = match j.get("hist_y").and_then(Json::as_str) {
+        Some(k) => HistY::from_key(k).ok_or_else(|| format!("layout: unknown histogram Y axis '{k}'"))?,
+        None => d.hist_y,
+    };
+    let hist_style = match j.get("hist_style").and_then(Json::as_str) {
+        Some(k) => HistStyle::from_key(k).ok_or_else(|| format!("layout: unknown histogram style '{k}'"))?,
+        None => d.hist_style,
+    };
+    Ok(PlotStyle {
+        hist_y,
+        hist_style,
+        hist_smooth: flag("hist_smooth", d.hist_smooth),
+        hist_bandwidth: num("hist_bandwidth", d.hist_bandwidth),
+        hist_fill: rgb_from(j.get("hist_fill"), d.hist_fill),
+        hist_fill_alpha: num("hist_fill_alpha", d.hist_fill_alpha as f64).clamp(0.0, 255.0) as u8,
+        hist_line: rgb_from(j.get("hist_line"), d.hist_line),
+        smooth: flag("smooth", d.smooth),
+        smooth_strength: num("smooth_strength", d.smooth_strength as f64).max(0.0) as usize,
+        contour_levels: num("contour_levels", d.contour_levels as f64).max(0.0) as usize,
+        contour_smooth: flag("contour_smooth", d.contour_smooth),
+        contour_strength: num("contour_strength", d.contour_strength as f64).max(0.0) as usize,
+        contour_color: rgb_from(j.get("contour_color"), d.contour_color),
+        outliers: flag("outliers", d.outliers),
+        outlier_size: num("outlier_size", d.outlier_size as f64).max(0.0) as usize,
+        adjunct: flag("adjunct", d.adjunct),
+    }
+    .clamped())
 }
 
 fn tile_json(t: &Tile) -> Json {
@@ -286,6 +353,7 @@ fn tile_json(t: &Tile) -> Json {
         .with("x_chan", Json::Str(t.x_chan.clone()))
         .with("y_chan", Json::Str(t.y_chan.clone()))
         .with("kind", Json::Str(kind_name(t.kind).into()))
+        .with("style", style_to_json(&t.style))
         .with("view", view)
         .with("layers", Json::Arr(layers))
         .with("show_gates", Json::Bool(t.show_gates))
@@ -307,12 +375,11 @@ fn tile_from_json(j: &Json) -> Result<Tile, String> {
     t.population = j.get("population").and_then(Json::as_arr).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default();
     t.x_chan = j.get("x_chan").and_then(Json::as_str).unwrap_or("").to_string();
     t.y_chan = j.get("y_chan").and_then(Json::as_str).unwrap_or("").to_string();
-    t.kind = match j.get("kind").and_then(Json::as_str).unwrap_or("pseudocolor") {
-        "pseudocolor" => PlotKind::Pseudocolor,
-        "dot" => PlotKind::Dot,
-        "histogram" => PlotKind::Histogram,
-        other => return Err(format!("layout: unknown plot type '{other}'")),
-    };
+    let kind = j.get("kind").and_then(Json::as_str).unwrap_or("pseudocolor");
+    t.kind = PlotKind::from_key(kind).ok_or_else(|| format!("layout: unknown plot type '{kind}'"))?;
+    if let Some(sj) = j.get("style") {
+        t.style = style_from_json(sj)?;
+    }
     let scale = |k: &str| -> Result<Option<ScaleSpec>, String> {
         match j.get(k).and_then(Json::as_str) {
             Some(s) => ScaleSpec::parse(s).map(|(sp, _)| Some(sp)),
@@ -356,6 +423,8 @@ mod tests {
         t.y_chan = "CD8-A".into();
         t.x_scale = Some(ScaleSpec::Arcsinh { cofactor: 150.0 });
         t.view = ViewMode::Fixed(Range { x0: -1.0, x1: 8.0, y0: -1.0, y1: 8.0 });
+        t.kind = PlotKind::Contour;
+        t.style = PlotStyle { contour_levels: 14, contour_strength: 5, outliers: true, outlier_size: 2, hist_y: HistY::Count, hist_style: HistStyle::Bars, hist_bandwidth: 0.25, adjunct: true, contour_color: [200, 30, 30], ..PlotStyle::default() };
         t.add_layer("a.fcs", LayerRole::Iterator);
         t.add_layer("ctrl.fcs", LayerRole::Control);
         d.add_text((20.0, 20.0), "[File_Name] — [Page]");
@@ -375,6 +444,23 @@ mod tests {
         let mut back = back;
         let id = back.add_tile((300.0, 300.0), 100.0, 100.0);
         assert!(back.tiles.iter().filter(|t| t.id == id).count() == 1 && id > 2);
+    }
+
+    #[test]
+    fn every_plot_kind_and_option_survives_json_and_bad_names_are_refused() {
+        for k in PlotKind::ALL {
+            assert_eq!(PlotKind::from_key(k.key()), Some(k));
+            let mut t = Tile::new(1, 0.0, 0.0, 100.0, 100.0);
+            t.kind = k;
+            let back = tile_from_json(&tile_json(&t)).unwrap();
+            assert_eq!(back.kind, k);
+        }
+        let s = PlotStyle { contour_levels: 99, outlier_size: 40, hist_bandwidth: 7.0, smooth_strength: 0, ..PlotStyle::default() };
+        let back = style_from_json(&style_to_json(&s)).unwrap();
+        assert_eq!((back.contour_levels, back.outlier_size, back.hist_bandwidth, back.smooth_strength), (30, 6, 1.0, 1), "out-of-range values are brought into range on load");
+        let bad = Json::parse(r#"{"hist_y":"logarithmic"}"#).unwrap();
+        assert!(style_from_json(&bad).unwrap_err().contains("histogram Y axis"));
+        assert_eq!(style_from_json(&Json::obj()).unwrap(), PlotStyle::default(), "a file without style options gets the defaults");
     }
 
     #[test]

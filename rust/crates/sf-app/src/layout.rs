@@ -5,7 +5,7 @@
 //! `[File_Name]` (sample without `.fcs`), `[Population]`, `[Events]`, `[Percent_Parent]`, `[Page]`, `[Pages]`,
 //! `[Count]` (plots in the batch). An unknown token is left as typed so a typo is visible.
 
-use crate::density::{PlotKind, Range};
+use crate::density::{PlotKind, PlotStyle, Range};
 use crate::figure::{Align, Figure, Item, Text, VAlign};
 use crate::plot_figure::{plot_figure, FmoLine, PlotGate, PlotSpec};
 use crate::session::Session;
@@ -58,6 +58,7 @@ impl Default for LayoutSpec {
 pub struct PlotCommon {
     pub range: Range,
     pub kind: PlotKind,
+    pub style: PlotStyle,
     pub x_chan: String,
     pub y_chan: String,
     pub x_scale: ScaleSpec,
@@ -134,9 +135,9 @@ pub fn build_pages(spec: &LayoutSpec, common: &PlotCommon, cells: &[CellData]) -
             let captions: Vec<String> = expand_tokens(&spec.caption, &cell_vars(cell, cells.len())).lines().map(|l| l.to_string()).collect();
             let empty: Vec<(f64, f64)> = Vec::new();
             let fig = match &cell.points {
-                Some(pts) => plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: pts, layers: vec![], legend: false, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: cell.gates.clone(), fmo: common.fmo.clone(), footer: None }),
+                Some(pts) => plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: pts, layers: vec![], legend: false, style: common.style.clone(), range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: cell.gates.clone(), fmo: common.fmo.clone(), footer: None }),
                 None => {
-                    let mut f = plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: &empty, layers: vec![], legend: false, range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: vec![], fmo: vec![], footer: None });
+                    let mut f = plot_figure(&PlotSpec { width: cw - gap, height: ch - gap, captions, points: &empty, layers: vec![], legend: false, style: common.style.clone(), range: common.range, kind: common.kind, x_chan: common.x_chan.clone(), y_chan: common.y_chan.clone(), x_scale: common.x_scale.clone(), y_scale: common.y_scale.clone(), gates: vec![], fmo: vec![], footer: None });
                     f.push(Item::Text(Text::new((cw - gap) / 2.0 + 20.0, (ch - gap) / 2.0, cell.note.clone().unwrap_or_else(|| "no data".into()), 8.0).align(Align::Center, VAlign::Middle).color([180, 60, 60, 255])));
                     f
                 }
@@ -165,6 +166,7 @@ pub struct BatchRequest {
     pub x_scale: ScaleSpec,
     pub y_scale: ScaleSpec,
     pub kind: PlotKind,
+    pub style: PlotStyle,
     pub samples: Vec<usize>,
     pub view: View,
     pub show_gates: bool,
@@ -248,7 +250,7 @@ pub fn collect(session: &mut Session, req: &BatchRequest) -> Result<(PlotCommon,
             }
         }
     }
-    Ok((PlotCommon { range, kind: req.kind, x_chan: req.x_chan.clone(), y_chan: req.y_chan.clone(), x_scale: req.x_scale.clone(), y_scale: req.y_scale.clone(), fmo }, cells))
+    Ok((PlotCommon { range, kind: req.kind, style: req.style.clone(), x_chan: req.x_chan.clone(), y_chan: req.y_chan.clone(), x_scale: req.x_scale.clone(), y_scale: req.y_scale.clone(), fmo }, cells))
 }
 
 #[cfg(test)]
@@ -259,7 +261,7 @@ mod tests {
     use crate::sample::LoadedSample;
 
     fn common() -> PlotCommon {
-        PlotCommon { range: Range { x0: 0.0, x1: 100.0, y0: 0.0, y1: 100.0 }, kind: PlotKind::Pseudocolor, x_chan: "X".into(), y_chan: "Y".into(), x_scale: ScaleSpec::Identity, y_scale: ScaleSpec::Identity, fmo: vec![] }
+        PlotCommon { range: Range { x0: 0.0, x1: 100.0, y0: 0.0, y1: 100.0 }, kind: PlotKind::Pseudocolor, style: PlotStyle::default(), x_chan: "X".into(), y_chan: "Y".into(), x_scale: ScaleSpec::Identity, y_scale: ScaleSpec::Identity, fmo: vec![] }
     }
 
     fn cell(i: usize) -> CellData {
@@ -348,7 +350,7 @@ mod tests {
     }
 
     fn request(samples: Vec<usize>) -> BatchRequest {
-        BatchRequest { population: vec![], x_chan: "X-A".into(), y_chan: "Y-A".into(), x_scale: ScaleSpec::Identity, y_scale: ScaleSpec::Identity, kind: PlotKind::Pseudocolor, samples, view: View::FitAll, show_gates: true, show_fmo: true }
+        BatchRequest { population: vec![], x_chan: "X-A".into(), y_chan: "Y-A".into(), x_scale: ScaleSpec::Identity, y_scale: ScaleSpec::Identity, kind: PlotKind::Pseudocolor, style: PlotStyle::default(), samples, view: View::FitAll, show_gates: true, show_fmo: true }
     }
 
     #[test]
