@@ -324,6 +324,14 @@ impl App {
             ui.close_menu();
             self.gate_paste(si, w.node);
         }
+        if w.node != GateTree::ROOT && self.session.gate_of(si, w.node).is_some() {
+            let pop = self.session.tree(si).name(w.node).unwrap_or("population").to_string();
+            ui.menu_button(format!("Apply gate '{pop}' → group"), |ui| self.apply_group_menu(ui, si, w.node));
+            if ui.button(format!("Copy gate '{pop}'")).clicked() {
+                ui.close_menu();
+                self.gate_copy(si, w.node);
+            }
+        }
         ui.separator();
         if ui.button("Export editor…").clicked() {
             ui.close_menu();
