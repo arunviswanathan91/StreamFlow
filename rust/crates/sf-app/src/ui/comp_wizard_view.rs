@@ -511,7 +511,7 @@ fn result_summary(ui: &mut egui::Ui, r: &WizardResult, session: &crate::session:
     }
 }
 
-fn matrix_table(ui: &mut egui::Ui, id: &str, det: &[String], m: &[f64], scale: f64, col: [u8; 3], help: &str) {
+pub(super) fn matrix_table(ui: &mut egui::Ui, id: &str, det: &[String], m: &[f64], scale: f64, col: [u8; 3], help: &str) {
     theme::caption(ui, help);
     let k = det.len();
     egui::ScrollArea::both().id_salt(id).max_height(200.0).show(ui, |ui| {

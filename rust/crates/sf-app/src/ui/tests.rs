@@ -596,6 +596,16 @@ fn spectral_screen_builds_signatures_and_unmixes_real_controls() {
     app.session.window_mut(w).unwrap().y_chan = "Unmix-PE".into();
     assert!(app.session.window_points(w).unwrap().len() > 1000);
     assert!(discover_view::default_features(app.session.sample(7)).iter().all(|c| c.starts_with("Unmix-")));
+    // the unmixed plot opens on request, and the non-negative method never reports a negative amount
+    app.open_unmixed_plot(7, true).unwrap();
+    settle(&mut app, &ctx);
+    app.spec.method = sf_core::spectral::Method::Nnls;
+    app.spectral_unmix(&[7]);
+    settle(&mut app, &ctx);
+    let smp = app.session.sample(7);
+    let (d, c) = (smp.channels.len(), smp.channel_index("Unmix-FITC").unwrap());
+    assert!((0..smp.n_events).all(|r| smp.events[r * d + c] >= 0.0), "NNLS: no negative FITC");
+    assert!(app.spec.log[0].contains("median residual"), "{:?}", app.spec.log);
     // errors are shown, not swallowed
     app.spec.roles = vec![spectral_view::Assign::None; 8];
     assert!(app.spectral_build().unwrap_err().contains("at least two"));

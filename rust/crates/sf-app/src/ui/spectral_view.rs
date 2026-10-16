@@ -28,7 +28,7 @@ pub enum Assign {
 pub struct State {
     pub roles: Vec<Assign>,
     pub model: Option<SpectralModel>,
-    pub wls: bool,
+    pub method: Method,
     pub use_af: bool,
     pub af_k: usize,
     pub unmix_sel: Vec<bool>,
@@ -39,7 +39,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        State { roles: vec![], model: None, wls: true, use_af: true, af_k: 4, unmix_sel: vec![], log: vec![], done: vec![] }
+        State { roles: vec![], model: None, method: Method::Wls, use_af: true, af_k: 4, unmix_sel: vec![], log: vec![], done: vec![] }
     }
 }
 
@@ -73,7 +73,7 @@ impl App {
 
     pub fn spectral_unmix(&mut self, samples: &[usize]) {
         let Some(model) = self.spec.model.clone() else { return };
-        let method = if self.spec.wls { Method::Wls } else { Method::Ols };
+        let method = self.spec.method;
         let mut lines = Vec::new();
         let mut done = Vec::new();
         for &i in samples {
@@ -184,8 +184,14 @@ impl App {
                 if self.spec.model.is_some() {
                     theme::section(ui, "Unmix");
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.spec.wls, true, "Weighted (WLS)");
-                        ui.radio_value(&mut self.spec.wls, false, "Ordinary (OLS)");
+                        ui.radio_value(&mut self.spec.method, Method::Wls, "Weighted (WLS)");
+                        ui.radio_value(&mut self.spec.method, Method::Ols, "Ordinary (OLS)");
+                        ui.radio_value(&mut self.spec.method, Method::Nnls, "Non-negative (NNLS)");
+                    });
+                    theme::caption(ui, match self.spec.method {
+                        Method::Ols => "Equal weight on every detector; biased where noise grows with brightness.",
+                        Method::Wls => "Down-weights bright detectors, whose noise is larger (the usual choice).",
+                        Method::Nnls => "Weighted, and no fluorochrome can come out below zero. Slower on large files.",
                     });
                     let has_lib = self.spec.model.as_ref().map_or(false, |m| m.af_library.is_some());
                     ui.add_enabled(has_lib, egui::Checkbox::new(&mut self.spec.use_af, "Per-cell autofluorescence"));
@@ -304,6 +310,20 @@ impl App {
                         ui.end_row();
                     }
                 });
+                {
+                    // how alike the signatures are: close to 1 means the two fluorochromes are hard to tell apart
+                    let f = m.f();
+                    let cos = crate::comp_wizard::cosine_rows(&m.m, f, m.d());
+                    let mut pairs: Vec<(usize, usize, f64)> = (0..f).flat_map(|i| (i + 1..f).map(move |k| (i, k))).map(|(i, k)| (i, k, cos[i * f + k])).filter(|p| p.2 >= 0.9).collect();
+                    pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(format!("Signature similarity ({} pair(s) ≥ 0.90)", pairs.len())).default_open(!pairs.is_empty()).show(ui, |ui| {
+                        for (i, k, c) in pairs.iter().take(8) {
+                            ui.label(RichText::new(format!("{} ~ {}: {c:.3}", m.fluors[*i], m.fluors[*k])).color(if *c >= 0.98 { theme::GATE_RED } else { theme::WARN }));
+                        }
+                        super::comp_wizard_view::matrix_table(ui, "spec_cos", &m.fluors, &cos, 1.0, [0, 150, 200], "Cosine similarity of the signatures: values near 1 mean two fluorochromes look alike and unmixing will struggle to separate them.");
+                    });
+                }
                 if let Some((lib, counts)) = &m.af_library {
                     ui.add_space(6.0);
                     ui.label(format!("Autofluorescence library: {} spectra from the unstained tube (cluster sizes {:?})", lib.len() / m.d(), counts));
