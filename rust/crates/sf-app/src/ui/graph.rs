@@ -994,7 +994,12 @@ impl App {
     /// own gates. Clicking a card shows that sample in the plot above.
     fn compare_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: u64, w: &GraphWindow) {
         let Some(range) = self.ws.graphs.get(&id).and_then(|g| g.range).filter(|r| r.is_valid()) else {
-            theme::caption(ui, "Nothing to compare yet: this plot has no view range.");
+            ui.horizontal(|ui| {
+                if ui.button("✕ Close").clicked() {
+                    self.set_strip_open(id, false);
+                }
+                theme::caption(ui, "Nothing to compare yet: this plot has no view range.");
+            });
             return;
         };
         let path = self.session.tree(w.sample).path(w.node).unwrap_or_default();
@@ -1003,13 +1008,21 @@ impl App {
         let names = short_all(&self.session.samples().iter().map(|s| s.name.clone()).collect::<Vec<_>>());
         let pop = if path.is_empty() { "All Events".to_string() } else { path.join(" ▸ ") };
         let mut fit_all = false;
+        let mut close = false;
         ui.horizontal(|ui| {
+            if ui.button("✕ Close").on_hover_text("Hide the compare strip").clicked() {
+                close = true;
+            }
             ui.label(RichText::new("Compare").strong());
             if ui.small_button("⤢ Fit all").on_hover_text("Widen the shared view so every sample's population fits").clicked() {
                 fit_all = true;
             }
             theme::caption(ui, format!("{pop} across {n} samples · same axes, scales and view as the plot above · click a sample to show it"));
         });
+        if close {
+            self.set_strip_open(id, false);
+            return;
+        }
         if fit_all {
             self.fit_all_samples(id, w);
         }
