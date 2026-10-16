@@ -29,6 +29,13 @@ pub struct State {
     pub overview_y: String,
     /// Percentile used when an FMO control sets its reference level.
     pub fmo_pct: f64,
+    /// The gate copied with "Copy gate" (and the name it had).
+    pub gate_clip: Option<(sf_gating::Gate, String)>,
+    /// Colour chosen for a gate's outline on plots; absent = the window's gate colour.
+    pub gate_colors: HashMap<(usize, NodeId), [u8; 3]>,
+    /// Statistics shown under a gate's name on plots.
+    pub gate_stats: HashMap<(usize, NodeId), Vec<super::gate_menu::GateStat>>,
+    pub stat_cache: HashMap<(usize, NodeId, String), (u64, Option<f64>)>,
     thumbs: HashMap<(usize, u64), (u64, TextureHandle)>,
 }
 
@@ -46,6 +53,10 @@ impl Default for State {
             overview_x: String::new(),
             overview_y: String::new(),
             fmo_pct: 95.0,
+            gate_clip: None,
+            gate_colors: HashMap::new(),
+            gate_stats: HashMap::new(),
+            stat_cache: HashMap::new(),
             thumbs: HashMap::new(),
         }
     }
@@ -57,6 +68,9 @@ impl State {
         self.tab = Tab::Overview;
         self.graphs.clear();
         self.collapsed.clear();
+        self.gate_colors.clear();
+        self.gate_stats.clear();
+        self.stat_cache.clear();
         self.rename = None;
         self.thumbs.clear();
     }
@@ -268,13 +282,13 @@ impl App {
                         Err(e) => e,
                     };
                 }
+            }
+            self.tree_menu_items(ui, si, node);
+            if node != GateTree::ROOT {
                 ui.separator();
                 if ui.button(RichText::new("Delete").color(theme::GATE_RED)).clicked() {
                     ui.close_menu();
-                    self.status = match self.session.delete(si, node) {
-                        Ok(n) => format!("Deleted {n} population(s)."),
-                        Err(e) => e,
-                    };
+                    self.gate_delete(si, node);
                 }
             }
         });

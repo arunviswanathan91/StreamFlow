@@ -10,6 +10,7 @@ pub mod embed;
 pub mod figure;
 pub mod figure_font;
 pub mod plot_figure;
+pub mod raster;
 pub mod gate_edit;
 pub mod jobs;
 pub mod layout;

@@ -79,6 +79,8 @@ pub struct GraphUi {
     pub canvas_rect: Option<Rect>,
     /// Histogram, contour and density options of this plot.
     pub plot: PlotStyle,
+    /// Where the last right-click on the plot landed, and the gate under it.
+    pub menu: Option<super::gate_menu::MenuTarget>,
     /// The histogram as last computed (heights, Y axis), for drawing and exporting.
     pub curve: Option<HistCurve>,
 }
@@ -102,7 +104,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), curve: None }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), menu: None, curve: None }
     }
 }
 
@@ -662,7 +664,8 @@ impl App {
         painter.rect_filled(plot, 0.0, Color32::WHITE);
         self.paint_population(ctx, id, &w, &map, &painter);
         let curve = self.ws.graphs.get(&id).and_then(|g| g.curve.clone());
-        draw_axes(&painter, &map, &w, hist, curve.as_ref());
+        let show_grid = self.ws.graphs.get(&id).map_or(true, |g| g.plot.grid);
+        draw_axes(&painter, &map, &w, hist, curve.as_ref(), show_grid);
         let style = self.ws.graphs[&id].style.clone();
         self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
         self.draw_child_gates(&painter, &map, &w, &style, id);
@@ -719,6 +722,19 @@ impl App {
                 painter.line_segment([Pos2::new(plot.left(), pos.y), Pos2::new(plot.right(), pos.y)], s);
             }
         }
+
+        // ---- right-click: the gate under the pointer, or the plot itself
+        if resp.secondary_clicked() {
+            let at = resp.interact_pointer_pos().filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
+            let hit = at.and_then(|a| self.gate_under(&w, a));
+            if let Some(k) = hit {
+                self.session.selected = Some((w.sample, k));
+            }
+            if let Some(g) = self.ws.graphs.get_mut(&id) {
+                g.menu = Some((at.unwrap_or((0.0, 0.0)), hit));
+            }
+        }
+        resp.context_menu(|ui| self.plot_menu(ui, id));
 
         // ---- gate drawing
         let pointer = resp.interact_pointer_pos().filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
@@ -840,6 +856,10 @@ impl App {
             }
         }
         ui.separator();
+        if ui.button("Export editor…").on_hover_text("Choose the size, resolution, format and what appears on the plot, with a preview").clicked() {
+            ui.close_menu();
+            self.open_plot_export(id);
+        }
         let canvas = self.ws.graphs.get(&id).and_then(|g| g.canvas_rect);
         if ui.add_enabled(canvas.is_some(), egui::Button::new("Plot as PNG (as shown)…")).on_hover_text("The pixels on screen, at screen resolution").clicked() {
             ui.close_menu();
@@ -869,6 +889,13 @@ impl App {
     pub fn refit_window(&mut self, id: u64) {
         if let Some(g) = self.ws.graphs.get_mut(&id) {
             g.refit = true;
+        }
+    }
+
+    /// The same as the toolbar's Set FMO / Clear FMO button, for the right-click menu.
+    pub(super) fn toggle_fmo_public(&mut self, id: u64) {
+        if let Some(w) = self.session.window(id).cloned() {
+            self.toggle_fmo(id, &w);
         }
     }
 
@@ -1353,7 +1380,7 @@ impl App {
                 gate = p;
             }
             let selected = self.session.selected == Some((w.sample, k));
-            let stroke = Stroke::new(if selected { style.width + 1.2 } else { style.width }, if selected { Color32::from_rgb(255, 214, 10) } else { style.color });
+            let stroke = Stroke::new(if selected { style.width + 1.2 } else { style.width }, if selected { Color32::from_rgb(255, 214, 10) } else { self.ws.gate_colors.get(&(w.sample, k)).map_or(style.color, |c| Color32::from_rgb(c[0], c[1], c[2])) });
             let anchor = draw_gate(&painter, map, &gate, stroke, w.kind == PlotKind::Histogram, style.fill);
             if selected && w.tool == Tool::Pointer {
                 let y_mid = (map.range.y0 + map.range.y1) / 2.0;
@@ -1367,7 +1394,11 @@ impl App {
             if style.labels {
                 if let Some(a) = anchor {
                     let count = self.session.count(w.sample, k);
-                    let text = format!("{name}\n{:.1}%  ({count})", 100.0 * count as f64 / parent_count as f64);
+                    let mut text = format!("{name}\n{:.1}%  ({count})", 100.0 * count as f64 / parent_count as f64);
+                    for line in self.gate_stat_lines(w.sample, k) {
+                        text.push('\n');
+                        text.push_str(&line);
+                    }
                     painter.text(a + egui::vec2(3.0, -3.0), Align2::LEFT_BOTTOM, text, FontId::proportional(11.0), Color32::from_rgb(120, 15, 15));
                 }
             }
@@ -1376,7 +1407,7 @@ impl App {
 }
 
 /// Is this gate drawn on exactly the window's current axes and scales?
-fn gate_on_axes(g: &Gate, w: &GraphWindow) -> bool {
+pub(super) fn gate_on_axes(g: &Gate, w: &GraphWindow) -> bool {
     if matches!(g.kind, GateKind::Indexed(_)) {
         return false;
     }
@@ -1448,9 +1479,9 @@ fn draw_histogram(painter: &egui::Painter, map: &Mapper, c: &HistCurve, style: &
     }
 }
 
-fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>) {
+fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, show_grid: bool) {
     let axis = Stroke::new(1.0_f32, Color32::from_gray(150));
-    let grid = Stroke::new(0.5_f32, Color32::from_gray(228));
+    let grid = Stroke::new(if show_grid { 0.5_f32 } else { 0.0 }, if show_grid { Color32::from_gray(228) } else { Color32::TRANSPARENT });
     let text = theme::TEXT;
     let r = map.rect;
     for t in ticks(&w.x_scale, map.range.x0, map.range.x1) {

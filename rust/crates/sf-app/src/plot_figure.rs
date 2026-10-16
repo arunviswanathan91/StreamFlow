@@ -151,7 +151,9 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
     for (t, show) in x_ticks.into_iter().zip(x_show) {
         let x = fr.x(t.pos);
         if t.major {
-            fig.push(line((x, fr.t), (x, fr.t + fr.h), GRID, 0.4));
+            if style.grid {
+                fig.push(line((x, fr.t), (x, fr.t + fr.h), GRID, 0.4));
+            }
             axes.push(line((x, fr.t + fr.h), (x, fr.t + fr.h + 3.0), AXIS, 0.6));
             if show {
                 axes.push(Item::Text(Text::new(x, fr.t + fr.h + 4.0, t.label, 6.8).align(Align::Center, VAlign::Top).color(INK)));
@@ -166,7 +168,9 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         for (t, show) in y_ticks.into_iter().zip(y_show) {
             let y = fr.y(t.pos);
             if t.major {
-                fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
+                if style.grid {
+                    fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
+                }
                 axes.push(line((fr.l - 3.0, y), (fr.l, y), AXIS, 0.6));
                 if show {
                     axes.push(Item::Text(Text::new(fr.l - 4.5, y, t.label, 6.8).align(Align::Right, VAlign::Middle).color(INK)));
@@ -179,7 +183,9 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         // the histogram's own Y axis, in the unit the style chose
         for (frac, label) in hist_ticks(c) {
             let y = fr.t + fr.h - frac as f32 * fr.h;
-            fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
+            if style.grid {
+                fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
+            }
             axes.push(line((fr.l - 3.0, y), (fr.l, y), AXIS, 0.6));
             axes.push(Item::Text(Text::new(fr.l - 4.5, y, label, 6.8).align(Align::Right, VAlign::Middle).color(INK)));
         }
@@ -357,6 +363,32 @@ fn gate_items(g: &Gate, fr: &Frame, hist: bool) -> (Vec<Item>, Option<(f32, f32)
             (vec![line((x, fr.t), (x, fr.t + fr.h), GATE, 1.0), line((fr.l, y), (fr.l + fr.w, y), GATE, 1.0)], None)
         }
         GateKind::Indexed(_) => (vec![], None),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub fn demo_spec(pts: &[(f64, f64)]) -> PlotSpec<'_> {
+        PlotSpec {
+            width: 260.0,
+            height: 220.0,
+            captions: vec!["sample.fcs".into(), "Lymphocytes".into()],
+            points: pts,
+            layers: vec![],
+            legend: false,
+            style: PlotStyle::default(),
+            range: Range { x0: 0.0, x1: 1000.0, y0: 0.0, y1: 500.0 },
+            kind: PlotKind::Pseudocolor,
+            x_chan: "FSC-A".into(),
+            y_chan: "SSC-A".into(),
+            x_scale: ScaleSpec::Identity,
+            y_scale: ScaleSpec::Identity,
+            gates: vec![],
+            fmo: vec![],
+            footer: Some("3,000 events".into()),
+        }
     }
 }
 

@@ -92,6 +92,49 @@ pub fn pop_label(path: &[String]) -> String {
     }
 }
 
+/// One statistic of one population. `values` are the channel's values for its events (empty when there is no
+/// channel or no events); `parent_count` is `None` for the root, whose parent is all events. Undefined (empty
+/// population, no usable value) is `None`, never zero. All the maths is in `Stats`.
+pub fn apply_metric(m: Metric, values: &[f64], count: usize, parent_count: Option<usize>, total: usize) -> Option<f64> {
+    let have = !values.is_empty();
+    let v = match m {
+        Metric::Count => Some(count as f64),
+        Metric::PctParent => {
+            let denom = parent_count.unwrap_or(total);
+            (denom > 0).then(|| 100.0 * count as f64 / denom as f64)
+        }
+        Metric::PctTotal => (total > 0).then(|| 100.0 * count as f64 / total as f64),
+        _ if !have => None,
+        Metric::Median => Some(stats::median(values)),
+        Metric::Mean => Some(stats::mean(values)),
+        Metric::GeoMean => {
+            let g = stats::geo_mean(values);
+            (g.excluded < g.total).then_some(g.value)
+        }
+        Metric::Mode => Some(stats::mode(values)),
+        Metric::Sd => Some(stats::sd(values)),
+        Metric::Cv => Some(stats::cv(values)),
+        Metric::RobustCv => Some(stats::rcv(values)),
+        Metric::Mad => Some(stats::mad(values)),
+        Metric::Min => Some(stats::min(values)),
+        Metric::Max => Some(stats::max(values)),
+        Metric::Percentile(p) => Some(stats::percentile(values, p)),
+    };
+    v.filter(|x| x.is_finite())
+}
+
+/// One statistic of one population of one sample (for a label on a plot). `None` when it is not defined.
+pub fn node_stat(session: &mut Session, sample: usize, node: usize, metric: Metric, channel: &str) -> Option<f64> {
+    let total = session.sample(sample).n_events;
+    let parent = session.tree(sample).parent(node).ok().flatten();
+    let (count, parent_count) = {
+        let c = session.count(sample, node);
+        (c, parent.map(|p| session.count(sample, p)))
+    };
+    let values = if metric.needs_channel() { session.population_values(sample, node, channel).unwrap_or_default() } else { Vec::new() };
+    apply_metric(metric, &values, count, parent_count, total)
+}
+
 /// Compute the table for `samples` (all populations of each tree, parents before children).
 pub fn compute(session: &mut Session, samples: &[usize], metrics: &[Metric], channel: Option<&str>) -> Table {
     let mut rows = Vec::new();
@@ -121,31 +164,15 @@ pub fn compute(session: &mut Session, samples: &[usize], metrics: &[Metric], cha
             let have = !values.is_empty();
             let out: Vec<Option<f64>> = metrics
                 .iter()
-                .map(|m| match m {
-                    Metric::Count => Some(counts[node] as f64),
-                    Metric::PctParent => {
-                        let denom = parents[k].map(|p| counts[p]).unwrap_or(total);
-                        (denom > 0).then(|| 100.0 * counts[node] as f64 / denom as f64)
+                .map(|m| {
+                    let (denom, geo) = (parents[k].map(|p| counts[p]), ());
+                    let _ = geo;
+                    let v = apply_metric(*m, &values, counts[node], denom, total);
+                    if let (Metric::GeoMean, true) = (m, have) {
+                        geo_excluded = geo_excluded.max(stats::geo_mean(&values).excluded);
                     }
-                    Metric::PctTotal => (total > 0).then(|| 100.0 * counts[node] as f64 / total as f64),
-                    _ if !have => None,
-                    Metric::Median => Some(stats::median(&values)),
-                    Metric::Mean => Some(stats::mean(&values)),
-                    Metric::GeoMean => {
-                        let g = stats::geo_mean(&values);
-                        geo_excluded = geo_excluded.max(g.excluded);
-                        (g.excluded < g.total).then_some(g.value)
-                    }
-                    Metric::Mode => Some(stats::mode(&values)),
-                    Metric::Sd => Some(stats::sd(&values)),
-                    Metric::Cv => Some(stats::cv(&values)),
-                    Metric::RobustCv => Some(stats::rcv(&values)),
-                    Metric::Mad => Some(stats::mad(&values)),
-                    Metric::Min => Some(stats::min(&values)),
-                    Metric::Max => Some(stats::max(&values)),
-                    Metric::Percentile(p) => Some(stats::percentile(&values, *p)),
+                    v
                 })
-                .map(|v| v.filter(|x| x.is_finite()))
                 .collect();
             if metrics.contains(&Metric::GeoMean) && have {
                 let g = stats::geo_mean(&values);

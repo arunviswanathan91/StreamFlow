@@ -341,6 +341,21 @@ impl GateTree {
         Ok(())
     }
 
+    /// Turn a rectangle or ellipse gate into a polygon in place: name, children and place in the tree are kept. Only
+    /// that conversion is allowed, and the channels and scales must be the same.
+    pub fn convert_to_polygon(&mut self, id: NodeId, gate: Gate) -> Result<(), TreeError> {
+        let old = match &self.node(id)?.kind {
+            NodeKind::Gate(g) => g.clone(),
+            _ => return Err(TreeError::BadExpression("only a gate can be converted".into())),
+        };
+        if !matches!(old.kind, GateKind::Rectangle | GateKind::Ellipse) || !matches!(gate.kind, GateKind::Polygon) || old.x_chan != gate.x_chan || old.y_chan != gate.y_chan || old.x_scale != gate.x_scale || old.y_scale != gate.y_scale {
+            return Err(TreeError::BadExpression("only a rectangle or ellipse can become a polygon on the same axes".into()));
+        }
+        Gate::new(gate.kind.clone(), &gate.x_chan, gate.y_chan.as_deref(), gate.xs.clone(), gate.ys.clone()).map_err(TreeError::Gate)?;
+        self.nodes[id].kind = NodeKind::Gate(gate);
+        Ok(())
+    }
+
     /// Remove a population and everything below it. The root cannot be removed. Ids are not reused.
     pub fn remove(&mut self, id: NodeId) -> Result<usize, TreeError> {
         if id == Self::ROOT {
