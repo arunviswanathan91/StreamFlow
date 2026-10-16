@@ -241,6 +241,18 @@ impl App {
                 win.drawing.cancel();
             }
         }
+        let alt = ctx.input_mut(|i| {
+            let m = egui::Modifiers::ALT;
+            (i.consume_key(m, egui::Key::T), i.consume_key(m, egui::Key::ArrowRight), i.consume_key(m, egui::Key::ArrowLeft), i.consume_key(m, egui::Key::ArrowDown), i.consume_key(m, egui::Key::ArrowUp))
+        });
+        match alt {
+            (true, ..) => self.axis_action(id, true, 0),
+            (_, true, ..) => self.axis_action(id, true, 1),
+            (_, _, true, ..) => self.axis_action(id, true, -1),
+            (_, _, _, true, _) => self.axis_action(id, false, 1),
+            (.., true) => self.axis_action(id, false, -1),
+            _ => {}
+        }
         let (left, right, del) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Delete)));
         if left && w.sample > 0 {
             self.hop_sample(id, w.sample - 1);
@@ -267,6 +279,20 @@ impl App {
 
     pub(crate) fn do_redo(&mut self, sample: usize) {
         self.status = if self.session.redo(sample) { "Redone.".into() } else { "Nothing to redo.".into() };
+    }
+
+    /// Transpose (`dir == 0`) or step an axis to its next/previous channel, then refit the view.
+    pub fn axis_action(&mut self, id: u64, x_axis: bool, dir: i32) {
+        let r = if dir == 0 { self.session.transpose_axes(id).map(|_| "Axes swapped".to_string()) } else { self.session.step_axis(id, x_axis, dir).map(|n| format!("{} axis: {n}", if x_axis { "X" } else { "Y" })) };
+        match r {
+            Ok(m) => {
+                self.status = m;
+                if let Some(g) = self.ws.graphs.get_mut(&id) {
+                    g.refit = true;
+                }
+            }
+            Err(e) => self.status = e,
+        }
     }
 
     fn hop_sample(&mut self, id: u64, sample: usize) {
@@ -343,6 +369,23 @@ impl App {
                     g.refit = true;
                 }
             }
+            ui.menu_button("⇄ Axes", |ui| {
+                let mut act: Option<(bool, i32)> = None;
+                let hist = w.kind == PlotKind::Histogram;
+                if ui.add_enabled(!hist, egui::Button::new("Transpose axes")).on_hover_text("Swap X and Y (Alt+T)").clicked() {
+                    act = Some((true, 0));
+                }
+                ui.separator();
+                for (label, x, d, tip) in [("Next X", true, 1, "Alt+→"), ("Previous X", true, -1, "Alt+←"), ("Next Y", false, 1, "Alt+↓"), ("Previous Y", false, -1, "Alt+↑")] {
+                    if ui.add_enabled(x || !hist, egui::Button::new(label).shortcut_text(tip)).clicked() {
+                        act = Some((x, d));
+                    }
+                }
+                if let Some((x, d)) = act {
+                    self.axis_action(id, x, d);
+                    ui.close_menu();
+                }
+            });
             let fmo_set = self.session.fmo(&w.x_chan).is_some() || (w.kind != PlotKind::Histogram && self.session.fmo(&w.y_chan).is_some());
             if ui.button(if fmo_set { "⌖ Clear FMO" } else { "⌖ Set FMO" }).on_hover_text("Use this population as the FMO control: its 95th percentile becomes a dashed reference line on every plot of the channel").clicked() {
                 self.toggle_fmo(id, w);

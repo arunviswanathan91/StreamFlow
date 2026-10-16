@@ -1397,3 +1397,42 @@ fn a_layout_tile_carries_its_plot_kind_and_style_into_the_batch_pdf() {
     assert_eq!(other.lay.ed.doc.tiles[0].style, app.lay.ed.doc.tiles[0].style);
     assert_eq!(other.lay.ed.doc.tiles[0].kind, PlotKind::Histogram);
 }
+
+#[test]
+fn transpose_and_next_previous_axis_walk_the_channels_and_keep_gates_on_their_own_axes() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Pseudocolor;
+    let (x0, y0) = { let win = app.session.window(w).unwrap(); (win.x_chan.clone(), win.y_chan.clone()) };
+    let xs0 = app.session.window(w).unwrap().x_scale.clone();
+    app.axis_action(w, true, 0);
+    { let win = app.session.window(w).unwrap(); assert_eq!((&win.x_chan, &win.y_chan), (&y0, &x0)); }
+    app.axis_action(w, true, 0);
+    { let win = app.session.window(w).unwrap(); assert_eq!((&win.x_chan, &win.y_chan, &win.x_scale), (&x0, &y0, &xs0), "twice is the identity, scales included"); }
+    // next / previous walk the file's own channel order and wrap
+    let chans = app.session.sample(0).channels.clone();
+    let i = chans.iter().position(|c| *c == x0).unwrap();
+    app.axis_action(w, true, 1);
+    assert_eq!(app.session.window(w).unwrap().x_chan, chans[(i + 1) % chans.len()]);
+    app.axis_action(w, true, -1);
+    assert_eq!(app.session.window(w).unwrap().x_chan, x0);
+    app.session.window_mut(w).unwrap().x_chan = chans[0].clone();
+    app.axis_action(w, true, -1);
+    assert_eq!(app.session.window(w).unwrap().x_chan, *chans.last().unwrap(), "wraps backwards");
+    app.axis_action(w, false, 1);
+    assert_ne!(app.session.window(w).unwrap().y_chan, y0);
+    // histograms have one axis
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Histogram;
+    let before = app.session.window(w).unwrap().clone();
+    app.axis_action(w, true, 0);
+    assert!(app.status.contains("one axis"), "{}", app.status);
+    app.axis_action(w, false, 1);
+    assert!(app.status.contains("no Y"), "{}", app.status);
+    let after = app.session.window(w).unwrap();
+    assert_eq!((&before.x_chan, &before.y_chan), (&after.x_chan, &after.y_chan));
+    // the plot still draws after the changes
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Contour;
+    settle(&mut app, &ctx);
+    assert!(app.ws.graphs[&w].tex.is_some());
+}

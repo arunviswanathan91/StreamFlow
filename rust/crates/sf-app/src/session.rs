@@ -436,6 +436,51 @@ impl Session {
         self.touch(sample);
     }
 
+    /// Swap a window's X and Y axes (channels and scales). Gates drawn on the old axes stay put and are hidden while the
+    /// plot shows other axes. A histogram has only one axis, so there is nothing to swap.
+    pub fn transpose_axes(&mut self, id: u64) -> Result<(), String> {
+        let w = self.window_mut(id).ok_or("No such plot")?;
+        if w.kind == PlotKind::Histogram {
+            return Err("A histogram has one axis; switch to a 2-D plot to transpose".into());
+        }
+        std::mem::swap(&mut w.x_chan, &mut w.y_chan);
+        std::mem::swap(&mut w.x_scale, &mut w.y_scale);
+        w.drawing.cancel();
+        Ok(())
+    }
+
+    /// Move one axis to the next (`dir > 0`) or previous channel of the sample, wrapping round, and give it that
+    /// channel's default scale. Time-like channels are not skipped: the list is the file's own order.
+    pub fn step_axis(&mut self, id: u64, x_axis: bool, dir: i32) -> Result<String, String> {
+        let sample = self.window(id).ok_or("No such plot")?.sample;
+        let (channels, ranges) = {
+            let s = self.sample(sample);
+            (s.channels.clone(), s.ranges.clone())
+        };
+        if channels.is_empty() {
+            return Err("This file has no channels".into());
+        }
+        let w = self.window_mut(id).ok_or("No such plot")?;
+        if !x_axis && w.kind == PlotKind::Histogram {
+            return Err("A histogram has no Y parameter".into());
+        }
+        let cur = if x_axis { &w.x_chan } else { &w.y_chan };
+        let i = channels.iter().position(|c| c == cur).unwrap_or(0) as i64;
+        let n = channels.len() as i64;
+        let j = ((i + dir.signum() as i64) % n + n) % n;
+        let name = channels[j as usize].clone();
+        let scale = default_scale(&name, ranges[j as usize]);
+        if x_axis {
+            w.x_chan = name.clone();
+            w.x_scale = scale;
+        } else {
+            w.y_chan = name.clone();
+            w.y_scale = scale;
+        }
+        w.drawing.cancel();
+        Ok(name)
+    }
+
     pub fn undo(&mut self, sample: usize) -> bool {
         let Some(prev) = self.states.get_mut(sample).and_then(|s| s.undo.pop()) else { return false };
         let st = &mut self.states[sample];
