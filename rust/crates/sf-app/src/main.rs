@@ -278,6 +278,35 @@ fn main() -> eframe::Result<()> {
             app.set_dialog(&d, si, node, &ch);
         }
     }
+    // `--demo-groups`: a gate drawn once (shared by every sample), edited in the second sample, a group, and the manager
+    if args.iter().any(|a| a == "--demo-groups") {
+        if app.session.windows.is_empty() && !app.session.samples().is_empty() {
+            let _ = app.open_tab(0, GateTree::ROOT);
+        }
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            if let Some(r) = app.session.auto_range(id) {
+                let (w, h) = (r.x1 - r.x0, r.y1 - r.y0);
+                if let Ok(_g) = app.session.commit_shape(id, &sf_app::drawing::Shape::Ellipse { cx: r.x0 + 0.3 * w, cy: r.y0 + 0.3 * h, rx: 0.15 * w, ry: 0.12 * h }, "Lymphocytes") {
+                    let n = app.session.samples().len();
+                    if n > 1 {
+                        if let Some(node) = app.session.tree(1).find(&["Lymphocytes"]) {
+                            if let Some(mut g) = app.session.gate_of(1, node) {
+                                g.xs.iter_mut().for_each(|v| *v += 0.12 * w);
+                                let _ = app.session.edit_gate(1, node, g);
+                            }
+                        }
+                        let _ = app.session.create_group("Controls", &(0..n.min(3)).collect::<Vec<_>>());
+                        let _ = app.session.retarget_window(id, 1);
+                        app.refit_window(id);
+                    }
+                }
+            }
+        }
+        app.open_group_manager("Controls");
+        if args.iter().any(|a| a == "--no-dialogs") {
+            app.close_dialogs();
+        }
+    }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();
     }

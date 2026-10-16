@@ -1642,3 +1642,82 @@ fn layout_pages_save_as_png_at_the_chosen_resolution() {
     // the screens that hold the buttons still draw with pages built
     settle(&mut app, &ctx);
 }
+
+fn three_sample_app() -> App {
+    let mut app = App::new();
+    for i in 0..3 {
+        let mut rng = Rng::new(40 + i as u64);
+        let events: Vec<f32> = (0..3000).flat_map(|_| [(rng.next_f64() * 200_000.0) as f32, (rng.next_f64() * 200_000.0) as f32]).collect();
+        app.session.add_sample(LoadedSample::synthetic(&format!("s{i}.fcs"), &["FSC-A", "SSC-A"], vec![262_144.0, 262_144.0], events));
+    }
+    app
+}
+
+#[test]
+fn a_gate_drawn_in_one_sample_appears_in_all_and_editing_it_shows_an_edited_signal() {
+    let ctx = egui::Context::default();
+    let mut app = three_sample_app();
+    assert_eq!(app.session.draw_target, crate::session::DrawTarget::app_default(), "the app shares new gates with every sample");
+    let w = app.session.open_population(0, GateTree::ROOT).unwrap();
+    app.open_tab(0, GateTree::ROOT).unwrap();
+    settle(&mut app, &ctx);
+    let g = app.session.commit_shape(w, &Shape::Rect { x0: 20_000.0, x1: 120_000.0, y0: 20_000.0, y1: 120_000.0 }, "Lymph").unwrap();
+    for s in 0..3 {
+        assert!(app.session.tree(s).find(&["Lymph"]).is_some(), "sample {s} has the gate");
+    }
+    assert_eq!(app.session.gate_owner(0, g).unwrap().group, "All Samples");
+    // editing in sample 2 shows as edited there only
+    let n2 = app.session.tree(2).find(&["Lymph"]).unwrap();
+    let mut moved = gate_of_sample(&app, 2, n2);
+    moved.xs.iter_mut().for_each(|v| *v += 10_000.0);
+    app.session.edit_gate(2, n2, moved).unwrap();
+    assert!(app.session.gate_owner(2, n2).unwrap().edited);
+    assert!(!app.session.gate_owner(0, g).unwrap().edited);
+    // hop to sample 2 and draw: the plot labels the gate as edited (a frame with the label must render)
+    app.session.retarget_window(w, 2).unwrap();
+    app.refit_window(w);
+    settle(&mut app, &ctx);
+    // the right-click actions on an edited gate
+    app.status.clear();
+    app.gate_apply_group(2, n2, "All Samples");
+    assert!(!app.session.gate_owner(2, n2).unwrap().edited, "updating the group from sample 2 clears the signal");
+    let n0 = app.session.tree(0).find(&["Lymph"]).unwrap();
+    assert_eq!(gate_of_sample(&app, 0, n0), gate_of_sample(&app, 2, n2), "and every sample has the edited version");
+    // a plain delete of a group-owned gate asks first
+    app.gate_delete(1, app.session.tree(1).find(&["Lymph"]).unwrap());
+    assert!(app.dlg.group_delete.is_some());
+    assert!(app.session.tree(1).find(&["Lymph"]).is_some(), "nothing was deleted yet");
+    settle(&mut app, &ctx);
+    app.dlg.group_delete = None;
+    // groups: the manager draws, and the current group limits which samples the arrows step through
+    app.session.create_group("Pair", &[0, 2]).unwrap();
+    app.dlg.mgr.open = true;
+    app.dlg.mgr.load(&app.session, "Pair");
+    settle(&mut app, &ctx);
+    app.dlg.mgr.load(&app.session, "All Samples");
+    settle(&mut app, &ctx);
+    app.ws.cur_group = Some("Pair".into());
+    assert_eq!(app.step_sample(0, 1), Some(2), "sample 1 is not in the group");
+    assert_eq!(app.step_sample(2, -1), Some(0));
+    assert_eq!(app.step_sample(2, 1), None);
+    app.ws.cur_group = None;
+    assert_eq!(app.step_sample(0, 1), Some(1));
+    // new gates can go to a group, and the toolbar combo draws with the groups in it
+    app.session.draw_target = crate::session::DrawTarget::Group("Pair".into());
+    app.session.retarget_window(w, 0).unwrap();
+    let h = app.session.commit_shape(w, &Shape::Rect { x0: 1.0, x1: 50_000.0, y0: 1.0, y1: 50_000.0 }, "OnlyPair").unwrap();
+    assert!(app.session.tree(2).find(&["OnlyPair"]).is_some() && app.session.tree(1).find(&["OnlyPair"]).is_none());
+    assert_eq!(app.session.gate_owner(0, h).unwrap().group, "Pair");
+    settle(&mut app, &ctx);
+    // key arrows follow the current group
+    app.ws.cur_group = Some("Pair".into());
+    pointer(&mut app, &ctx, vec![key(egui::Key::ArrowRight, false, false)]);
+    assert_eq!(app.session.window(w).unwrap().sample, 2, "→ skipped the sample outside the group");
+}
+
+fn gate_of_sample(app: &App, s: usize, node: usize) -> Gate {
+    match app.session.tree(s).kind(node).unwrap() {
+        NodeKind::Gate(g) => g.clone(),
+        k => panic!("{k:?}"),
+    }
+}

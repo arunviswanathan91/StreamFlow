@@ -259,20 +259,21 @@ impl App {
             _ => {}
         }
         let (left, right, del) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Delete)));
-        if left && w.sample > 0 {
-            self.hop_sample(id, w.sample - 1);
+        if left {
+            if let Some(p) = self.step_sample(w.sample, -1) {
+                self.hop_sample(id, p);
+            }
         }
-        if right && w.sample + 1 < self.session.samples().len() {
-            self.hop_sample(id, w.sample + 1);
+        if right {
+            if let Some(p) = self.step_sample(w.sample, 1) {
+                self.hop_sample(id, p);
+            }
         }
         if del {
             if let Some((s, n)) = self.session.selected {
                 let is_child = s == w.sample && self.session.tree(s).parent(n).ok().flatten() == Some(w.node);
                 if is_child {
-                    self.status = match self.session.delete(s, n) {
-                        Ok(k) => format!("Deleted {k} population(s). Ctrl+Z to undo."),
-                        Err(e) => e,
-                    };
+                    self.gate_delete(s, n);
                 }
             }
         }
@@ -315,8 +316,11 @@ impl App {
     fn graph_toolbar(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
         ui.horizontal_wrapped(|ui| {
             let n = self.session.samples().len();
-            if ui.add_enabled(w.sample > 0, egui::Button::new("◀")).on_hover_text("Previous sample (←)").clicked() {
-                self.hop_sample(id, w.sample - 1);
+            let (prev, next) = (self.step_sample(w.sample, -1), self.step_sample(w.sample, 1));
+            if ui.add_enabled(prev.is_some(), egui::Button::new("◀")).on_hover_text("Previous sample (←)").clicked() {
+                if let Some(p) = prev {
+                    self.hop_sample(id, p);
+                }
             }
             let name = self.session.samples()[w.sample].name.clone();
             let mut pick = w.sample;
@@ -329,8 +333,10 @@ impl App {
             if pick != w.sample {
                 self.hop_sample(id, pick);
             }
-            if ui.add_enabled(w.sample + 1 < n, egui::Button::new("▶")).on_hover_text("Next sample (→)").clicked() {
-                self.hop_sample(id, w.sample + 1);
+            if ui.add_enabled(next.is_some(), egui::Button::new("▶")).on_hover_text("Next sample (→)").clicked() {
+                if let Some(p) = next {
+                    self.hop_sample(id, p);
+                }
             }
             ui.separator();
             let mut kind = w.kind;
@@ -374,6 +380,7 @@ impl App {
                     g.refit = true;
                 }
             }
+            self.draw_target_combo(ui);
             ui.menu_button("⇄ Axes", |ui| {
                 let mut act: Option<(bool, i32)> = None;
                 let hist = w.kind == PlotKind::Histogram;
@@ -1385,7 +1392,9 @@ impl App {
                 gate = p;
             }
             let selected = self.session.selected == Some((w.sample, k));
-            let stroke = Stroke::new(if selected { style.width + 1.2 } else { style.width }, if selected { Color32::from_rgb(255, 214, 10) } else { self.ws.gate_colors.get(&(w.sample, k)).map_or(style.color, |c| Color32::from_rgb(c[0], c[1], c[2])) });
+            let owner = self.session.gate_owner(w.sample, k);
+            let own_tint = owner.as_ref().and_then(|o| o.color).map(|c| Color32::from_rgb(c[0], c[1], c[2]));
+            let stroke = Stroke::new(if selected { style.width + 1.2 } else { style.width }, if selected { Color32::from_rgb(255, 214, 10) } else { self.ws.gate_colors.get(&(w.sample, k)).map_or(own_tint.unwrap_or(style.color), |c| Color32::from_rgb(c[0], c[1], c[2])) });
             let anchor = draw_gate(&painter, map, &gate, stroke, w.kind == PlotKind::Histogram, style.fill);
             if selected && w.tool == Tool::Pointer {
                 let y_mid = (map.range.y0 + map.range.y1) / 2.0;
@@ -1394,6 +1403,16 @@ impl App {
                     let r = Rect::from_center_size(c, egui::vec2(8.0, 8.0));
                     painter.rect_filled(r, 1.0, Color32::WHITE);
                     painter.rect_stroke(r, 1.0, Stroke::new(1.2_f32, Color32::from_rgb(40, 40, 40)));
+                }
+            }
+            if let (Some(o), Some(a)) = (&owner, anchor) {
+                if o.edited {
+                    // the group's gate, changed in this sample since: say so on the plot
+                    let at = a + egui::vec2(3.0, -3.0 - 13.0 * (style.labels as u8 + style.freqs as u8 + 2 * style.medians as u8) as f32);
+                    let text = format!("✎ edited · {}", o.group);
+                    let r = painter.text(at, Align2::LEFT_BOTTOM, &text, FontId::proportional(10.5), Color32::TRANSPARENT);
+                    painter.rect_filled(r.expand(2.0), 3.0, Color32::from_rgba_unmultiplied(255, 244, 214, 235));
+                    painter.text(at, Align2::LEFT_BOTTOM, text, FontId::proportional(10.5), Color32::from_rgb(160, 80, 0));
                 }
             }
             if style.labels || style.freqs || style.medians {

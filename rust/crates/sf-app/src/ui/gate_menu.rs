@@ -5,6 +5,7 @@
 //! them without a menu.
 
 use super::{theme, App, Module};
+use crate::session::{DrawTarget, GroupDelete, ALL_SAMPLES};
 use crate::session::GraphWindow;
 use crate::stats_table::{node_stat, Metric};
 use eframe::egui::{self, Color32, RichText};
@@ -39,6 +40,9 @@ pub struct Dialogs {
     pub subsample: Option<(usize, NodeId, usize)>,
     pub keywords: Option<usize>,
     pub history: Option<(usize, NodeId)>,
+    /// A group-owned gate whose deletion is being decided.
+    pub group_delete: Option<(usize, NodeId)>,
+    pub mgr: GroupMgr,
     /// How many times a plot menu has been laid out (so tests can tell a menu opened).
     pub plot_menus_shown: u32,
 }
@@ -120,6 +124,10 @@ impl App {
     }
 
     pub fn gate_delete(&mut self, si: usize, node: NodeId) {
+        if self.session.gate_owner(si, node).is_some() {
+            self.dlg.group_delete = Some((si, node));
+            return;
+        }
         self.status = match self.session.delete(si, node) {
             Ok(n) => format!("Deleted {n} population(s). Ctrl+Z to undo."),
             Err(e) => e,
@@ -269,9 +277,35 @@ impl App {
                 ui.close_menu();
                 self.gate_copy(si, node);
             }
-            if ui.button("Apply gate → all samples").clicked() {
-                ui.close_menu();
-                self.gate_apply_all(si, node);
+            ui.menu_button("Apply gate → group", |ui| self.apply_group_menu(ui, si, node));
+            if let Some(o) = self.session.gate_owner(si, node) {
+                ui.separator();
+                ui.label(RichText::new(format!("Owned by {}{}", o.group, if o.edited { " — edited here" } else { "" })).size(12.0).color(if o.edited { theme::WARN } else { theme::MUTED }));
+                if ui.add_enabled(o.edited, egui::Button::new("Update group from this gate")).on_hover_text("Make this version the group's and give it to every member").clicked() {
+                    ui.close_menu();
+                    self.status = match self.session.update_group_from(si, node) {
+                        Ok(n) => format!("The group's gate is now this version ({n} other sample(s) updated)."),
+                        Err(e) => e,
+                    };
+                }
+                if ui.add_enabled(o.edited, egui::Button::new("Revert to group version")).clicked() {
+                    ui.close_menu();
+                    self.status = match self.session.revert_to_group(si, node) {
+                        Ok(c) => format!("Back to the group's version ({c} events)."),
+                        Err(e) => e,
+                    };
+                }
+                if ui.button("Release from group").on_hover_text("Every sample keeps its own copy; the group stops owning it").clicked() {
+                    ui.close_menu();
+                    self.status = match self.session.release_gate(si, node) {
+                        Ok(()) => "Released: each sample now owns its copy.".into(),
+                        Err(e) => e,
+                    };
+                }
+                if ui.button("Delete from group…").clicked() {
+                    ui.close_menu();
+                    self.dlg.group_delete = Some((si, node));
+                }
             }
             let inverted = gate.as_ref().map_or(false, |g| g.invert);
             if ui.add_enabled(gate.is_some(), egui::Button::new(if inverted { "Clear exclusion gate" } else { "Set as exclusion gate" })).clicked() {
@@ -412,6 +446,7 @@ impl App {
     }
 
     pub(crate) fn context_dialogs(&mut self, ctx: &egui::Context) {
+        self.group_dialogs(ctx);
         // colour
         if let Some((si, node, mut c)) = self.dlg.color {
             let mut open = true;
@@ -585,3 +620,328 @@ impl App {
     }
 }
 
+/// The group manager window's state.
+#[derive(Default)]
+pub struct GroupMgr {
+    pub open: bool,
+    /// The group being viewed or edited (`None` while making a new one).
+    pub sel: Option<String>,
+    pub creating: bool,
+    pub name: String,
+    pub members: Vec<bool>,
+    pub color: [u8; 3],
+    pub synced: bool,
+    pub keyword: String,
+    pub msg: String,
+    pub del_mode: usize,
+}
+
+impl GroupMgr {
+    pub(super) fn load(&mut self, s: &crate::session::Session, name: &str) {
+        self.sel = Some(name.to_string());
+        self.creating = false;
+        self.name = name.to_string();
+        let idx = s.member_indices(name);
+        self.members = (0..s.samples().len()).map(|i| idx.contains(&i)).collect();
+        match s.group(name) {
+            Some(g) => {
+                self.color = g.color;
+                self.synced = g.synced;
+            }
+            None => {
+                self.color = [0x80, 0x80, 0x80];
+                self.synced = s.all_synced;
+            }
+        }
+    }
+}
+
+impl App {
+    // ---- group actions ----------------------------------------------------------------------------
+
+    /// Close every right-click dialog and the group manager (screenshots).
+    pub fn close_dialogs(&mut self) {
+        self.dlg = Dialogs::default();
+    }
+
+    /// Open the group manager showing one group.
+    pub fn open_group_manager(&mut self, group: &str) {
+        self.dlg.mgr.open = true;
+        let name = if group == ALL_SAMPLES || self.session.group(group).is_some() { group } else { ALL_SAMPLES };
+        let sess = &self.session;
+        self.dlg.mgr.load(sess, name);
+    }
+
+    pub fn gate_apply_group(&mut self, si: usize, node: NodeId, group: &str) {
+        let name = self.session.tree(si).name(node).unwrap_or("population").to_string();
+        self.status = match self.session.apply_to_group(si, node, group) {
+            Ok(n) => format!("'{name}' now belongs to {group}: applied to {n} other sample(s). Editing it in one sample marks that sample's copy as edited."),
+            Err(e) => e,
+        };
+    }
+
+    /// The next sample (`dir` = +1 / -1) that is in the current group, if there is one.
+    pub fn step_sample(&self, sample: usize, dir: i32) -> Option<usize> {
+        let members = self.ws.cur_group.as_deref().map(|g| self.session.member_indices(g));
+        let n = self.session.samples().len() as i64;
+        let mut i = sample as i64 + dir as i64;
+        while i >= 0 && i < n {
+            if members.as_ref().map_or(true, |m| m.contains(&(i as usize))) {
+                return Some(i as usize);
+            }
+            i += dir as i64;
+        }
+        None
+    }
+
+    /// The "Apply gate → group" submenu: All Samples and every group the sample is in.
+    pub(super) fn apply_group_menu(&mut self, ui: &mut egui::Ui, si: usize, node: NodeId) {
+        let mut pick: Option<String> = None;
+        if ui.button(ALL_SAMPLES).clicked() {
+            pick = Some(ALL_SAMPLES.to_string());
+        }
+        for g in self.session.groups_of(si) {
+            if ui.button(&g).clicked() {
+                pick = Some(g);
+            }
+        }
+        if let Some(g) = pick {
+            ui.close_menu();
+            self.gate_apply_group(si, node, &g);
+        }
+    }
+
+    /// Where a newly drawn gate goes: this sample only, All Samples, or a group.
+    pub(super) fn draw_target_combo(&mut self, ui: &mut egui::Ui) {
+        let cur = self.session.draw_target.clone();
+        let label = match &cur {
+            DrawTarget::ThisSample => "this sample only".to_string(),
+            DrawTarget::Group(g) => g.clone(),
+        };
+        egui::ComboBox::from_id_salt("draw_target").width(150.0).selected_text(format!("New gates: {label}")).show_ui(ui, |ui| {
+            if ui.selectable_label(cur == DrawTarget::ThisSample, "This sample only").clicked() {
+                self.session.draw_target = DrawTarget::ThisSample;
+            }
+            let all = DrawTarget::Group(ALL_SAMPLES.to_string());
+            if ui.selectable_label(cur == all, ALL_SAMPLES).on_hover_text("A gate drawn in one sample appears in every sample").clicked() {
+                self.session.draw_target = all;
+            }
+            for g in self.session.groups.clone() {
+                let t = DrawTarget::Group(g.name.clone());
+                if ui.selectable_label(cur == t, &g.name).clicked() {
+                    self.session.draw_target = t;
+                }
+            }
+        })
+        .response
+        .on_hover_text("Gates owned by a group are the same gate in every member sample. Editing one in a single sample marks it as edited; synchronized groups move together.");
+    }
+
+    pub(crate) fn group_dialogs(&mut self, ctx: &egui::Context) {
+        // delete a group-owned gate
+        if let Some((si, node)) = self.dlg.group_delete {
+            let mut open = true;
+            let mut choice: Option<GroupDelete> = None;
+            let owner = self.session.gate_owner(si, node);
+            let name = self.session.tree(si).name(node).unwrap_or("gate").to_string();
+            egui::Window::new("Delete group gate?").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                let g = owner.as_ref().map_or("a group".to_string(), |o| o.group.clone());
+                ui.label(format!("'{name}' is shared by the samples of '{g}'."));
+                theme::caption(ui, "Choose what happens to the copies:");
+                if ui.button("Delete from every sample").on_hover_text("Removes all copies, except in samples where it was edited").clicked() {
+                    choice = Some(GroupDelete::Entirely);
+                }
+                if ui.button("Keep only in the first sample").on_hover_text("Removes it from the other samples and leaves one copy").clicked() {
+                    choice = Some(GroupDelete::KeepInFirstSample);
+                }
+                if ui.button("Give a copy to each sample").on_hover_text("The group stops owning it; every sample keeps its own gate").clicked() {
+                    choice = Some(GroupDelete::ToSamples);
+                }
+            });
+            match choice {
+                Some(mode) => {
+                    self.status = match self.session.delete_from_group(si, node, mode) {
+                        Ok(n) => match mode {
+                            GroupDelete::ToSamples => format!("'{name}' is no longer shared; every sample keeps its own copy."),
+                            _ => format!("Removed {n} copy(ies) of '{name}'. Ctrl+Z undoes it in the current sample."),
+                        },
+                        Err(e) => e,
+                    };
+                    self.dlg.group_delete = None;
+                }
+                None if !open => self.dlg.group_delete = None,
+                None => {}
+            }
+        }
+        self.group_manager(ctx);
+    }
+
+    fn group_manager(&mut self, ctx: &egui::Context) {
+        if !self.dlg.mgr.open {
+            return;
+        }
+        let mut open = true;
+        let n = self.session.samples().len();
+        if self.dlg.mgr.members.len() != n {
+            self.dlg.mgr.members.resize(n, false);
+        }
+        let mut keywords: Vec<String> = self.session.samples().iter().flat_map(|s| s.keywords.keys().cloned()).filter(|k| !k.starts_with("$P") && !k.starts_with("$BEGIN") && !k.starts_with("$END")).collect();
+        keywords.sort();
+        keywords.dedup();
+        let names: Vec<String> = self.session.samples().iter().map(|s| s.name.clone()).collect();
+        let mut mgr = std::mem::take(&mut self.dlg.mgr);
+        egui::Window::new("Groups").open(&mut open).default_size([700.0, 480.0]).show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(210.0);
+                    ui.label(RichText::new("Groups").strong());
+                    let mut load: Option<String> = None;
+                    let all_label = format!("{ALL_SAMPLES}  ({n})");
+                    if ui.selectable_label(mgr.sel.as_deref() == Some(ALL_SAMPLES) && !mgr.creating, all_label).clicked() {
+                        load = Some(ALL_SAMPLES.to_string());
+                    }
+                    for g in &self.session.groups {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 2.0, Color32::from_rgb(g.color[0], g.color[1], g.color[2]));
+                            let cur = self.ws.cur_group.as_deref() == Some(g.name.as_str());
+                            let text = format!("{}  ({}){}", g.name, g.members.len(), if cur { "  ◀ current" } else { "" });
+                            if ui.selectable_label(mgr.sel.as_deref() == Some(g.name.as_str()) && !mgr.creating, text).clicked() {
+                                load = Some(g.name.clone());
+                            }
+                        });
+                    }
+                    if let Some(g) = load {
+                        mgr.load(&self.session, &g);
+                    }
+                    ui.separator();
+                    if ui.button("＋ New group…").clicked() {
+                        mgr.creating = true;
+                        mgr.sel = None;
+                        mgr.name = format!("Group {}", self.session.groups.len() + 1);
+                        mgr.members = vec![false; n];
+                        mgr.color = [0x1F, 0x6F, 0xEB];
+                        mgr.synced = false;
+                    }
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("From a keyword").size(12.0).color(theme::MUTED));
+                    egui::ComboBox::from_id_salt("grp_kw").width(190.0).selected_text(if mgr.keyword.is_empty() { "Choose keyword…".to_string() } else { mgr.keyword.clone() }).show_ui(ui, |ui| {
+                        for k in &keywords {
+                            ui.selectable_value(&mut mgr.keyword, k.clone(), k);
+                        }
+                    });
+                    if ui.add_enabled(!mgr.keyword.is_empty(), egui::Button::new("One group per value")).on_hover_text("Makes a group for each distinct value of the keyword").clicked() {
+                        mgr.msg = match self.session.groups_from_keyword(&mgr.keyword) {
+                            Ok(made) => format!("Made {} group(s): {}", made.len(), made.join(", ")),
+                            Err(e) => e,
+                        };
+                    }
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    let is_all = mgr.sel.as_deref() == Some(ALL_SAMPLES) && !mgr.creating;
+                    if mgr.sel.is_none() && !mgr.creating {
+                        theme::caption(ui, "Choose a group, or make a new one.");
+                    } else if is_all {
+                        theme::caption(ui, "All Samples holds every loaded sample. It cannot be edited or deleted.");
+                        if ui.checkbox(&mut mgr.synced, "Synchronized").on_hover_text("Gates owned by All Samples move together in every sample").changed() {
+                            self.session.all_synced = mgr.synced;
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.text_edit_singleline(&mut mgr.name);
+                            ui.color_edit_button_srgb(&mut mgr.color).on_hover_text("Tint of the gates this group owns");
+                        });
+                        ui.checkbox(&mut mgr.synced, "Synchronized").on_hover_text("When a gate this group owns is moved in one sample, every other sample's copy moves too");
+                    }
+                    if mgr.sel.is_some() || mgr.creating {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Samples").strong());
+                            if !is_all {
+                                if ui.small_button("All").clicked() {
+                                    mgr.members.iter_mut().for_each(|m| *m = true);
+                                }
+                                if ui.small_button("None").clicked() {
+                                    mgr.members.iter_mut().for_each(|m| *m = false);
+                                }
+                                if let Some(c) = Some(self.ws.tree_sample).filter(|c| *c < n) {
+                                    if ui.small_button("This sample").clicked() {
+                                        mgr.members[c] = true;
+                                    }
+                                }
+                            }
+                        });
+                        egui::ScrollArea::vertical().id_salt("grp_members").max_height(230.0).show(ui, |ui| {
+                            for (i, nm) in names.iter().enumerate() {
+                                ui.add_enabled(!is_all, egui::Checkbox::new(&mut mgr.members[i], nm));
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if mgr.creating {
+                                if ui.button(RichText::new("Create group").strong()).clicked() {
+                                    let idx: Vec<usize> = (0..n).filter(|&i| mgr.members[i]).collect();
+                                    match self.session.create_group(&mgr.name, &idx) {
+                                        Ok(()) => {
+                                            let nm = mgr.name.trim().to_string();
+                                            let (c, sy) = (mgr.color, mgr.synced);
+                                            let _ = self.session.modify_group(&nm, &nm, &idx, c, sy);
+                                            mgr.load(&self.session, &nm);
+                                            mgr.msg = format!("Created '{nm}' with {} sample(s).", idx.len());
+                                        }
+                                        Err(e) => mgr.msg = e,
+                                    }
+                                }
+                            } else if !is_all {
+                                let old = mgr.sel.clone().unwrap_or_default();
+                                if ui.button(RichText::new("Apply changes").strong()).clicked() {
+                                    let idx: Vec<usize> = (0..n).filter(|&i| mgr.members[i]).collect();
+                                    match self.session.modify_group(&old, &mgr.name, &idx, mgr.color, mgr.synced) {
+                                        Ok(()) => {
+                                            let nm = mgr.name.trim().to_string();
+                                            if self.ws.cur_group.as_deref() == Some(old.as_str()) {
+                                                self.ws.cur_group = Some(nm.clone());
+                                            }
+                                            mgr.load(&self.session, &nm);
+                                            mgr.msg = format!("Saved '{nm}'.");
+                                        }
+                                        Err(e) => mgr.msg = e,
+                                    }
+                                }
+                                let cur = self.ws.cur_group.as_deref() == Some(old.as_str());
+                                if ui.button(if cur { "Stop using as current group" } else { "Use as current group" }).on_hover_text("Arrow keys and the sample arrows step through this group's samples; layouts and group export start from it").clicked() {
+                                    self.ws.cur_group = if cur { None } else { Some(old.clone()) };
+                                }
+                                let owns = self.session.applied.iter().filter(|a| a.group == old).count();
+                                egui::ComboBox::from_id_salt("grp_del_mode").width(190.0).selected_text(["Delete its gates from the samples", "Keep its gates in the first sample", "Give its gates to the samples"][mgr.del_mode.min(2)]).show_ui(ui, |ui| {
+                                    for (i, t) in ["Delete its gates from the samples", "Keep its gates in the first sample", "Give its gates to the samples"].iter().enumerate() {
+                                        ui.selectable_value(&mut mgr.del_mode, i, *t);
+                                    }
+                                });
+                                if ui.button(RichText::new(format!("Delete group ({owns} gate(s))")).color(theme::GATE_RED)).clicked() {
+                                    let mode = [GroupDelete::Entirely, GroupDelete::KeepInFirstSample, GroupDelete::ToSamples][mgr.del_mode.min(2)];
+                                    mgr.msg = match self.session.delete_group(&old, mode) {
+                                        Ok(k) => format!("Deleted '{old}' ({k} gate copies removed)."),
+                                        Err(e) => e,
+                                    };
+                                    if self.ws.cur_group.as_deref() == Some(old.as_str()) {
+                                        self.ws.cur_group = None;
+                                    }
+                                    mgr.sel = None;
+                                }
+                            }
+                        });
+                    }
+                    if !mgr.msg.is_empty() {
+                        ui.add_space(4.0);
+                        theme::caption(ui, mgr.msg.clone());
+                    }
+                });
+            });
+        });
+        mgr.open = open;
+        self.dlg.mgr = mgr;
+    }
+}

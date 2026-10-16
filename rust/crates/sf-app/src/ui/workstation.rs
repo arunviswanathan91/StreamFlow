@@ -29,6 +29,8 @@ pub struct State {
     pub overview_y: String,
     /// Percentile used when an FMO control sets its reference level.
     pub fmo_pct: f64,
+    /// The group whose samples the arrow keys and sample arrows step through (None = every sample).
+    pub cur_group: Option<String>,
     /// The gate copied with "Copy gate" (and the name it had).
     pub gate_clip: Option<(sf_gating::Gate, String)>,
     /// Colour chosen for a gate's outline on plots; absent = the window's gate colour.
@@ -53,6 +55,7 @@ impl Default for State {
             overview_x: String::new(),
             overview_y: String::new(),
             fmo_pct: 95.0,
+            cur_group: None,
             gate_clip: None,
             gate_colors: HashMap::new(),
             gate_stats: HashMap::new(),
@@ -69,6 +72,7 @@ impl State {
         self.graphs.clear();
         self.collapsed.clear();
         self.gate_colors.clear();
+        self.cur_group = None;
         self.gate_stats.clear();
         self.stat_cache.clear();
         self.rename = None;
@@ -127,6 +131,10 @@ impl App {
                 }
                 if ui.add(egui::Button::new("＋ FCS")).on_hover_text("Load FCS files (Ctrl+O)").clicked() {
                     self.open_fcs();
+                }
+                if ui.add(egui::Button::new("◈ Groups")).on_hover_text("Make and edit sample groups; gates applied to a group are the same gate in every member").clicked() {
+                    let name = self.ws.cur_group.clone().unwrap_or_else(|| crate::session::ALL_SAMPLES.to_string());
+                    self.open_group_manager(&name);
                 }
             });
         });
@@ -252,7 +260,19 @@ impl App {
                 return;
             }
         }
-        ui.painter().text(egui::pos2(x0 + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, egui::FontId::proportional(13.0), name_color);
+        let marker = match self.session.gate_owner(si, node) {
+            Some(o) if o.edited => " ✎",
+            Some(_) => " ◈",
+            None => "",
+        };
+        let shown = format!("{name}{marker}");
+        let galley = ui.painter().text(egui::pos2(x0 + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, &shown, egui::FontId::proportional(13.0), name_color);
+        if !marker.is_empty() {
+            if let Some(o) = self.session.gate_owner(si, node) {
+                resp.clone().on_hover_text(if o.edited { format!("Owned by {}; this sample's copy has been edited since", o.group) } else { format!("Owned by {}: the same gate in each member sample", o.group) });
+            }
+        }
+        let _ = galley;
         let right = format!("{count}   {:.1}%", 100.0 * count as f64 / parent_count as f64);
         ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, right, egui::FontId::monospace(11.5), theme::MUTED);
         if resp.clicked() {
@@ -275,13 +295,7 @@ impl App {
                     ui.close_menu();
                     self.ws.rename = Some((si, node, name.clone()));
                 }
-                if ui.button("Apply gate to all samples").clicked() {
-                    ui.close_menu();
-                    self.status = match self.session.apply_to_all(si, node) {
-                        Ok(n) => format!("Applied '{name}' to {n} other sample(s)."),
-                        Err(e) => e,
-                    };
-                }
+                ui.menu_button("Apply gate → group", |ui| self.apply_group_menu(ui, si, node));
             }
             self.tree_menu_items(ui, si, node);
             if node != GateTree::ROOT {
