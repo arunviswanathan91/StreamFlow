@@ -225,13 +225,13 @@ impl App {
         self.graph_shortcuts(ctx, id, &w);
         let w = self.session.window(id).cloned().unwrap_or(w);
 
-        egui::TopBottomPanel::top("g_tools").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
-        egui::TopBottomPanel::top("g_crumb").frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 4.0))).show_inside(ui, |ui| self.breadcrumb(ui, id, &w));
-        egui::TopBottomPanel::bottom("g_hint").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
+        egui::TopBottomPanel::top(egui::Id::new(("g_tools", id))).frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
+        egui::TopBottomPanel::top(egui::Id::new(("g_crumb", id))).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 4.0))).show_inside(ui, |ui| self.breadcrumb(ui, id, &w));
+        egui::TopBottomPanel::bottom(egui::Id::new(("g_hint", id))).frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
             ui.add(egui::Label::new(RichText::new("P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan").size(11.0).color(theme::MUTED)).truncate());
         });
         let strip_open = self.ws.graphs.get(&id).map_or(false, |g| g.strip_open);
-        egui::TopBottomPanel::bottom("g_strip").resizable(false).exact_height(236.0).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_animated_inside(ui, strip_open, |ui| self.compare_strip(ui, ctx, id, &w));
+        egui::TopBottomPanel::bottom(egui::Id::new(("g_strip", id))).resizable(false).exact_height(236.0).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_animated_inside(ui, strip_open, |ui| self.compare_strip(ui, ctx, id, &w));
         let open = self.ws.options_open;
         if open {
             // floats over the right edge instead of taking width from the plot, so showing it never reshapes the graph
@@ -240,7 +240,7 @@ impl App {
             egui::Area::new(egui::Id::new(("g_opts", id))).order(egui::Order::Middle).fixed_pos(Pos2::new((r.right() - width - 24.0).max(r.left()), r.top() + 6.0)).show(ui.ctx(), |ui| {
                 egui::Frame::none().fill(theme::PANEL_2).rounding(8.0).stroke(Stroke::new(1.0_f32, Color32::from_gray(70))).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
                     ui.set_width(width);
-                    egui::ScrollArea::vertical().id_salt(("g_opts_scroll", id)).max_height((r.height() - 36.0).max(160.0)).show(ui, |ui| self.graph_options(ui, id, &w));
+                    self.graph_options(ui, id, &w);
                 });
             });
         }
@@ -443,6 +443,14 @@ impl App {
             if theme::toggle(ui, self.ws.options_open, "⚙ Options").clicked() {
                 self.ws.options_open = !self.ws.options_open;
             }
+            let det = self.ws.detached.contains(&id);
+            if theme::toggle(ui, det, "⧉ Detach").on_hover_text("Open this graph in its own window; click again to bring it back").clicked() {
+                if det {
+                    self.ws.detached.remove(&id);
+                } else {
+                    self.ws.detached.insert(id);
+                }
+            }
         }));
     }
 
@@ -474,7 +482,7 @@ impl App {
     }
 
     fn graph_options(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        {
             ui.label(RichText::new("Plot options").strong().size(15.0));
             ui.add_space(4.0);
             egui::CollapsingHeader::new("Population").default_open(true).show(ui, |ui| {
@@ -620,7 +628,7 @@ impl App {
                     }
                 }
             });
-        });
+        }
     }
 
     fn graph_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, id: u64) {

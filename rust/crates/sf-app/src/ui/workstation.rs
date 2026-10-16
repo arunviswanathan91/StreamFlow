@@ -19,6 +19,8 @@ pub enum Tab {
 pub struct State {
     pub pops_open: bool,
     pub options_open: bool,
+    /// Graph windows shown in their own floating window instead of a tab.
+    pub detached: HashSet<u64>,
     pub tab: Tab,
     pub graphs: HashMap<u64, GraphUi>,
     pub collapsed: HashSet<(usize, NodeId)>,
@@ -46,6 +48,7 @@ impl Default for State {
         State {
             pops_open: true,
             options_open: false,
+            detached: HashSet::new(),
             tab: Tab::Overview,
             graphs: HashMap::new(),
             collapsed: HashSet::new(),
@@ -115,9 +118,37 @@ impl App {
             self.tab_strip(ui);
             match self.ws.tab {
                 Tab::Overview => self.overview(ui, ctx),
+                Tab::Graph(id) if self.ws.detached.contains(&id) => {
+                    ui.add_space(40.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("This graph is open in its own window.").color(theme::MUTED));
+                        if ui.button("Bring it back into the tab").clicked() {
+                            self.ws.detached.remove(&id);
+                        }
+                    });
+                }
                 Tab::Graph(id) => self.graph_tab(ui, ctx, id),
             }
         });
+        self.detached_graphs(ctx);
+    }
+
+    /// Every detached graph in a floating window of its own, as in the old app.
+    fn detached_graphs(&mut self, ctx: &egui::Context) {
+        let ids: Vec<u64> = self.ws.detached.iter().copied().collect();
+        for id in ids {
+            let Some(w) = self.session.window(id).cloned() else {
+                self.ws.detached.remove(&id);
+                continue;
+            };
+            let pop = self.session.breadcrumb(w.sample, w.node).last().map(|b| b.0.clone()).unwrap_or_default();
+            let title = format!("{} — {}", self.session.samples()[w.sample].name.trim_end_matches(".fcs"), pop);
+            let mut open = true;
+            egui::Window::new(title).id(egui::Id::new(("g_detached", id))).open(&mut open).resizable(true).collapsible(false).default_size([780.0, 640.0]).default_pos([200.0, 80.0]).show(ctx, |ui| self.graph_tab(ui, ctx, id));
+            if !open {
+                self.ws.detached.remove(&id);
+            }
+        }
     }
 
     // ---- populations panel ------------------------------------------------------------------------

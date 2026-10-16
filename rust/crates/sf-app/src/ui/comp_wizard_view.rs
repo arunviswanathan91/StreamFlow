@@ -4,7 +4,7 @@
 
 use super::{theme, App};
 use crate::comp_auto::{detector_from_name, detector_from_signal};
-use crate::comp_wizard::{auto_cut, clean_mask_for, compensated_pair, compute, CleanMode, ControlSetup, Method, NegSource, Options, SplitMethod, WizardResult};
+use crate::comp_wizard::{auto_cut, compensated_pair, compute, control_mask, square_csv, CleanMode, ControlSetup, Method, NegSource, Options, SplitMethod, WizardResult};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke};
 
 #[derive(Clone, Default)]
@@ -12,6 +12,16 @@ pub struct WizRow {
     pub detector: Option<String>,
     /// (negative up to, positive from), when set by hand.
     pub manual: Option<(f64, f64)>,
+    /// This control's own negative (None = the wizard-wide choice).
+    pub neg: Option<NegSource>,
+    /// A scatter gate drawn by hand: FSC low, high, SSC low, high (raw units).
+    pub scatter: Option<[f64; 4]>,
+}
+
+impl WizRow {
+    pub fn edited(&self) -> bool {
+        self.manual.is_some() || self.neg.is_some() || self.scatter.is_some()
+    }
 }
 
 pub struct WizState {
@@ -25,6 +35,8 @@ pub struct WizState {
     pub result: Option<Result<WizardResult, String>>,
     pub inspect: Option<usize>,
     pub show: Tab,
+    /// Share of the calculated compensation shown in the before/after plots (1 = the matrix as calculated).
+    pub strength: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,7 +48,7 @@ pub enum Tab {
 
 impl Default for WizState {
     fn default() -> Self {
-        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary }
+        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary, strength: 1.0 }
     }
 }
 
@@ -70,7 +82,7 @@ impl App {
         let dets = super::comp_view::fluor_detectors(self.session.sample(0).base_channels());
         let w = &mut self.comp.wiz;
         if w.rows.len() != n {
-            w.rows = (0..n).map(|i| WizRow { detector: detector_from_name(&self.session.samples()[i].name, &dets), manual: None }).collect();
+            w.rows = (0..n).map(|i| WizRow { detector: detector_from_name(&self.session.samples()[i].name, &dets), ..Default::default() }).collect();
             w.unstained = (0..n).find(|&i| {
                 let nm = self.session.samples()[i].name.to_ascii_lowercase();
                 nm.contains("unstain") || nm.contains("negative") || nm.contains("blank")
@@ -89,7 +101,7 @@ impl App {
     }
 
     fn wiz_setups(&self) -> Vec<ControlSetup> {
-        self.comp.wiz.rows.iter().enumerate().filter_map(|(i, r)| r.detector.clone().map(|d| ControlSetup { sample: i, detector: d, manual: r.manual })).collect()
+        self.comp.wiz.rows.iter().enumerate().filter_map(|(i, r)| r.detector.clone().map(|d| ControlSetup { sample: i, detector: d, manual: r.manual, neg: r.neg, scatter: r.scatter })).collect()
     }
 
     /// Calculate with the wizard's current choices.
@@ -130,6 +142,7 @@ impl App {
         let mut wiz = std::mem::take(&mut self.comp.wiz);
         let mut open = true;
         let (mut calc, mut use_it, mut inspect_click) = (false, false, None::<usize>);
+        let mut export_msg: Option<String> = None;
         let max_h = (ctx.screen_rect().height() - 90.0).max(300.0);
         egui::Window::new("Compensation wizard").open(&mut open).collapsible(false).resizable(true).default_size([960.0, max_h.min(640.0)]).max_height(max_h).default_pos([140.0, 50.0]).show(ctx, |ui| egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             theme::caption(ui, "Assign each single-stain control to the detector it stains, optionally an unstained tube, choose how the matrix is calculated, and check the result before using it.");
@@ -151,20 +164,18 @@ impl App {
                                 let cur = wiz.rows[i].detector.clone().unwrap_or_else(|| "—".into());
                                 egui::ComboBox::from_id_salt(("wiz_det", i)).width(110.0).selected_text(cur).show_ui(ui, |ui| {
                                     if ui.selectable_label(wiz.rows[i].detector.is_none(), "—").clicked() {
-                                        wiz.rows[i].detector = None;
-                                        wiz.rows[i].manual = None;
+                                        wiz.rows[i] = WizRow::default();
                                     }
                                     for d in &dets {
                                         if ui.selectable_label(wiz.rows[i].detector.as_deref() == Some(d.as_str()), d).clicked() {
-                                            wiz.rows[i].detector = Some(d.clone());
-                                            wiz.rows[i].manual = None;
+                                            wiz.rows[i] = WizRow { detector: Some(d.clone()), ..Default::default() };
                                         }
                                     }
                                 });
                                 let status = match (&wiz.result, wiz.rows[i].detector.as_ref()) {
                                     (Some(Ok(r)), Some(_)) => r.reports.iter().find(|c| c.sample == i).map(|c| {
                                         let mut t = format!("{} | {}", c.n_neg, c.n_pos);
-                                        if wiz.rows[i].manual.is_some() {
+                                        if wiz.rows[i].edited() {
                                             t += "  (manual)";
                                         }
                                         (t, c.badges.iter().any(|b| b.blocks()), !c.badges.is_empty())
@@ -185,9 +196,21 @@ impl App {
                                         ui.label("");
                                     }
                                 }
-                                if ui.add_enabled(wiz.rows[i].detector.is_some(), egui::Button::new("Inspect…").small()).on_hover_text("Open this control: see the negative and positive events and move the limits").clicked() {
-                                    inspect_click = Some(i);
-                                }
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(wiz.rows[i].detector.is_some(), egui::Button::new("Inspect…").small()).on_hover_text("Open this control: see the negative and positive events, move the limits, draw the scatter gate, choose its negative").clicked() {
+                                        inspect_click = Some(i);
+                                    }
+                                    if ui.add_enabled(wiz.rows[i].edited(), egui::Button::new("↺").small()).on_hover_text("Reset this control to the automatic limits, gate and negative").clicked() {
+                                        wiz.rows[i].manual = None;
+                                        wiz.rows[i].neg = None;
+                                        wiz.rows[i].scatter = None;
+                                    }
+                                    let guess = detector_from_name(&self.session.samples()[i].name, &dets);
+                                    if wiz.rows[i].detector.is_some() && guess != wiz.rows[i].detector {
+                                        let tip = if guess.is_some() { "The file name looks like a different detector. Check that this is the right control." } else { "The file name does not mention this detector. Are you sure this is the right control?" };
+                                        ui.label(RichText::new("⚠").color(theme::WARN)).on_hover_text(tip);
+                                    }
+                                });
                                 ui.end_row();
                             }
                         });
@@ -195,18 +218,34 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui.small_button("Guess from file names").clicked() {
                             for i in 0..n {
-                                wiz.rows[i] = WizRow { detector: detector_from_name(&self.session.samples()[i].name, &dets), manual: None };
+                                wiz.rows[i] = WizRow { detector: detector_from_name(&self.session.samples()[i].name, &dets), ..Default::default() };
                             }
                         }
                         if ui.small_button("Guess from signal").on_hover_text("The detector that is brightest in each file").clicked() {
                             for i in 0..n {
                                 if wiz.rows[i].detector.is_none() {
-                                    wiz.rows[i] = WizRow { detector: detector_from_signal(self.session.sample(i), &dets), manual: None };
+                                    wiz.rows[i] = WizRow { detector: detector_from_signal(self.session.sample(i), &dets), ..Default::default() };
                                 }
                             }
                         }
                         if ui.small_button("Clear all").clicked() {
                             wiz.rows.iter_mut().for_each(|r| *r = WizRow::default());
+                        }
+                        if ui.small_button("Reset all edits").on_hover_text("Recalculate every control automatically: any limits, scatter gates and negatives set by hand are lost").clicked() {
+                            wiz.rows.iter_mut().for_each(|r| {
+                                r.manual = None;
+                                r.neg = None;
+                                r.scatter = None;
+                            });
+                        }
+                        if ui.small_button("Remove unusable").on_hover_text("Unassign controls found to have no usable positive or negative population").clicked() {
+                            let bad: Vec<usize> = match &wiz.result {
+                                Some(Ok(res)) => res.reports.iter().filter(|c| c.badges.iter().any(|b| b.blocks())).map(|c| c.sample).collect(),
+                                _ => vec![],
+                            };
+                            for i in bad {
+                                wiz.rows[i] = WizRow::default();
+                            }
                         }
                     });
                 });
@@ -285,6 +324,21 @@ impl App {
                         ui.selectable_value(&mut wiz.show, Tab::Summary, "Summary");
                         ui.selectable_value(&mut wiz.show, Tab::Spread, "Spillover spreading");
                         ui.selectable_value(&mut wiz.show, Tab::Cosine, "Signature similarity");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (what, text) = match wiz.show {
+                                Tab::Spread => ("spillover_spreading.csv", square_csv(&r.matrix.detectors, &r.spread)),
+                                Tab::Cosine => ("signature_similarity.csv", square_csv(&r.matrix.detectors, &r.cosine)),
+                                Tab::Summary => ("spillover.csv", square_csv(&r.matrix.detectors, &r.matrix.spill)),
+                            };
+                            if ui.small_button("Export CSV…").clicked() {
+                                if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(what).save_file() {
+                                    export_msg = Some(match std::fs::write(&p, text) {
+                                        Ok(()) => format!("Saved {}", p.display()),
+                                        Err(e) => format!("Could not save: {e}"),
+                                    });
+                                }
+                            }
+                        });
                     });
                     match wiz.show {
                         Tab::Summary => result_summary(ui, r, &self.session),
@@ -296,6 +350,9 @@ impl App {
         }));
         if let Some(i) = inspect_click {
             wiz.inspect = Some(i);
+        }
+        if let Some(m) = export_msg {
+            self.status = m;
         }
         self.comp.wiz = wiz;
         if calc {
@@ -334,7 +391,7 @@ impl App {
                 return;
             };
             let d = s.channels.len();
-            let keep = clean_mask_for(s, if wiz.clean_on { CleanMode::Dominant(wiz.clean_frac) } else { CleanMode::Off }, Some(ci));
+            let keep = control_mask(s, if wiz.clean_on { CleanMode::Dominant(wiz.clean_frac) } else { CleanMode::Off }, Some(ci), wiz.rows[si].scatter);
             let vals: Vec<f64> = (0..s.n_events).filter(|&r| keep[r]).map(|r| s.events[r * d + ci] as f64).collect();
             let all: Vec<f64> = (0..s.n_events).map(|r| s.events[r * d + ci] as f64).collect();
             let auto = auto_cut(&vals, wiz.opt.split);
@@ -421,40 +478,85 @@ impl App {
                     theme::caption(ui, "black line: the unstained tube");
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label("Negative for this control");
+                let cur = match wiz.rows[si].neg {
+                    None => "same as the wizard".to_string(),
+                    Some(NegSource::Own) => "its own negative events".into(),
+                    Some(NegSource::TrueZero) => "true zero".into(),
+                    Some(NegSource::Unstained(u)) => format!("unstained: {}", self.session.samples()[u].name.trim_end_matches(".fcs")),
+                };
+                egui::ComboBox::from_id_salt("wiz_row_neg").width(220.0).selected_text(cur).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut wiz.rows[si].neg, None, "same as the wizard");
+                    ui.selectable_value(&mut wiz.rows[si].neg, Some(NegSource::Own), "its own negative events");
+                    ui.selectable_value(&mut wiz.rows[si].neg, Some(NegSource::TrueZero), "true zero");
+                    for u in (0..self.session.samples().len()).filter(|&u| u != si) {
+                        ui.selectable_value(&mut wiz.rows[si].neg, Some(NegSource::Unstained(u)), format!("unstained: {}", self.session.samples()[u].name.trim_end_matches(".fcs")));
+                    }
+                });
+            });
             ui.separator();
             // ---- scatter clean-up
-            ui.label(RichText::new("Scatter clean-up").strong().size(12.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Scatter clean-up").strong().size(12.0));
+                theme::caption(ui, "drag on the plot to draw your own gate");
+                if ui.add_enabled(wiz.rows[si].scatter.is_some(), egui::Button::new("Automatic").small()).clicked() {
+                    wiz.rows[si].scatter = None;
+                }
+            });
             let fsc = s.channels.iter().position(|c| c.to_ascii_uppercase() == "FSC-A");
             let ssc = s.channels.iter().position(|c| c.to_ascii_uppercase() == "SSC-A");
             ui.horizontal(|ui| {
                 if let (Some(f), Some(sc)) = (fsc, ssc) {
                     let pts: Vec<(f32, f32, bool)> = (0..s.n_events).step_by((s.n_events / 4000).max(1)).map(|r| (s.events[r * d + f], s.events[r * d + sc], keep[r])).collect();
-                    mini_scatter(ui, &pts, [(0.0, s.ranges[f] as f32), (0.0, s.ranges[sc] as f32)], "FSC-A", "SSC-A");
+                    mini_scatter(ui, &pts, [(0.0, s.ranges[f] as f32), (0.0, s.ranges[sc] as f32)], "FSC-A", "SSC-A", Some(&mut wiz.rows[si].scatter));
                 } else {
                     theme::caption(ui, "This file has no FSC-A / SSC-A channels, so there is nothing to clean up.");
                 }
                 // ---- before and after
                 if let Some(Ok(r)) = &wiz.result {
+                    let scaled = {
+                        let mut m = r.matrix.clone();
+                        let k = m.detectors.len();
+                        for a in 0..k {
+                            for b in 0..k {
+                                if a != b {
+                                    m.spill[a * k + b] *= wiz.strength;
+                                }
+                            }
+                        }
+                        m
+                    };
                     let other = strongest_spill(r, &det);
                     if let Some(o) = other {
                         let step = (s.n_events / 4000).max(1);
-                        if let Ok((cx, cy)) = compensated_pair(s, &r.matrix, &det, &o) {
+                        if let Ok((cx, cy)) = compensated_pair(s, &scaled, &det, &o) {
                             let raw: Vec<(f32, f32, bool)> = (0..s.n_events).step_by(step).map(|r| (z_of(s.events[r * d + ci] as f64) as f32, z_of(s.channel_index(&o).map_or(0.0, |c| s.events[r * d + c] as f64)) as f32, true)).collect();
                             let step2 = (cx.len() / 4000).max(1);
                             let after: Vec<(f32, f32, bool)> = (0..cx.len()).step_by(step2).map(|i| (z_of(cx[i]) as f32, z_of(cy[i]) as f32, true)).collect();
                             let rng = [(z_of(-500.0) as f32, zhi as f32), (z_of(-500.0) as f32, zhi as f32)];
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(format!("{det} vs {o}: before").to_string()).size(11.0));
-                                mini_scatter(ui, &raw, rng, &det, &o);
+                                mini_scatter(ui, &raw, rng, &det, &o, None);
                             });
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("after compensation").size(11.0));
-                                mini_scatter(ui, &after, rng, &det, &o);
+                                ui.label(RichText::new(format!("after compensation ({:.0}%)", wiz.strength * 100.0)).size(11.0));
+                                mini_scatter(ui, &after, rng, &det, &o, None);
                             });
                         }
                     }
                 }
             });
+            if matches!(wiz.result, Some(Ok(_))) {
+                ui.horizontal(|ui| {
+                    ui.label("Compensation applied");
+                    ui.add(egui::Slider::new(&mut wiz.strength, 0.0..=3.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)).custom_parser(|t| t.trim().trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0)));
+                    if ui.small_button("100%").clicked() {
+                        wiz.strength = 1.0;
+                    }
+                    theme::caption(ui, "under- and over-compensation preview");
+                });
+            }
         });
         if !open {
             wiz.inspect = None;
@@ -469,8 +571,8 @@ fn strongest_spill(r: &WizardResult, det: &str) -> Option<String> {
     (0..d).filter(|&j| j != i).max_by(|&a, &b| r.matrix.spill[i * d + a].partial_cmp(&r.matrix.spill[i * d + b]).unwrap_or(std::cmp::Ordering::Equal)).map(|j| r.matrix.detectors[j].clone())
 }
 
-fn mini_scatter(ui: &mut egui::Ui, pts: &[(f32, f32, bool)], range: [(f32, f32); 2], xl: &str, yl: &str) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(210.0, 190.0), Sense::hover());
+fn mini_scatter(ui: &mut egui::Ui, pts: &[(f32, f32, bool)], range: [(f32, f32); 2], xl: &str, yl: &str, mut gate: Option<&mut Option<[f64; 4]>>) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, 190.0), if gate.is_some() { Sense::click_and_drag() } else { Sense::hover() });
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 3.0, Color32::WHITE);
     let plot = Rect::from_min_max(Pos2::new(rect.left() + 6.0, rect.top() + 6.0), Pos2::new(rect.right() - 6.0, rect.bottom() - 16.0));
@@ -482,6 +584,28 @@ fn mini_scatter(ui: &mut egui::Ui, pts: &[(f32, f32, bool)], range: [(f32, f32);
         }
     }
     p.rect_stroke(plot, 0.0, Stroke::new(1.0_f32, Color32::GRAY));
+    if let Some(g) = gate.as_deref_mut() {
+        let to_raw = |q: Pos2| (range[0].0 as f64 + ((q.x - plot.left()) / plot.width()).clamp(0.0, 1.0) as f64 * xr as f64, range[1].0 as f64 + ((plot.bottom() - q.y) / plot.height()).clamp(0.0, 1.0) as f64 * yr as f64);
+        let id = resp.id.with("gate_start");
+        if resp.drag_started() {
+            if let Some(q) = resp.interact_pointer_pos() {
+                ui.data_mut(|d| d.insert_temp(id, to_raw(q)));
+            }
+        }
+        if resp.dragged() {
+            if let (Some(q), Some(start)) = (resp.interact_pointer_pos(), ui.data(|d| d.get_temp::<(f64, f64)>(id))) {
+                let now = to_raw(q);
+                *g = Some([start.0.min(now.0), start.0.max(now.0), start.1.min(now.1), start.1.max(now.1)]);
+            }
+        }
+        if let Some(r) = *g {
+            let px = |x: f64| plot.left() + ((x - range[0].0 as f64) / xr as f64) as f32 * plot.width();
+            let py = |y: f64| plot.bottom() - ((y - range[1].0 as f64) / yr as f64) as f32 * plot.height();
+            let gr = Rect::from_min_max(Pos2::new(px(r[0]), py(r[3])), Pos2::new(px(r[1]), py(r[2])));
+            p.rect_stroke(gr, 0.0, Stroke::new(1.8_f32, Color32::from_rgb(200, 60, 40)));
+        }
+        resp.on_hover_text("Drag to draw the scatter gate used for this control");
+    }
     p.text(Pos2::new(plot.center().x, rect.bottom() - 2.0), Align2::CENTER_BOTTOM, format!("{xl}  ↔   {yl} ↕"), FontId::proportional(9.5), Color32::from_gray(80));
 }
 

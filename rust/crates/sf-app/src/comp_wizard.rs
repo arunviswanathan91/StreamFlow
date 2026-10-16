@@ -83,12 +83,16 @@ pub enum NegSource {
     TrueZero,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ControlSetup {
     pub sample: usize,
     pub detector: String,
     /// `(negative up to, positive from)` in raw units, when set by hand; `None` = automatic.
     pub manual: Option<(f64, f64)>,
+    /// This control's own choice of negative; `None` = the wizard-wide choice.
+    pub neg: Option<NegSource>,
+    /// A scatter gate drawn by hand `[FSC low, FSC high, SSC low, SSC high]` in raw units; `None` = automatic clean-up.
+    pub scatter: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +211,30 @@ pub fn clean_mask_for(s: &LoadedSample, mode: CleanMode, primary: Option<usize>)
         }
     }
     if mask.iter().filter(|&&m| m).count() < 200 { all } else { mask }
+}
+
+/// The events of a control that are used: the hand-drawn scatter rectangle when there is one, else the automatic
+/// clean-up for the chosen mode.
+pub fn control_mask(s: &LoadedSample, mode: CleanMode, primary: Option<usize>, scatter: Option<[f64; 4]>) -> Vec<bool> {
+    if let (Some(r), Some(fi), Some(si)) = (scatter, scatter_channel(s, "FSC"), scatter_channel(s, "SSC")) {
+        let (x, y) = (column(s, fi), column(s, si));
+        return (0..s.n_events).map(|i| x[i] >= r[0] && x[i] <= r[1] && y[i] >= r[2] && y[i] <= r[3]).collect();
+    }
+    clean_mask_for(s, mode, primary)
+}
+
+/// A square matrix with detector names as a CSV.
+pub fn square_csv(det: &[String], m: &[f64]) -> String {
+    let k = det.len();
+    let mut out = format!(",{}\n", det.join(","));
+    for i in 0..k {
+        out += &det[i];
+        for j in 0..k {
+            out += &format!(",{}", m[i * k + j]);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 const G: usize = 64;
@@ -511,21 +539,24 @@ pub fn compute(samples: &[&LoadedSample], setups: &[ControlSetup], detectors: &[
     let mut notes = Vec::new();
     let mut prepared: Vec<Prepared> = Vec::new();
 
-    // the unstained tube's per-detector medians, when it is the negative
-    let neg_baseline: Option<Vec<f64>> = match opt.negative {
-        NegSource::Own => None,
-        NegSource::TrueZero => Some(vec![0.0; d]),
-        NegSource::Unstained(u) => {
-            let s = samples.get(u).ok_or("the unstained sample does not exist")?;
-            let cols: Vec<usize> = detectors.iter().map(|n| s.channel_index(n).ok_or_else(|| format!("{}: has no channel '{n}'", s.name))).collect::<Result<_, _>>()?;
-            let keep = clean_mask(s, opt.clean);
-            let (x, n) = rows_of(s, &cols, &keep, usize::MAX);
-            if n < 50 {
-                return Err(format!("{}: too few events for a negative baseline", s.name));
+    // per-detector medians of the negative, for each distinct source that a control asks for
+    let baseline = |src: NegSource| -> Result<Option<Vec<f64>>, String> {
+        Ok(match src {
+            NegSource::Own => None,
+            NegSource::TrueZero => Some(vec![0.0; d]),
+            NegSource::Unstained(u) => {
+                let s = samples.get(u).ok_or("the unstained sample does not exist")?;
+                let cols: Vec<usize> = detectors.iter().map(|n| s.channel_index(n).ok_or_else(|| format!("{}: has no channel '{n}'", s.name))).collect::<Result<_, _>>()?;
+                let keep = clean_mask(s, opt.clean);
+                let (x, n) = rows_of(s, &cols, &keep, usize::MAX);
+                if n < 50 {
+                    return Err(format!("{}: too few events for a negative baseline", s.name));
+                }
+                Some(medians_of(&x, d, &(0..n).collect::<Vec<_>>()))
             }
-            Some(medians_of(&x, d, &(0..n).collect::<Vec<_>>()))
-        }
+        })
     };
+    let mut baselines: Vec<(NegSource, Option<Vec<f64>>)> = Vec::new();
 
     for c in setups {
         let s = samples.get(c.sample).ok_or("control sample index out of range")?;
@@ -534,7 +565,12 @@ pub fn compute(samples: &[&LoadedSample], setups: &[ControlSetup], detectors: &[
             return Err(format!("two controls were given for {}", c.detector));
         }
         let cols: Vec<usize> = detectors.iter().map(|n| s.channel_index(n).ok_or_else(|| format!("{}: has no channel '{n}'", s.name))).collect::<Result<_, _>>()?;
-        let keep = clean_mask_for(s, opt.clean, Some(cols[i]));
+        let src = c.neg.unwrap_or(opt.negative);
+        if !baselines.iter().any(|(k, _)| *k == src) {
+            baselines.push((src, baseline(src)?));
+        }
+        let neg_baseline: Option<Vec<f64>> = baselines.iter().find(|(k, _)| *k == src).and_then(|(_, b)| b.clone());
+        let keep = control_mask(s, opt.clean, Some(cols[i]), c.scatter);
         let (x, n) = rows_of(s, &cols, &keep, usize::MAX);
         let primary: Vec<f64> = (0..n).map(|r| x[r * d + i]).collect();
         let (neg_max, pos_min) = match c.manual {
@@ -560,7 +596,7 @@ pub fn compute(samples: &[&LoadedSample], setups: &[ControlSetup], detectors: &[
         if (opt.method.needs_split() && split_gap) || (!opt.method.needs_split() && reach.is_finite() && reach < 8.0) {
             badges.push(Badge::MissingPositive);
         }
-        if neg.len() < 100 && opt.method.needs_split() && opt.negative == NegSource::Own {
+        if neg.len() < 100 && opt.method.needs_split() && src == NegSource::Own {
             badges.push(Badge::MissingNegative);
         }
         // a split of pure noise has a stain index near 1: that control has no positive population at all
@@ -569,7 +605,7 @@ pub fn compute(samples: &[&LoadedSample], setups: &[ControlSetup], detectors: &[
         } else if stain_index.is_finite() && stain_index < 3.0 && opt.method.needs_split() {
             badges.push(Badge::PositiveTooDim);
         }
-        if opt.clean == CleanMode::Off && scatter_channel(s, "FSC").is_some() {
+        if opt.clean == CleanMode::Off && c.scatter.is_none() && scatter_channel(s, "FSC").is_some() {
             badges.push(Badge::NoScatterCleanup);
         }
         let blocked = badges.iter().any(|b| b.blocks()) || (badges.contains(&Badge::MissingNegative) && opt.method.needs_split());
@@ -845,7 +881,7 @@ mod tests {
     fn run(samples: &[LoadedSample], opt: Options) -> WizardResult {
         let refs: Vec<&LoadedSample> = samples.iter().collect();
         let det: Vec<String> = DET.iter().map(|s| s.to_string()).collect();
-        let setups: Vec<ControlSetup> = (0..3).map(|i| ControlSetup { sample: i, detector: DET[i].to_string(), manual: None }).collect();
+        let setups: Vec<ControlSetup> = (0..3).map(|i| ControlSetup { sample: i, detector: DET[i].to_string(), manual: None, ..Default::default() }).collect();
         compute(&refs, &setups, &det, &opt).unwrap()
     }
 
@@ -908,6 +944,38 @@ mod tests {
     }
 
     #[test]
+    fn a_control_can_have_its_own_negative_and_a_hand_drawn_scatter_gate() {
+        let mut s = controls(true);
+        s.push(control(None, &truth(), 6000, 70, true));
+        let refs: Vec<&LoadedSample> = s.iter().collect();
+        let det: Vec<String> = DET.iter().map(|s| s.to_string()).collect();
+        let mk = |neg: Option<NegSource>, scatter: Option<[f64; 4]>| -> Vec<ControlSetup> {
+            (0..3).map(|i| ControlSetup { sample: i, detector: DET[i].to_string(), neg: if i == 0 { neg } else { None }, scatter: if i == 0 { scatter } else { None }, ..Default::default() }).collect()
+        };
+        let opt = Options { method: Method::Medians, clean: CleanMode::Off, ..Options::default() };
+        // the first control alone uses the unstained tube / true zero: only its row may change
+        let base = compute(&refs, &mk(None, None), &det, &opt).unwrap();
+        let un = compute(&refs, &mk(Some(NegSource::Unstained(3)), None), &det, &opt).unwrap();
+        let zero = compute(&refs, &mk(Some(NegSource::TrueZero), None), &det, &opt).unwrap();
+        for k in 4..16 {
+            assert_eq!(base.matrix.spill[k], un.matrix.spill[k], "rows of other controls are untouched ({k})");
+            assert_eq!(base.matrix.spill[k], zero.matrix.spill[k]);
+        }
+        assert!((base.matrix.spill[1] - un.matrix.spill[1]).abs() < 0.02);
+        // a rectangle around the real cells (not the debris) keeps only those events
+        let gate = [90_000.0, 150_000.0, 30_000.0, 70_000.0];
+        let g = compute(&refs, &mk(None, Some(gate)), &det, &opt).unwrap();
+        let (all, kept) = (g.reports[0].n_events, g.reports[0].n_clean);
+        assert!(kept < all && kept as f64 > 0.7 * all as f64 && kept as f64 <= 0.81 * all as f64, "{kept} of {all}");
+        assert!(!g.reports[0].badges.contains(&Badge::NoScatterCleanup));
+        assert_eq!(control_mask(&s[0], CleanMode::Off, None, Some(gate)).iter().filter(|&&b| b).count(), kept);
+        assert_eq!(square_csv(&det[..2], &[1.0, 0.5, 0.25, 1.0]), format!(",{},{}
+{},1,0.5
+{},0.25,1
+", det[0], det[1], det[0], det[1]));
+    }
+
+    #[test]
     fn the_automatic_split_finds_the_valley_and_a_manual_split_is_respected() {
         let s = control(Some(1), &truth(), 8000, 5, false);
         let col = column(&s, 3);
@@ -917,7 +985,7 @@ mod tests {
         }
         let refs = vec![&s];
         let det: Vec<String> = DET.iter().map(|s| s.to_string()).collect();
-        let setups = vec![ControlSetup { sample: 0, detector: "PE-A".into(), manual: Some((400.0, 3000.0)) }];
+        let setups = vec![ControlSetup { sample: 0, detector: "PE-A".into(), manual: Some((400.0, 3000.0)), ..Default::default() }];
         let r = compute(&refs, &setups, &det, &Options { method: Method::Medians, clean: CleanMode::Off, ..Options::default() }).unwrap();
         let c = &r.reports[0];
         assert_eq!((c.neg_max, c.pos_min), (400.0, 3000.0));
@@ -953,7 +1021,7 @@ mod tests {
         // an unstained tube given as a control: nothing is positive
         let blank = control(None, &truth(), 6000, 3, false);
         let refs = vec![&blank];
-        let setups = vec![ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None }];
+        let setups = vec![ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None, ..Default::default() }];
         let e = compute(&refs, &setups, &det, &Options { clean: CleanMode::Off, ..Options::default() }).unwrap_err();
         assert!(e.contains("positive") || e.contains("barely"), "{e}");
         // too few events
@@ -965,9 +1033,9 @@ mod tests {
         let r = compute(&[&good], &setups, &det, &Options { clean: CleanMode::Off, ..Options::default() }).unwrap();
         assert!(r.reports[0].badges.contains(&Badge::NoScatterCleanup));
         // two controls for one detector, and a detector that does not exist
-        let both = vec![ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None }, ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None }];
+        let both = vec![ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None, ..Default::default() }, ControlSetup { sample: 0, detector: "FITC-A".into(), manual: None, ..Default::default() }];
         assert!(compute(&[&good], &both, &det, &Options::default()).unwrap_err().contains("two controls"));
-        let bad = vec![ControlSetup { sample: 0, detector: "XYZ-A".into(), manual: None }];
+        let bad = vec![ControlSetup { sample: 0, detector: "XYZ-A".into(), manual: None, ..Default::default() }];
         assert!(compute(&[&good], &bad, &det, &Options::default()).is_err());
     }
 
