@@ -33,11 +33,13 @@ pub struct State {
     pub af_k: usize,
     pub unmix_sel: Vec<bool>,
     pub log: Vec<String>,
+    /// Samples that were unmixed by the last run (each gets a "Show plot" button).
+    pub done: Vec<usize>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { roles: vec![], model: None, wls: true, use_af: true, af_k: 4, unmix_sel: vec![], log: vec![] }
+        State { roles: vec![], model: None, wls: true, use_af: true, af_k: 4, unmix_sel: vec![], log: vec![], done: vec![] }
     }
 }
 
@@ -73,14 +75,49 @@ impl App {
         let Some(model) = self.spec.model.clone() else { return };
         let method = if self.spec.wls { Method::Wls } else { Method::Ols };
         let mut lines = Vec::new();
+        let mut done = Vec::new();
         for &i in samples {
             match unmix_sample(&mut self.session, i, &model, method, self.spec.use_af && model.af_library.is_some()) {
-                Ok(r) => lines.push(format!("{}: {} events, median residual {:.1}{}", r.sample, r.n_events, r.median_residual, if r.used_af { ", per-cell autofluorescence" } else { "" })),
+                Ok(r) => {
+                    done.push(i);
+                    lines.push(format!("{}: {} events, median residual {:.1}{}", r.sample, r.n_events, r.median_residual, if r.used_af { ", per-cell autofluorescence" } else { "" }))
+                }
                 Err(e) => lines.push(format!("{}: {e}", self.session.samples()[i].name)),
             }
         }
-        self.status = format!("Unmixed {} sample(s). New channels are named Unmix-… and appear on every axis.", lines.len());
+        // open a plot of the first two unmixed markers so the result is visible straight away
+        if let Some(&first) = done.first() {
+            let _ = self.open_unmixed_plot(first, false);
+        }
+        self.status = format!("Unmixed {} sample(s). The new channels (Unmix-…) are listed first on every axis menu; use Show plot below to see them.", done.len());
+        self.spec.done = done;
         self.spec.log = lines;
+    }
+
+    /// Open a plot of a sample's first two unmixed channels in the Workstation; `show` also switches to it.
+    pub fn open_unmixed_plot(&mut self, si: usize, show: bool) -> Result<(), String> {
+        let chans: Vec<String> = self.session.sample(si).channels.iter().filter(|c| c.starts_with(crate::sample::UNMIX_PREFIX) && !c.ends_with("Residual") && !c.ends_with("-AF")).cloned().collect();
+        if chans.len() < 2 {
+            return Err("this sample has fewer than two unmixed markers".into());
+        }
+        let id = self.session.open_population(si, sf_gating::GateTree::ROOT)?;
+        let (xr, yr) = {
+            let s = self.session.sample(si);
+            (s.range_of(&chans[0]), s.range_of(&chans[1]))
+        };
+        if let Some(w) = self.session.window_mut(id) {
+            w.x_scale = crate::session::default_scale(&chans[0], xr);
+            w.y_scale = crate::session::default_scale(&chans[1], yr);
+            w.x_chan = chans[0].clone();
+            w.y_chan = chans[1].clone();
+            w.drawing.cancel();
+        }
+        self.refit_window(id);
+        if show {
+            self.ws.tab = super::workstation::Tab::Graph(id);
+            self.module = super::Module::Workstation;
+        }
+        Ok(())
     }
 
     pub(super) fn spectral(&mut self, ui: &mut egui::Ui) {
@@ -138,9 +175,11 @@ impl App {
                 theme::caption(ui, "Clusters the unstained tube into typical autofluorescence spectra (0 = off). Each cell is then unmixed with its best-fitting one.");
                 ui.add_space(8.0);
                 if ui.add(egui::Button::new(RichText::new("Build signatures").strong()).fill(theme::ACCENT_DIM).min_size(egui::vec2(290.0, 32.0))).clicked() {
-                    if let Err(e) = self.spectral_build() {
-                        self.status = format!("Cannot build signatures: {e}");
-                    }
+                    self.run_busy("Building signatures…", |app| {
+                        if let Err(e) = app.spectral_build() {
+                            app.status = format!("Cannot build signatures: {e}");
+                        }
+                    });
                 }
                 if self.spec.model.is_some() {
                     theme::section(ui, "Unmix");
@@ -167,7 +206,7 @@ impl App {
                     });
                     if ui.add(egui::Button::new(RichText::new("Unmix selected samples").strong()).min_size(egui::vec2(290.0, 30.0))).clicked() {
                         let sel: Vec<usize> = (0..n).filter(|&i| self.spec.unmix_sel[i]).collect();
-                        self.spectral_unmix(&sel);
+                        self.run_busy(format!("Unmixing {} sample(s)…", sel.len()), move |app| app.spectral_unmix(&sel));
                     }
                     if ui.button("Remove unmixed channels from selected").clicked() {
                         for i in 0..n {
@@ -181,6 +220,7 @@ impl App {
             });
         });
         egui::CentralPanel::default().frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::same(16.0))).show_inside(ui, |ui| {
+            let mut show_plot: Option<usize> = None;
             let Some(m) = &self.spec.model else {
                 ui.centered_and_justified(|ui| ui.label(RichText::new("Assign the controls, then press “Build signatures”.").color(theme::MUTED).size(15.0)));
                 return;
@@ -277,8 +317,19 @@ impl App {
                     for l in &self.spec.log {
                         theme::caption(ui, l);
                     }
+                    for &si in self.spec.done.iter().filter(|&&i| i < n) {
+                        let nm = self.session.samples()[si].name.clone();
+                        if ui.button(format!("Show unmixed plot ▸ {nm}")).on_hover_text("Opens the first two unmixed markers of this sample in the Workstation").clicked() {
+                            show_plot = Some(si);
+                        }
+                    }
                 }
             });
+            if let Some(si) = show_plot {
+                if let Err(e) = self.open_unmixed_plot(si, true) {
+                    self.status = e;
+                }
+            }
         });
     }
 }

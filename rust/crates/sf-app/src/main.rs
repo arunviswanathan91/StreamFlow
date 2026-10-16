@@ -6,6 +6,7 @@ fn main() -> eframe::Result<()> {
     // `streamflow [files]`: `.fcs` files are loaded, a `.wsp` FlowJo workspace is imported (its FCS files are
     // looked up next to it); the first population is then opened in a tab.
     let mut app = App::new();
+    app.load_export_prefs();
     let (mut fcs, mut wsp) = (Vec::<PathBuf>::new(), Vec::<PathBuf>::new());
     for arg in std::env::args().skip(1).filter(|a| !a.starts_with("--")) {
         let p = PathBuf::from(&arg);

@@ -134,13 +134,34 @@ fn scale_name(s: &ScaleSpec) -> &'static str {
     }
 }
 
+/// The channel list of an axis menu, in sections so derived channels are easy to find: unmixed (spectral), then
+/// compensated, then the measured channels. Headings appear only when a section is not the only one.
+pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[String]) {
+    use crate::sample::{COMP_PREFIX, UNMIX_PREFIX};
+    let sections: [(&str, Vec<&String>); 3] = [
+        ("Unmixed", channels.iter().filter(|c| c.starts_with(UNMIX_PREFIX)).collect()),
+        ("Compensated", channels.iter().filter(|c| c.starts_with(COMP_PREFIX)).collect()),
+        ("Measured", channels.iter().filter(|c| !c.starts_with(UNMIX_PREFIX) && !c.starts_with(COMP_PREFIX)).collect()),
+    ];
+    let shown = sections.iter().filter(|(_, v)| !v.is_empty()).count();
+    for (title, list) in &sections {
+        if list.is_empty() {
+            continue;
+        }
+        if shown > 1 {
+            ui.label(RichText::new(*title).size(10.5).strong().color(theme::MUTED));
+        }
+        for c in list {
+            ui.selectable_value(chan, (*c).clone(), c.as_str());
+        }
+    }
+}
+
 /// Channel + scale pickers for one axis. Returns true when anything changed.
 fn axis_controls(ui: &mut egui::Ui, id: (&str, u64), channels: &[String], ranges: &[f64], chan: &mut String, scale: &mut ScaleSpec, width: f32) -> bool {
     let (before_c, before_s) = (chan.clone(), scale.clone());
     egui::ComboBox::from_id_salt((id, "chan")).width(width).selected_text(chan.clone()).show_ui(ui, |ui| {
-        for c in channels {
-            ui.selectable_value(chan, c.clone(), c);
-        }
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| channel_list(ui, chan, channels));
     });
     if *chan != before_c {
         let r = channels.iter().position(|c| c == chan).map_or(262_144.0, |i| ranges[i]);
@@ -207,12 +228,22 @@ impl App {
         egui::TopBottomPanel::top("g_tools").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
         egui::TopBottomPanel::top("g_crumb").frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 4.0))).show_inside(ui, |ui| self.breadcrumb(ui, id, &w));
         egui::TopBottomPanel::bottom("g_hint").frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
-            theme::caption(ui, "P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan");
+            ui.add(egui::Label::new(RichText::new("P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan").size(11.0).color(theme::MUTED)).truncate());
         });
         let strip_open = self.ws.graphs.get(&id).map_or(false, |g| g.strip_open);
         egui::TopBottomPanel::bottom("g_strip").resizable(false).exact_height(236.0).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_animated_inside(ui, strip_open, |ui| self.compare_strip(ui, ctx, id, &w));
         let open = self.ws.options_open;
-        egui::SidePanel::right("g_opts").resizable(true).default_width(250.0).width_range(200.0..=380.0).frame(egui::Frame::none().fill(theme::PANEL_2).inner_margin(egui::Margin::same(10.0))).show_animated_inside(ui, open, |ui| self.graph_options(ui, id, &w));
+        if open {
+            // floats over the right edge instead of taking width from the plot, so showing it never reshapes the graph
+            let r = ui.available_rect_before_wrap();
+            let width = 250.0;
+            egui::Area::new(egui::Id::new(("g_opts", id))).order(egui::Order::Middle).fixed_pos(Pos2::new((r.right() - width - 24.0).max(r.left()), r.top() + 6.0)).show(ui.ctx(), |ui| {
+                egui::Frame::none().fill(theme::PANEL_2).rounding(8.0).stroke(Stroke::new(1.0_f32, Color32::from_gray(70))).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+                    ui.set_width(width);
+                    egui::ScrollArea::vertical().id_salt(("g_opts_scroll", id)).max_height((r.height() - 36.0).max(160.0)).show(ui, |ui| self.graph_options(ui, id, &w));
+                });
+            });
+        }
         egui::CentralPanel::default().frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::same(8.0))).show_inside(ui, |ui| self.graph_canvas(ui, ctx, id));
     }
 
@@ -314,7 +345,7 @@ impl App {
     }
 
     fn graph_toolbar(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
-        ui.horizontal_wrapped(|ui| {
+        egui::ScrollArea::horizontal().id_salt(("g_tools_scroll", id)).auto_shrink([false, true]).show(ui, |ui| ui.horizontal(|ui| {
             let n = self.session.samples().len();
             let (prev, next) = (self.step_sample(w.sample, -1), self.step_sample(w.sample, 1));
             if ui.add_enabled(prev.is_some(), egui::Button::new("◀")).on_hover_text("Previous sample (←)").clicked() {
@@ -412,7 +443,7 @@ impl App {
             if theme::toggle(ui, self.ws.options_open, "⚙ Options").clicked() {
                 self.ws.options_open = !self.ws.options_open;
             }
-        });
+        }));
     }
 
     fn breadcrumb(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
@@ -614,9 +645,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("X axis").size(11.0).strong().color(theme::MUTED));
                 egui::ComboBox::from_id_salt(("x", id, "chan")).width(150.0).selected_text(nx.clone()).show_ui(ui, |ui| {
-                    for c in &channels {
-                        ui.selectable_value(&mut nx, c.clone(), c);
-                    }
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| channel_list(ui, &mut nx, &channels));
                 });
                 if nx != w.x_chan {
                     let r = channels.iter().position(|c| *c == nx).map_or(262_144.0, |i| ranges[i]);
@@ -662,7 +691,11 @@ impl App {
 
         // ---- plot rectangle
         let avail = ui.available_rect_before_wrap();
-        let plot = Rect::from_min_max(Pos2::new(avail.left() + 52.0, avail.top() + 8.0), Pos2::new(avail.right() - 12.0, avail.bottom() - 34.0));
+        // The plot's size follows the window height only (square), never the width left over by side panels, so
+        // opening or closing the options, populations or any other pane never stretches or shrinks the graph.
+        let full = Rect::from_min_max(Pos2::new(avail.left() + 52.0, avail.top() + 8.0), Pos2::new(avail.right() - 12.0, avail.bottom() - 34.0));
+        let side = full.height().min(full.width());
+        let plot = Rect::from_min_size(full.min, egui::vec2(side, side));
         if plot.width() < 80.0 || plot.height() < 80.0 {
             return;
         }
@@ -852,7 +885,8 @@ impl App {
         if ui.button("Plot as PDF…").on_hover_text("Vector graphics with live text; the current view, gates and FMO lines").clicked() {
             ui.close_menu();
             if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(format!("{stem}.pdf")).save_file() {
-                self.status = match self.window_figure(id, 460.0, 400.0).and_then(|f| std::fs::write(&p, crate::figure::to_pdf(&[f], &stem)).map_err(|e| e.to_string())) {
+                let set = super::plot_export::Settings { format: super::plot_export::Format::Pdf, ..self.quick_export_settings(id) };
+                self.status = match self.export_bytes(id, &set, &stem).and_then(|b| std::fs::write(&p, b).map_err(|e| e.to_string())) {
                     Ok(()) => format!("Saved the plot to {}.", p.display()),
                     Err(e) => format!("Could not export the plot: {e}"),
                 };
@@ -861,11 +895,16 @@ impl App {
         if ui.button("Plot as SVG…").on_hover_text("Vector graphics for Illustrator / Inkscape / PowerPoint").clicked() {
             ui.close_menu();
             if let Some(p) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).set_file_name(format!("{stem}.svg")).save_file() {
-                self.status = match self.window_figure(id, 460.0, 400.0).and_then(|f| std::fs::write(&p, crate::figure::to_svg(&f)).map_err(|e| e.to_string())) {
+                let set = super::plot_export::Settings { format: super::plot_export::Format::Svg, ..self.quick_export_settings(id) };
+                self.status = match self.export_bytes(id, &set, &stem).and_then(|b| std::fs::write(&p, b).map_err(|e| e.to_string())) {
                     Ok(()) => format!("Saved the plot to {}.", p.display()),
                     Err(e) => format!("Could not export the plot: {e}"),
                 };
             }
+        }
+        if ui.button("Plot as PNG…").on_hover_text("Saved at your export size and resolution").clicked() {
+            ui.close_menu();
+            self.quick_save_plot(id, super::plot_export::Format::Png);
         }
         ui.separator();
         if ui.button("Export editor…").on_hover_text("Choose the size, resolution, format and what appears on the plot, with a preview").clicked() {
@@ -879,11 +918,9 @@ impl App {
                 self.begin_capture(rect, super::CaptureDest::File(p));
             }
         }
-        if ui.add_enabled(canvas.is_some(), egui::Button::new("Copy image to clipboard")).clicked() {
+        if ui.button("Copy image to clipboard").on_hover_text("With your export settings (Export editor, Use as my default)").clicked() {
             ui.close_menu();
-            if let Some(rect) = canvas {
-                self.begin_capture(rect, super::CaptureDest::Clipboard);
-            }
+            self.quick_copy_plot(id);
         }
     }
 
@@ -1538,6 +1575,37 @@ fn draw_histogram(painter: &egui::Painter, map: &Mapper, c: &HistCurve, style: &
     }
 }
 
+/// Which axis labels to draw so none overlap: `items` are (position along the axis, text). Labels are taken in
+/// order of closeness to the zero tick (or the first label when there is none), and one that would touch an
+/// already kept label (within `gap` points) is dropped, so changing decades or zooming never prints numbers on top
+/// of each other.
+pub(super) fn declutter(p: &egui::Painter, items: &[(f32, String)], font: &FontId, horizontal: bool, zero: Option<usize>, gap: f32) -> Vec<bool> {
+    let extent: Vec<f32> = items
+        .iter()
+        .map(|(_, t)| {
+            if t.is_empty() {
+                0.0
+            } else {
+                let g = p.layout_no_wrap(t.clone(), font.clone(), Color32::BLACK);
+                if horizontal { g.size().x } else { g.size().y }
+            }
+        })
+        .collect();
+    let origin = zero.map_or_else(|| items.iter().find(|i| !i.1.is_empty()).map_or(0.0, |i| i.0), |z| items[z].0);
+    let mut order: Vec<usize> = (0..items.len()).filter(|&i| !items[i].1.is_empty()).collect();
+    order.sort_by(|&a, &b| (items[a].0 - origin).abs().partial_cmp(&(items[b].0 - origin).abs()).unwrap_or(std::cmp::Ordering::Equal));
+    let mut keep = vec![false; items.len()];
+    let mut taken: Vec<(f32, f32)> = Vec::new();
+    for i in order {
+        let (lo, hi) = (items[i].0 - extent[i] / 2.0 - gap / 2.0, items[i].0 + extent[i] / 2.0 + gap / 2.0);
+        if taken.iter().all(|&(a, b)| hi <= a || lo >= b) {
+            taken.push((lo, hi));
+            keep[i] = true;
+        }
+    }
+    keep
+}
+
 fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, st: &PlotStyle) {
     let (show_grid, sci) = (st.grid, st.sci);
     let lab = |l: &str| if sci { crate::axis::sci_label(l) } else { l.to_string() };
@@ -1545,23 +1613,34 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve
     let grid = Stroke::new(if show_grid { 0.5_f32 } else { 0.0 }, if show_grid { Color32::from_gray(228) } else { Color32::TRANSPARENT });
     let text = theme::TEXT;
     let r = map.rect;
-    for t in ticks(&w.x_scale, map.range.x0, map.range.x1) {
+    let font = FontId::proportional(10.5);
+    let xticks = ticks(&w.x_scale, map.range.x0, map.range.x1);
+    let xlabels: Vec<(f32, String)> = xticks.iter().map(|t| (map.to_screen((t.pos, map.range.y0)).x, if t.major { lab(&t.label) } else { String::new() })).collect();
+    let xshow = declutter(p, &xlabels, &font, true, xticks.iter().position(|t| t.major && t.label == "0"), 6.0);
+    for (ti, t) in xticks.iter().enumerate() {
         let x = map.to_screen((t.pos, map.range.y0)).x;
         if t.major {
             p.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], grid);
             p.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x, r.bottom() + 5.0)], axis);
-            p.text(Pos2::new(x, r.bottom() + 7.0), Align2::CENTER_TOP, lab(&t.label), FontId::proportional(10.5), text);
+            if xshow[ti] {
+                p.text(Pos2::new(x, r.bottom() + 7.0), Align2::CENTER_TOP, &xlabels[ti].1, font.clone(), text);
+            }
         } else {
             p.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x, r.bottom() + 2.5)], axis);
         }
     }
     if !hist {
-        for t in ticks(&w.y_scale, map.range.y0, map.range.y1) {
+        let yticks = ticks(&w.y_scale, map.range.y0, map.range.y1);
+        let ylabels: Vec<(f32, String)> = yticks.iter().map(|t| (map.to_screen((map.range.x0, t.pos)).y, if t.major { lab(&t.label) } else { String::new() })).collect();
+        let yshow = declutter(p, &ylabels, &font, false, yticks.iter().position(|t| t.major && t.label == "0"), 2.0);
+        for (ti, t) in yticks.iter().enumerate() {
             let y = map.to_screen((map.range.x0, t.pos)).y;
             if t.major {
                 p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], grid);
                 p.line_segment([Pos2::new(r.left() - 5.0, y), Pos2::new(r.left(), y)], axis);
-                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, lab(&t.label), FontId::proportional(10.5), text);
+                if yshow[ti] {
+                    p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, &ylabels[ti].1, font.clone(), text);
+                }
             } else {
                 p.line_segment([Pos2::new(r.left() - 2.5, y), Pos2::new(r.left(), y)], axis);
             }

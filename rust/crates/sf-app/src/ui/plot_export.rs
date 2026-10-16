@@ -93,6 +93,72 @@ impl Default for Settings {
     }
 }
 
+impl Format {
+    fn from_key(k: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.ext() == k)
+    }
+}
+
+impl Unit {
+    fn from_key(k: &str) -> Option<Unit> {
+        Unit::ALL.into_iter().find(|u| u.label() == k)
+    }
+}
+
+impl Settings {
+    /// The saved form (also the preference file contents).
+    pub fn to_json(&self) -> sf_core::json::Json {
+        use sf_core::json::Json;
+        Json::obj()
+            .with("format", Json::Str(self.format.ext().into()))
+            .with("unit", Json::Str(self.unit.label().into()))
+            .with("width_pt", Json::num(self.width_pt as f64))
+            .with("height_pt", Json::num(self.height_pt as f64))
+            .with("lock_aspect", Json::Bool(self.lock_aspect))
+            .with("dpi", Json::num(self.dpi as f64))
+            .with("transparent", Json::Bool(self.transparent))
+            .with("gates", Json::Bool(self.gates))
+            .with("fmo", Json::Bool(self.fmo))
+            .with("titles", Json::Bool(self.titles))
+            .with("footer", Json::Bool(self.footer))
+            .with("style", crate::layout_doc::style_to_json(&self.style))
+    }
+
+    /// Read it back; anything missing keeps its default, values are brought into range.
+    pub fn from_json(j: &sf_core::json::Json) -> Result<Settings, String> {
+        let d = Settings::default();
+        let num = |k: &str, default: f32| j.get(k).and_then(|v| v.as_f64()).map_or(default, |v| v as f32);
+        let flag = |k: &str, default: bool| j.get(k).and_then(|v| v.as_bool()).unwrap_or(default);
+        let style = match j.get("style") {
+            Some(s) => crate::layout_doc::style_from_json(s)?,
+            None => d.style.clone(),
+        };
+        Ok(Settings {
+            format: j.get("format").and_then(|v| v.as_str()).and_then(Format::from_key).unwrap_or(d.format),
+            unit: j.get("unit").and_then(|v| v.as_str()).and_then(Unit::from_key).unwrap_or(d.unit),
+            width_pt: num("width_pt", d.width_pt).clamp(MIN_PT, MAX_PT),
+            height_pt: num("height_pt", d.height_pt).clamp(MIN_PT, MAX_PT),
+            lock_aspect: flag("lock_aspect", d.lock_aspect),
+            dpi: num("dpi", d.dpi).clamp(10.0, 1200.0),
+            transparent: flag("transparent", d.transparent),
+            gates: flag("gates", d.gates),
+            fmo: flag("fmo", d.fmo),
+            titles: flag("titles", d.titles),
+            footer: flag("footer", d.footer),
+            style,
+        })
+    }
+}
+
+/// Where the preference is kept: the STREAMFLOW_EXPORT_PREFS file if set, else APPDATA/StreamFLOW (or ~/.config/streamflow).
+pub fn prefs_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("STREAMFLOW_EXPORT_PREFS") {
+        return Some(p.into());
+    }
+    let base = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("StreamFLOW")).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config").join("streamflow")))?;
+    Some(base.join("export_defaults.json"))
+}
+
 pub const MIN_PT: f32 = 72.0;
 pub const MAX_PT: f32 = 72.0 * 40.0;
 pub const DPI_CHOICES: [f32; 5] = [72.0, 150.0, 300.0, 600.0, 1200.0];
@@ -136,15 +202,72 @@ pub struct State {
     /// The plot window being exported, while the dialog is open.
     pub open: Option<u64>,
     pub set: Settings,
+    /// The saved export preference: used by every quick Copy image / Export of a plot window and as the
+    /// starting point of the editor. `None` until one is saved.
+    pub defaults: Option<Settings>,
     fig: Option<(String, Result<Figure, String>)>,
     preview: Option<(String, TextureHandle)>,
 }
 
 impl App {
-    /// Open the export editor for a graph window, starting from the plot's own style.
+    /// Read the saved export preference (called once at start-up; tests do not call it, so they never depend on a
+    /// real user file).
+    pub fn load_export_prefs(&mut self) {
+        let Some(p) = prefs_path() else { return };
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        match sf_core::json::Json::parse(&text).map_err(|e| e.to_string()).and_then(|j| Settings::from_json(&j)) {
+            Ok(s) => {
+                self.pexp.set = s.clone();
+                self.pexp.defaults = Some(s);
+            }
+            Err(e) => self.status = format!("Ignored the saved export preference ({}): {e}", p.display()),
+        }
+    }
+
+    /// Keep these settings as the export preference, here and in the preference file.
+    pub fn save_export_prefs(&mut self, set: &Settings) -> Result<(), String> {
+        self.pexp.defaults = Some(set.clone());
+        let Some(p) = prefs_path() else { return Err("no place to keep the preference".into()) };
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&p, set.to_json().write()).map_err(|e| format!("could not write {}: {e}", p.display()))
+    }
+
+    /// Forget the saved preference (back to the factory settings).
+    pub fn reset_export_prefs(&mut self) {
+        self.pexp.defaults = None;
+        self.pexp.set = Settings::default();
+        self.pexp.fig = None;
+        if let Some(p) = prefs_path() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// The settings a quick Copy image / Export of this plot uses: the saved preference if there is one, else the
+    /// factory settings with the plot own style.
+    pub fn quick_export_settings(&self, id: u64) -> Settings {
+        match &self.pexp.defaults {
+            Some(d) => d.clone(),
+            None => Settings { style: self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default(), ..Settings::default() },
+        }
+    }
+
+    /// Copy the plot to the clipboard as an image with the export preference.
+    pub fn quick_copy_plot(&mut self, id: u64) {
+        let set = Settings { format: Format::Png, ..self.quick_export_settings(id) };
+        self.export_copy(id, &set);
+    }
+
+    /// Save the plot in `format` with the export preference (asks for the file name).
+    pub fn quick_save_plot(&mut self, id: u64, format: Format) {
+        let set = Settings { format, ..self.quick_export_settings(id) };
+        self.export_save(id, &set);
+    }
+
+    /// Open the export editor for a graph window, starting from the saved preference or the plot own style.
     pub fn open_plot_export(&mut self, id: u64) {
-        let style = self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default();
-        self.pexp.set.style = style;
+        self.pexp.set = self.quick_export_settings(id);
         self.pexp.fig = None;
         self.pexp.open = Some(id);
     }
@@ -251,6 +374,16 @@ impl App {
                         ui.colored_label(theme::GATE_RED, e);
                     }
                     ui.add_space(8.0);
+                    let is_default = self.pexp.defaults.as_ref() == Some(&set);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!is_default, egui::Button::new("★ Use as my default")).on_hover_text("Every Copy image and quick Export of a plot, now and next time, will use these settings").clicked() {
+                            act = Some("default");
+                        }
+                        if ui.add_enabled(self.pexp.defaults.is_some(), egui::Button::new("Reset default")).on_hover_text("Forget the saved preference").clicked() {
+                            act = Some("reset");
+                        }
+                    });
+                    theme::caption(ui, if is_default { "These are your default export settings." } else if self.pexp.defaults.is_some() { "Your saved default differs from what is shown." } else { "No default saved yet: copies use the plot own style." });
                     ui.horizontal(|ui| {
                         if ui.button(RichText::new("Save…").strong()).clicked() {
                             act = Some("save");
@@ -291,6 +424,16 @@ impl App {
             Some("close") => self.pexp.open = None,
             Some("save") => self.export_save(id, &set),
             Some("copy") => self.export_copy(id, &set),
+            Some("default") => {
+                self.status = match self.save_export_prefs(&set) {
+                    Ok(()) => "Saved as your default: Copy image and quick Export of any plot now use these settings.".into(),
+                    Err(e) => format!("Kept for this session only: {e}"),
+                };
+            }
+            Some("reset") => {
+                self.reset_export_prefs();
+                self.status = "Export defaults reset.".into();
+            }
             _ => {}
         }
     }
@@ -308,7 +451,7 @@ impl App {
         }
     }
 
-    fn export_save(&mut self, id: u64, set: &Settings) {
+    pub(crate) fn export_save(&mut self, id: u64, set: &Settings) {
         let Some(w) = self.session.window(id).cloned() else { return };
         let stem = format!("{}_{}_{}", w.x_chan, w.y_chan, self.session.sample(w.sample).name.trim_end_matches(".fcs")).replace(['/', '\\', ':', ' '], "_");
         let Some(p) = rfd::FileDialog::new().add_filter(set.format.label(), &[set.format.ext()]).set_file_name(format!("{stem}.{}", set.format.ext())).save_file() else { return };
@@ -321,7 +464,7 @@ impl App {
         };
     }
 
-    fn export_copy(&mut self, id: u64, set: &Settings) {
+    pub(crate) fn export_copy(&mut self, id: u64, set: &Settings) {
         self.status = match self.export_figure(id, set).and_then(|f| crate::raster::rasterize(&f, set.dpi, set.transparent)).and_then(|r| super::copy_rgba_to_clipboard(r.width as usize, r.height as usize, &r.rgba)) {
             Ok(()) => format!("Copied the plot to the clipboard ({} x {} px).", set.pixels().0, set.pixels().1),
             Err(e) => format!("Could not copy the image: {e}"),

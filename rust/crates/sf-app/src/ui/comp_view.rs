@@ -176,7 +176,7 @@ impl App {
                     ui.radio_value(&mut self.comp.slope, false, Estimator::Medians.label());
                     ui.radio_value(&mut self.comp.slope, true, Estimator::Slope.label());
                     if ui.add(egui::Button::new("Compute matrix").min_size(egui::vec2(240.0, 26.0))).clicked() {
-                        self.compensation_from_controls();
+                        self.run_busy("Computing the spillover matrix…", |app| { app.compensation_from_controls(); });
                     }
                     for note in &self.comp.notes {
                         theme::caption(ui, note);
@@ -198,8 +198,10 @@ impl App {
                 }
                 if ui.add(egui::Button::new("Apply to all samples").min_size(egui::vec2(240.0, 28.0))).clicked() {
                     if let Some(m) = self.comp.matrix.clone() {
-                        let failed = self.session.set_compensation_all(&m, mode);
-                        self.status = if failed.is_empty() { format!("Compensated all {n} samples.") } else { format!("Compensated {} of {n}; {} could not be: {}", n - failed.len(), failed.len(), failed.join(" | ")) };
+                        self.run_busy(format!("Compensating {n} samples…"), move |app| {
+                            let failed = app.session.set_compensation_all(&m, mode);
+                            app.status = if failed.is_empty() { format!("Compensated all {n} samples.") } else { format!("Compensated {} of {n}; {} could not be: {}", n - failed.len(), failed.len(), failed.join(" | ")) };
+                        });
                     }
                 }
                 if ui.add_enabled(applied.is_some(), egui::Button::new("Remove compensation").min_size(egui::vec2(240.0, 28.0))).clicked() {

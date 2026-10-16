@@ -3,6 +3,7 @@
 
 mod comp_view;
 mod analysis_view;
+mod activity;
 mod compare_view;
 mod cross_view;
 mod discover_view;
@@ -131,6 +132,7 @@ pub struct App {
     pub lay: layout_view::State,
     pub(crate) disc_last_click: Option<(f64, eframe::egui::Pos2)>,
     pub spec: spectral_view::State,
+    pub(crate) act: activity::State,
     pub(crate) status: String,
     themed: bool,
     shot: Option<Shot>,
@@ -175,6 +177,7 @@ impl App {
             lay: layout_view::State::default(),
             disc_last_click: None,
             spec: spectral_view::State::default(),
+            act: activity::State::default(),
             status: "Open FCS files from the File menu (Ctrl+O).".into(),
             themed: false,
             shot: None,
@@ -219,7 +222,7 @@ impl App {
 
     pub(crate) fn open_fcs(&mut self) {
         let Some(files) = rfd::FileDialog::new().add_filter("FCS files", &["fcs"]).set_title("Open FCS files").pick_files() else { return };
-        self.load_files(&files);
+        self.run_busy(format!("Loading {} file(s)…", files.len()), move |app| app.load_files(&files));
     }
 
     pub fn load_files(&mut self, files: &[std::path::PathBuf]) {
@@ -318,6 +321,7 @@ impl App {
         self.plot_export_window(ctx);
         self.context_dialogs(ctx);
         self.group_export_window(ctx);
+        self.activity(ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -525,6 +529,7 @@ impl App {
 /// Where a captured region goes.
 pub(crate) enum CaptureDest {
     File(std::path::PathBuf),
+    #[allow(dead_code)]
     Clipboard,
 }
 

@@ -337,12 +337,9 @@ impl App {
             ui.close_menu();
             self.open_plot_export(id);
         }
-        let canvas = self.ws.graphs.get(&id).and_then(|g| g.canvas_rect);
-        if ui.add_enabled(canvas.is_some(), egui::Button::new("Copy image")).clicked() {
+        if ui.button("Copy image").on_hover_text("Copies the plot with your export settings (Export editor, Use as my default)").clicked() {
             ui.close_menu();
-            if let Some(rect) = canvas {
-                self.begin_capture(rect, super::CaptureDest::Clipboard);
-            }
+            self.quick_copy_plot(id);
         }
         ui.separator();
         if ui.button("Fit view to population").clicked() {
