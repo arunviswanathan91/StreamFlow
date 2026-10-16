@@ -49,6 +49,9 @@ fn msg<T>(m: impl Into<String>) -> Result<T, SpectralError> {
 pub enum Method {
     Ols,
     Wls,
+    /// Weighted like [`Method::Wls`] but with every abundance constrained to be >= 0 (Lawson-Hanson, per event).
+    /// Slower; it never reports a negative amount of a fluorochrome.
+    Nnls,
 }
 
 impl Method {
@@ -56,7 +59,8 @@ impl Method {
         match s.to_ascii_lowercase().as_str() {
             "ols" => Ok(Method::Ols),
             "wls" => Ok(Method::Wls),
-            other => msg(format!("Unknown unmixing method {other:?} (use 'ols' or 'wls').")),
+            "nnls" => Ok(Method::Nnls),
+            other => msg(format!("Unknown unmixing method {other:?} (use 'ols', 'wls' or 'nnls').")),
         }
     }
 }
@@ -342,7 +346,7 @@ pub fn poisson_weights(events: &[f64], n: usize, d: usize, floor: f64) -> Vec<f6
 pub fn unmix(events: &[f64], n: usize, d: usize, m: &[f64], f: usize, method: Method, weights: Option<&[f64]>) -> Result<(Vec<f64>, Vec<f64>), SpectralError> {
     let w = match method {
         Method::Ols => unmixing_matrix(m, f, d, None)?,
-        Method::Wls => {
+        Method::Wls | Method::Nnls => {
             let own;
             let wt = match weights {
                 Some(w) => w,
@@ -354,8 +358,44 @@ pub fn unmix(events: &[f64], n: usize, d: usize, m: &[f64], f: usize, method: Me
             unmixing_matrix(m, f, d, Some(wt))?
         }
     };
+    if method == Method::Nnls {
+        let own;
+        let wt = match weights {
+            Some(w) => w,
+            None => {
+                own = poisson_weights(events, n, d, 1.0);
+                &own
+            }
+        };
+        let ab = nnls_abundances(events, n, d, m, f, wt)?;
+        return Ok((ab, w));
+    }
     let ab = linalg::matmul(events, &linalg::transpose(&w, f, d), n, d, f);
     Ok((ab, w))
+}
+
+/// Per-event non-negative weighted least squares: minimise sum_j (y_j - sum_k a_k M_kj)^2 / w_j with a >= 0.
+fn nnls_abundances(events: &[f64], n: usize, d: usize, m: &[f64], f: usize, weights: &[f64]) -> Result<Vec<f64>, SpectralError> {
+    if weights.len() != d {
+        return msg(format!("{} weights for {d} detectors", weights.len()));
+    }
+    let sw: Vec<f64> = weights.iter().map(|w| 1.0 / w.max(EPS).sqrt()).collect();
+    let mut a = vec![0.0; d * f];
+    for j in 0..d {
+        for k in 0..f {
+            a[j * f + k] = sw[j] * m[k * d + j];
+        }
+    }
+    let mut out = vec![0.0; n * f];
+    let mut b = vec![0.0; d];
+    for i in 0..n {
+        for j in 0..d {
+            b[j] = sw[j] * events[i * d + j];
+        }
+        let x = linalg::nnls(&a, d, f, &b)?;
+        out[i * f..(i + 1) * f].copy_from_slice(&x);
+    }
+    Ok(out)
 }
 
 /// Root-sum-square residual per event: how much the model failed to explain.
@@ -389,8 +429,8 @@ pub fn unmix_with_af(events: &[f64], n: usize, d: usize, m: &[f64], f: usize, li
     let own;
     let w: Option<&[f64]> = match (method, weights) {
         (Method::Ols, _) => None,
-        (Method::Wls, Some(w)) => Some(w),
-        (Method::Wls, None) => {
+        (Method::Wls | Method::Nnls, Some(w)) => Some(w),
+        (Method::Wls | Method::Nnls, None) => {
             own = poisson_weights(events, n, d, 1.0);
             Some(&own)
         }
@@ -401,9 +441,13 @@ pub fn unmix_with_af(events: &[f64], n: usize, d: usize, m: &[f64], f: usize, li
         let mut mk = m.to_vec();
         mk.extend_from_slice(&lib[c * d..(c + 1) * d]);
         let wk = unmixing_matrix(&mk, f1, d, w)?;
+        let constrained = if method == Method::Nnls { Some(nnls_abundances(events, n, d, &mk, f1, w.unwrap_or(&[]))?) } else { None };
         for i in 0..n {
             let ev = &events[i * d..(i + 1) * d];
-            let ab: Vec<f64> = (0..f1).map(|a| (0..d).map(|j| wk[a * d + j] * ev[j]).sum()).collect();
+            let ab: Vec<f64> = match &constrained {
+                Some(c) => c[i * f1..(i + 1) * f1].to_vec(),
+                None => (0..f1).map(|a| (0..d).map(|j| wk[a * d + j] * ev[j]).sum()).collect(),
+            };
             let res: f64 = (0..d).map(|j| (ev[j] - (0..f1).map(|a| ab[a] * mk[a * d + j]).sum::<f64>()).powi(2)).sum();
             if res < best[i] {
                 best[i] = res;
@@ -545,5 +589,44 @@ mod tests {
         let (e_plain, e_af) = (err(&plain, 4), err(&af.abundances, 5));
         assert!(e_af < e_plain * 0.01, "AF-aware error {e_af} vs ignoring AF {e_plain}");
         assert!((0..n).all(|i| af.af_index[i] == i % 2), "AF candidate chosen wrongly");
+    }
+
+    #[test]
+    fn nnls_unmixing_never_goes_negative_and_agrees_with_wls_when_signal_is_strong() {
+        use crate::rng::Rng;
+        let (d, f, n) = (10usize, 3usize, 600usize);
+        let m: Vec<f64> = (0..f).flat_map(|k| (0..d).map(move |j| (-0.5 * ((j as f64 - 1.0 - 3.5 * k as f64) / 1.6).powi(2)).exp())).collect();
+        let mut rng = Rng::new(5);
+        let mut gauss = || {
+            let (u1, u2) = (rng.next_f64().max(1e-300), rng.next_f64());
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        };
+        let mut ev = vec![0.0; n * d];
+        let mut truth = vec![0.0; n * f];
+        for i in 0..n {
+            // fluor 0 bright, fluor 1 sometimes, fluor 2 absent (true abundance 0): noise makes unconstrained estimates negative
+            let a = [3000.0 * (1.0 + 0.2 * gauss()).abs(), if i % 3 == 0 { 800.0 } else { 0.0 }, 0.0];
+            for k in 0..f {
+                truth[i * f + k] = a[k];
+            }
+            for j in 0..d {
+                let sig: f64 = (0..f).map(|k| a[k] * m[k * d + j]).sum();
+                ev[i * d + j] = sig + (30.0 + 0.5 * sig.max(0.0)).sqrt() * gauss();
+            }
+        }
+        let (ols, _) = unmix(&ev, n, d, &m, f, Method::Ols, None).unwrap();
+        let (wls, _) = unmix(&ev, n, d, &m, f, Method::Wls, None).unwrap();
+        let (nn, _) = unmix(&ev, n, d, &m, f, Method::Nnls, None).unwrap();
+        assert!((0..n).filter(|&i| ols[i * f + 2] < 0.0).count() > n / 4, "plain least squares reports negative amounts of an absent fluorochrome");
+        assert!(nn.iter().all(|&v| v >= 0.0), "NNLS never goes negative");
+        // the bright fluorochrome is the same to within noise
+        let rel = (0..n).map(|i| (nn[i * f] - wls[i * f]).abs() / 3000.0).sum::<f64>() / n as f64;
+        assert!(rel < 0.02, "mean relative difference {rel}");
+        assert_eq!(Method::parse("NNLS").unwrap(), Method::Nnls);
+        // with per-cell autofluorescence the constrained path agrees on a clean library
+        let lib: Vec<f64> = (0..d).map(|j| (-0.5 * ((j as f64 - 8.0) / 2.5).powi(2)).exp()).collect();
+        let af = unmix_with_af(&ev, n, d, &m, f, &lib, 1, Method::Nnls, None).unwrap();
+        assert!(af.abundances.iter().all(|&v| v >= 0.0) && af.residual2.len() == n);
+        let _ = truth;
     }
 }

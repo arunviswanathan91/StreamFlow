@@ -769,12 +769,17 @@ fn spreading(spill: &[f64], d: usize, ctrls: &[Prepared]) -> Vec<f64> {
 
 /// Cosine similarity between every pair of spillover rows.
 pub fn cosine_matrix(spill: &[f64], d: usize) -> Vec<f64> {
-    let norm: Vec<f64> = (0..d).map(|i| (0..d).map(|j| spill[i * d + j].powi(2)).sum::<f64>().sqrt()).collect();
-    let mut out = vec![0.0; d * d];
-    for i in 0..d {
-        for k in 0..d {
-            let dot: f64 = (0..d).map(|j| spill[i * d + j] * spill[k * d + j]).sum();
-            out[i * d + k] = if norm[i] > 0.0 && norm[k] > 0.0 { dot / (norm[i] * norm[k]) } else { 0.0 };
+    cosine_rows(spill, d, d)
+}
+
+/// Cosine similarity between every pair of the `rows` rows (each `cols` long) of `m`: `rows x rows`.
+pub fn cosine_rows(m: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let norm: Vec<f64> = (0..rows).map(|i| (0..cols).map(|j| m[i * cols + j].powi(2)).sum::<f64>().sqrt()).collect();
+    let mut out = vec![0.0; rows * rows];
+    for i in 0..rows {
+        for k in 0..rows {
+            let dot: f64 = (0..cols).map(|j| m[i * cols + j] * m[k * cols + j]).sum();
+            out[i * rows + k] = if norm[i] > 0.0 && norm[k] > 0.0 { dot / (norm[i] * norm[k]) } else { 0.0 };
         }
     }
     out
