@@ -1033,7 +1033,9 @@ fn the_compare_strip_shows_every_sample_on_the_same_view_and_a_click_switches_sa
     assert_eq!(app.session.window(w).unwrap().sample, 1, "{}", app.status);
     assert_eq!(app.ws.graphs[&w].range.unwrap(), range_now, "switching sample keeps the view");
     // a population that one sample lacks is said so, not drawn empty
-    app.session.delete(1, app.session.tree(1).find(&["Left"]).unwrap()).unwrap();
+    let left = app.session.tree(1).find(&["Left"]).unwrap();
+    app.session.release_gate(1, left).ok();
+    app.session.delete(1, left).unwrap();
     app.ws.graphs.get_mut(&w).unwrap().refit = false;
     settle(&mut app, &ctx);
     // an unreachable channel shows 'channel not in this sample' without panicking
