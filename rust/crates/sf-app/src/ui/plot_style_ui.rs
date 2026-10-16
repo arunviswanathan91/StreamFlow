@@ -32,6 +32,10 @@ pub(super) fn plot_style_controls(ui: &mut egui::Ui, kind: PlotKind, s: &mut Plo
                 theme::caption(ui, "Bars and the cumulative curve show the raw counts.");
             }
             ui.horizontal(|ui| {
+                ui.label("Y max");
+                ui.add(egui::DragValue::new(&mut s.hist_ymax).speed(1.0).range(0.0..=1.0e9).custom_formatter(|v, _| if v == 0.0 { "auto".to_string() } else { format!("{v:.0}") })).on_hover_text("Top of the Y axis in the chosen unit (auto = fit)");
+            });
+            ui.horizontal(|ui| {
                 ui.label("Fill");
                 ui.color_edit_button_srgb(&mut s.hist_fill);
                 ui.add(egui::Slider::new(&mut s.hist_fill_alpha, 0..=255).text("opacity"));
@@ -62,9 +66,24 @@ pub(super) fn plot_style_controls(ui: &mut egui::Ui, kind: PlotKind, s: &mut Plo
                 ui.add(egui::Slider::new(&mut s.smooth_strength, 1..=8).text("Smoothness"));
             }
         }
-        PlotKind::Pseudocolor | PlotKind::Dot => {}
+        PlotKind::Pseudocolor => {
+            ui.add(egui::Slider::new(&mut s.pseudo_levels, 4..=256).text("Levels")).on_hover_text("Number of colour bands; 256 is continuous");
+            ui.checkbox(&mut s.pseudo_smooth, "Smoothing").on_hover_text("Gaussian averaging to reduce noise");
+            if s.pseudo_smooth {
+                ui.add(egui::Slider::new(&mut s.smooth_strength, 1..=8).text("Smoothness"));
+            }
+            ui.checkbox(&mut s.pseudo_outliers, "Show outliers").on_hover_text("Off hides the sparsest 1% of events");
+        }
+        PlotKind::Dot => {
+            ui.checkbox(&mut s.large_dots, "Use large dots");
+            ui.horizontal(|ui| {
+                ui.label("Max dots");
+                ui.add(egui::DragValue::new(&mut s.num_dots).speed(100.0).range(0..=5_000_000).custom_formatter(|v, _| if v == 0.0 { "all".to_string() } else { format!("{v:.0}") }));
+            });
+        }
     }
     ui.checkbox(&mut s.grid, "Show grid");
+    ui.checkbox(&mut s.sci, "Use scientific notation");
     if kind != PlotKind::Histogram {
         ui.checkbox(&mut s.adjunct, "Adjunct histograms").on_hover_text("Histograms of the X and Y parameters along the edges of the plot (shown in exports and layouts)");
     }

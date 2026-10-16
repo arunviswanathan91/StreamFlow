@@ -149,6 +149,20 @@ pub struct PlotStyle {
     pub adjunct: bool,
     /// Light grid lines at the major ticks.
     pub grid: bool,
+    /// Axis numbers as 5e4 instead of 50k.
+    pub sci: bool,
+    // ---- pseudocolor
+    /// Number of colour bands (FlowJo "Pseudocolor Levels"); 256 is effectively continuous.
+    pub pseudo_levels: usize,
+    pub pseudo_smooth: bool,
+    /// Draw the sparsest 1% of events; off hides them.
+    pub pseudo_outliers: bool,
+    // ---- dot plot
+    pub large_dots: bool,
+    /// Show at most this many dots (0 = all).
+    pub num_dots: usize,
+    /// Histogram Y axis top (0 = automatic): a count, a density, or a percent depending on the Y unit.
+    pub hist_ymax: f64,
 }
 
 impl Default for PlotStyle {
@@ -171,6 +185,13 @@ impl Default for PlotStyle {
             outlier_size: 0,
             adjunct: false,
             grid: true,
+            sci: false,
+            pseudo_levels: 256,
+            pseudo_smooth: false,
+            pseudo_outliers: true,
+            large_dots: false,
+            num_dots: 0,
+            hist_ymax: 0.0,
         }
     }
 }
@@ -183,6 +204,11 @@ impl PlotStyle {
         self.smooth_strength = self.smooth_strength.clamp(1, 8);
         self.outlier_size = self.outlier_size.min(6);
         self.hist_bandwidth = if self.hist_bandwidth.is_finite() { self.hist_bandwidth.clamp(0.0, 1.0) } else { 0.5 };
+        self.pseudo_levels = self.pseudo_levels.clamp(4, 256);
+        self.num_dots = self.num_dots.min(5_000_000);
+        if !(self.hist_ymax.is_finite() && self.hist_ymax > 0.0) {
+            self.hist_ymax = 0.0;
+        }
         self
     }
 }
@@ -508,10 +534,101 @@ pub fn render_zebra(g: &Grid, style: &PlotStyle) -> Vec<[u8; 4]> {
 }
 
 /// RGBA pixels (screen order) of a binned population for any two-parameter plot type.
+/// Counts of occupied cells at or below which a cell is an outlier: the sparsest cells holding, together, at most 1%
+/// of the events inside the view. 0 when there is no such cell.
+pub fn outlier_cut(g: &Grid) -> u32 {
+    let mut occ: Vec<u32> = g.counts.iter().copied().filter(|&c| c > 0).collect();
+    occ.sort_unstable();
+    let budget = (g.inside as f64 * 0.01).floor() as u64;
+    // whole groups of equal counts only, so every cell at or below the cut is hidden and the total stays in budget
+    let (mut acc, mut cut) = (0u64, 0u32);
+    let mut i = 0;
+    while i < occ.len() {
+        let c = occ[i];
+        let n = occ[i..].iter().take_while(|&&v| v == c).count();
+        let group = c as u64 * n as u64;
+        if acc + group > budget {
+            break;
+        }
+        acc += group;
+        cut = c;
+        i += n;
+    }
+    cut
+}
+
+/// Pseudocolor with the FlowJo options: colour levels, smoothing, and showing or hiding the outlying events.
+pub fn render_pseudo(g: &Grid, style: &PlotStyle) -> Vec<[u8; 4]> {
+    let mut px = vec![[0u8; 4]; g.w * g.h];
+    if g.max == 0 {
+        return px;
+    }
+    let (field, reference) = if style.pseudo_smooth {
+        let f = density_field(g, true, style.smooth_strength);
+        let mut occ: Vec<f64> = f.iter().copied().filter(|v| *v > 1e-9).collect();
+        occ.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let r = occ.get(((occ.len().max(1) - 1) as f64 * 0.99).round() as usize).copied().unwrap_or(1.0).max(1e-9);
+        (f, r)
+    } else {
+        (density_field(g, false, 1), reference_count(g) as f64)
+    };
+    let cut = if style.pseudo_outliers { 0 } else { outlier_cut(g) };
+    let levels = style.pseudo_levels.clamp(4, 256) as f64;
+    for row in 0..g.h {
+        let src = (g.h - 1 - row) * g.w;
+        for col in 0..g.w {
+            let (v, c) = (field[row * g.w + col], g.counts[src + col]);
+            let shown = if style.pseudo_smooth { v > 0.03 * reference && (cut == 0 || c > cut || c == 0) } else { c > 0 && c > cut };
+            if shown {
+                let t = (v / reference).sqrt().min(1.0);
+                let t = if levels < 256.0 { (t * (levels - 1.0)).round() / (levels - 1.0) } else { t };
+                let [r, gr, b] = pseudocolor(t);
+                px[row * g.w + col] = [r, gr, b, 255];
+            }
+        }
+    }
+    px
+}
+
+/// Dots: one per occupied cell, optionally larger, optionally thinned to at most `num_dots`.
+pub fn render_dots_styled(g: &Grid, rgb: [u8; 3], style: &PlotStyle) -> Vec<[u8; 4]> {
+    let mut thin = Grid { w: g.w, h: g.h, counts: g.counts.clone(), max: g.max, inside: g.inside };
+    if style.num_dots > 0 {
+        let occupied = thin.counts.iter().filter(|&&c| c > 0).count();
+        if occupied > style.num_dots {
+            let k = occupied.div_ceil(style.num_dots);
+            let mut seen = 0usize;
+            for c in thin.counts.iter_mut().filter(|c| **c > 0) {
+                if seen % k != 0 {
+                    *c = 0;
+                }
+                seen += 1;
+            }
+        }
+    }
+    let px = render_dots(&thin, rgb);
+    if !style.large_dots {
+        return px;
+    }
+    let mut out = px.clone();
+    for y in 0..g.h {
+        for x in 0..g.w {
+            if px[y * g.w + x][3] > 0 {
+                for (dx, dy) in [(1usize, 0usize), (0, 1), (1, 1)] {
+                    if x + dx < g.w && y + dy < g.h {
+                        out[(y + dy) * g.w + x + dx] = px[y * g.w + x];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn render_kind(g: &Grid, kind: PlotKind, style: &PlotStyle) -> Vec<[u8; 4]> {
     match kind {
-        PlotKind::Pseudocolor => render(g),
-        PlotKind::Dot => render_dots(g, [31, 111, 235]),
+        PlotKind::Pseudocolor => render_pseudo(g, style),
+        PlotKind::Dot => render_dots_styled(g, [31, 111, 235], style),
         PlotKind::Contour => render_contour(g, style),
         PlotKind::Density => render_density(g, style),
         PlotKind::Zebra => render_zebra(g, style),
@@ -551,6 +668,20 @@ pub fn histogram_curve(values: impl Iterator<Item = f64>, lo: f64, hi: f64, bins
     let flat = |label| HistCurve { heights: vec![0.0; bins], scale: 1.0, axis_max: 1.0, y_label: label, percent: false, total };
     if !(peak > 0.0) {
         return flat(style.hist_y.label());
+    }
+    if style.hist_ymax > 0.0 && style.hist_y != HistY::Cdf {
+        // an explicit top for the Y axis: values above it are cut off at the frame
+        let top = style.hist_ymax;
+        let (values, label, percent): (Vec<f64>, &'static str, bool) = match style.hist_y {
+            HistY::Mode | HistY::PercentMax => (counts.iter().map(|c| c / peak * 100.0).collect(), style.hist_y.label(), true),
+            HistY::Count => (counts.clone(), "Count", false),
+            HistY::UnitArea => {
+                let (sum, bin_w) = (counts.iter().sum::<f64>(), (hi - lo) / bins as f64);
+                (counts.iter().map(|c| c / (sum * bin_w)).collect(), "Unit area", false)
+            }
+            HistY::Cdf => unreachable!(),
+        };
+        return HistCurve { heights: values.iter().map(|v| (v / top).clamp(0.0, 1.0)).collect(), scale: 1.0, axis_max: top, y_label: label, percent, total };
     }
     match style.hist_y {
         HistY::Mode | HistY::PercentMax => HistCurve { heights: counts.iter().map(|c| c / peak * 0.94).collect(), scale: 0.94, axis_max: 100.0, y_label: style.hist_y.label(), percent: true, total },
@@ -884,4 +1015,113 @@ mod tests {
         assert_eq!((steps[0].0, steps[1].0, steps[1].1 == steps[0].1), (0.0, 0.01, true));
     }
 
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    fn blob() -> Grid {
+        // a dense core, a halo, and a few isolated single events
+        let mut pts = Vec::new();
+        for i in 0..30000 {
+            let f = |k: usize| ((i * k) % 1000) as f64 / 1000.0;
+            pts.push((50.0 + 12.0 * (f(37) + f(91) - 1.0), 50.0 + 12.0 * (f(53) + f(17) - 1.0)));
+        }
+        for i in 0..800 {
+            let (a, b) = (((i * 41) % 100) as f64 / 100.0, ((i * 67) % 100) as f64 / 100.0);
+            pts.push((50.0 + 40.0 * (a - 0.5), 50.0 + 40.0 * (b - 0.5)));
+        }
+        for k in 0..30 {
+            pts.push((3.0 + k as f64 * 3.0, 95.0 - (k as f64 * 2.9) % 90.0));
+        }
+        bin(pts.into_iter(), Range { x0: 0.0, x1: 100.0, y0: 0.0, y1: 100.0 }, 100, 100)
+    }
+
+    fn distinct(px: &[[u8; 4]]) -> usize {
+        let mut v: Vec<[u8; 4]> = px.iter().copied().filter(|p| p[3] > 0).collect();
+        v.sort();
+        v.dedup();
+        v.len()
+    }
+
+    fn lit(px: &[[u8; 4]]) -> usize {
+        px.iter().filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn pseudocolor_levels_limit_the_number_of_colours_and_default_is_unchanged() {
+        let g = blob();
+        let default = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle::default());
+        assert_eq!(default, render(&g), "the default pseudocolor is exactly the old one");
+        let few = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle { pseudo_levels: 5, ..PlotStyle::default() });
+        assert!(distinct(&few) <= 5, "{} colours", distinct(&few));
+        assert!(distinct(&default) > 12);
+        assert_eq!(lit(&few), lit(&default), "levels change colour, not which cells are drawn");
+    }
+
+    #[test]
+    fn hiding_outliers_drops_only_the_sparsest_one_percent_of_events() {
+        let g = blob();
+        let cut = outlier_cut(&g);
+        assert!(cut >= 1, "single-event cells exist and are outliers");
+        let all = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle::default());
+        let some = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle { pseudo_outliers: false, ..PlotStyle::default() });
+        assert!(lit(&some) < lit(&all));
+        let hidden: usize = g.counts.iter().filter(|&&c| c > 0 && c <= cut).map(|&c| c as usize).sum();
+        assert!(hidden as f64 <= g.inside as f64 * 0.01 + 1e-9, "at most 1% of events: {hidden} of {}", g.inside);
+        // a grid whose every cell is dense has no outliers to hide
+        let dense = bin((0..4000).map(|i| (10.0 + (i % 4) as f64, 10.0 + (i / 1000) as f64)), Range { x0: 0.0, x1: 100.0, y0: 0.0, y1: 100.0 }, 100, 100);
+        assert_eq!(outlier_cut(&dense), 0);
+    }
+
+    #[test]
+    fn pseudocolor_smoothing_spreads_into_neighbouring_cells() {
+        let g = blob();
+        let plain = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle::default());
+        let smooth = render_kind(&g, PlotKind::Pseudocolor, &PlotStyle { pseudo_smooth: true, ..PlotStyle::default() });
+        assert!(lit(&smooth) > 0 && smooth != plain);
+    }
+
+    #[test]
+    fn large_dots_cover_more_and_max_dots_thins() {
+        let g = blob();
+        let small = render_kind(&g, PlotKind::Dot, &PlotStyle::default());
+        let large = render_kind(&g, PlotKind::Dot, &PlotStyle { large_dots: true, ..PlotStyle::default() });
+        assert!(lit(&large) > lit(&small) * 15 / 10);
+        let thin = render_kind(&g, PlotKind::Dot, &PlotStyle { num_dots: 200, ..PlotStyle::default() });
+        assert!(lit(&thin) <= 200 && lit(&thin) > 100, "{}", lit(&thin));
+        let none = render_kind(&g, PlotKind::Dot, &PlotStyle { num_dots: 1_000_000, ..PlotStyle::default() });
+        assert_eq!(none, small, "a limit above the number of dots changes nothing");
+    }
+
+    #[test]
+    fn an_explicit_y_max_sets_the_axis_top_and_cuts_off_taller_bars() {
+        let vals: Vec<f64> = (0..5000).map(|i| (i % 50) as f64 + if i % 7 == 0 { 0.0 } else { 20.0 }).collect();
+        let base = PlotStyle { hist_y: HistY::Count, hist_smooth: false, ..PlotStyle::default() };
+        let auto = histogram_curve(vals.iter().copied(), 0.0, 100.0, 100, &base);
+        let top = auto.axis_max / 2.0;
+        let cut = histogram_curve(vals.iter().copied(), 0.0, 100.0, 100, &PlotStyle { hist_ymax: top, ..base.clone() });
+        assert_eq!(cut.axis_max, top);
+        assert!(cut.heights.iter().all(|h| *h <= 1.0) && cut.heights.iter().any(|h| (*h - 1.0).abs() < 1e-12), "tall bars are cut at the frame");
+        // a small bar keeps its true height relative to the new top
+        let (i, small) = auto.heights.iter().enumerate().filter(|(_, h)| **h > 0.0).min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        assert!((cut.heights[i] - small * auto.axis_max / top).abs() < 1e-9 || cut.heights[i] == 1.0);
+        let pct = histogram_curve(vals.iter().copied(), 0.0, 100.0, 100, &PlotStyle { hist_smooth: false, hist_ymax: 50.0, ..PlotStyle::default() });
+        assert_eq!(pct.axis_max, 50.0);
+        assert!(pct.percent);
+        assert_eq!(histogram_curve(vals.iter().copied(), 0.0, 100.0, 100, &PlotStyle { hist_ymax: f64::NAN, ..base }.clamped()).axis_max, auto.axis_max, "a bad value means automatic");
+    }
+
+    #[test]
+    fn scientific_labels() {
+        use crate::axis::sci_label;
+        assert_eq!(sci_label("50k"), "5e4");
+        assert_eq!(sci_label("-1k"), "-1e3");
+        assert_eq!(sci_label("1M"), "1e6");
+        assert_eq!(sci_label("0"), "0");
+        assert_eq!(sci_label("250"), "2.5e2");
+        assert_eq!(sci_label("10³"), "10³", "decade labels are left alone");
+        assert_eq!(sci_label(""), "");
+    }
 }

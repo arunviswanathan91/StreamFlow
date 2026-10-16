@@ -302,6 +302,13 @@ pub fn style_to_json(s: &PlotStyle) -> Json {
         .with("outlier_size", Json::num(s.outlier_size as f64))
         .with("adjunct", Json::Bool(s.adjunct))
         .with("grid", Json::Bool(s.grid))
+        .with("sci", Json::Bool(s.sci))
+        .with("pseudo_levels", Json::num(s.pseudo_levels as f64))
+        .with("pseudo_smooth", Json::Bool(s.pseudo_smooth))
+        .with("pseudo_outliers", Json::Bool(s.pseudo_outliers))
+        .with("large_dots", Json::Bool(s.large_dots))
+        .with("num_dots", Json::num(s.num_dots as f64))
+        .with("hist_ymax", Json::num(s.hist_ymax))
 }
 
 /// Read the options back; anything missing keeps its default, an unknown name is an error.
@@ -335,6 +342,13 @@ pub fn style_from_json(j: &Json) -> Result<PlotStyle, String> {
         outlier_size: num("outlier_size", d.outlier_size as f64).max(0.0) as usize,
         adjunct: flag("adjunct", d.adjunct),
         grid: flag("grid", d.grid),
+        sci: flag("sci", d.sci),
+        pseudo_levels: num("pseudo_levels", d.pseudo_levels as f64).max(0.0) as usize,
+        pseudo_smooth: flag("pseudo_smooth", d.pseudo_smooth),
+        pseudo_outliers: flag("pseudo_outliers", d.pseudo_outliers),
+        large_dots: flag("large_dots", d.large_dots),
+        num_dots: num("num_dots", d.num_dots as f64).max(0.0) as usize,
+        hist_ymax: num("hist_ymax", d.hist_ymax).max(0.0),
     }
     .clamped())
 }
@@ -426,7 +440,7 @@ mod tests {
         t.x_scale = Some(ScaleSpec::Arcsinh { cofactor: 150.0 });
         t.view = ViewMode::Fixed(Range { x0: -1.0, x1: 8.0, y0: -1.0, y1: 8.0 });
         t.kind = PlotKind::Contour;
-        t.style = PlotStyle { contour_levels: 14, contour_strength: 5, outliers: true, outlier_size: 2, hist_y: HistY::Count, hist_style: HistStyle::Bars, hist_bandwidth: 0.25, adjunct: true, contour_color: [200, 30, 30], ..PlotStyle::default() };
+        t.style = PlotStyle { contour_levels: 14, contour_strength: 5, outliers: true, outlier_size: 2, hist_y: HistY::Count, hist_style: HistStyle::Bars, hist_bandwidth: 0.25, adjunct: true, contour_color: [200, 30, 30], pseudo_levels: 40, pseudo_smooth: true, pseudo_outliers: false, large_dots: true, num_dots: 500, sci: true, hist_ymax: 800.0, grid: false, ..PlotStyle::default() };
         t.add_layer("a.fcs", LayerRole::Iterator);
         t.add_layer("ctrl.fcs", LayerRole::Control);
         d.add_text((20.0, 20.0), "[File_Name] — [Page]");

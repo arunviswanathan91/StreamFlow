@@ -11,6 +11,27 @@ pub struct Tick {
     pub major: bool,
 }
 
+/// An axis number in scientific form: `50k` becomes `5e4`, `-1k` `-1e3`, `0` stays `0`. Labels that are not a plain
+/// number with an optional k / M suffix (decade labels, for instance) are left alone.
+pub fn sci_label(label: &str) -> String {
+    let (body, mult) = match label.chars().last() {
+        Some('k') => (&label[..label.len() - 1], 1e3),
+        Some('M') => (&label[..label.len() - 1], 1e6),
+        _ => (label, 1.0),
+    };
+    match body.parse::<f64>() {
+        Ok(v) if v == 0.0 => "0".to_string(),
+        Ok(v) if v.is_finite() => {
+            let v = v * mult;
+            let e = v.abs().log10().floor() as i32;
+            let m = v / 10f64.powi(e);
+            let m = format!("{m:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
+            format!("{m}e{e}")
+        }
+        _ => label.to_string(),
+    }
+}
+
 /// Compact label for a raw data value: `0`, `500`, `1k`, `10k`, `-1k`, `1M`.
 pub fn format_raw(v: f64) -> String {
     if v == 0.0 {

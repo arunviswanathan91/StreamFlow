@@ -146,7 +146,10 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
 
     // ---- grid and ticks (under the data)
     let mut axes: Vec<Item> = Vec::new();
-    let x_ticks = ticks(&spec.x_scale, spec.range.x0, spec.range.x1);
+    let mut x_ticks = ticks(&spec.x_scale, spec.range.x0, spec.range.x1);
+    if style.sci {
+        x_ticks.iter_mut().for_each(|t| t.label = crate::axis::sci_label(&t.label));
+    }
     let x_show = declutter(&x_ticks.iter().map(|t| (t.major, t.pos, fr.x(t.pos), text_width(&t.label, 6.8, false) / 2.0, t.label.as_str())).collect::<Vec<_>>());
     for (t, show) in x_ticks.into_iter().zip(x_show) {
         let x = fr.x(t.pos);
@@ -163,7 +166,10 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         }
     }
     if !hist {
-        let y_ticks = ticks(&spec.y_scale, spec.range.y0, spec.range.y1);
+        let mut y_ticks = ticks(&spec.y_scale, spec.range.y0, spec.range.y1);
+        if style.sci {
+            y_ticks.iter_mut().for_each(|t| t.label = crate::axis::sci_label(&t.label));
+        }
         let y_show = declutter(&y_ticks.iter().map(|t| (t.major, t.pos, fr.y(t.pos), 4.2, t.label.as_str())).collect::<Vec<_>>());
         for (t, show) in y_ticks.into_iter().zip(y_show) {
             let y = fr.y(t.pos);
@@ -187,6 +193,7 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
                 fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
             }
             axes.push(line((fr.l - 3.0, y), (fr.l, y), AXIS, 0.6));
+            let label = if style.sci { crate::axis::sci_label(&label) } else { label };
             axes.push(Item::Text(Text::new(fr.l - 4.5, y, label, 6.8).align(Align::Right, VAlign::Middle).color(INK)));
         }
     }
