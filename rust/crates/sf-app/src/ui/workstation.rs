@@ -45,7 +45,7 @@ impl Default for State {
     fn default() -> Self {
         State {
             pops_open: true,
-            options_open: true,
+            options_open: false,
             tab: Tab::Overview,
             graphs: HashMap::new(),
             collapsed: HashSet::new(),

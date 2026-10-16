@@ -1814,3 +1814,131 @@ fn layout_pages_become_a_powerpoint_deck_with_one_slide_each() {
     assert!(text.contains(&format!("page 1 of {}", pages.len())));
     assert!(app.pages_pptx(&[], "x").is_err());
 }
+
+// ---- layout stability, activity cue, export preference, unmixed channels, axis labels -----------------------
+
+#[test]
+fn the_plot_keeps_its_size_when_side_panes_open_and_close() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    assert!(!app.ws.options_open, "the options pane starts closed");
+    let size = (plot.width().round(), plot.height().round());
+    for (options, pops) in [(true, true), (true, false), (false, false), (false, true)] {
+        app.ws.options_open = options;
+        app.ws.pops_open = pops;
+        settle(&mut app, &ctx);
+        settle(&mut app, &ctx);
+        let p = app.ws.graphs[&w].plot_rect.unwrap();
+        assert_eq!((p.width().round(), p.height().round()), size, "options {options}, populations {pops}");
+    }
+}
+
+#[test]
+fn slow_work_shows_its_cue_for_two_frames_before_it_runs() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    settle(&mut app, &ctx);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = ran.clone();
+    app.run_busy("Doing the thing…", move |_| flag.set(true));
+    assert!(app.is_busy());
+    frame(&mut app, &ctx);
+    assert!(!ran.get() && app.act.shown.as_deref() == Some("Doing the thing…"), "the cue is on screen before the work starts");
+    frame(&mut app, &ctx);
+    assert!(!ran.get());
+    frame(&mut app, &ctx);
+    assert!(ran.get(), "the work ran");
+    frame(&mut app, &ctx);
+    assert!(!app.is_busy() && app.act.shown.is_none(), "and the cue is gone");
+}
+
+#[test]
+fn the_export_preference_is_saved_reloaded_and_used_by_quick_exports() {
+    let path = std::env::temp_dir().join(format!("sf_export_prefs_{}.json", std::process::id()));
+    std::env::set_var("STREAMFLOW_EXPORT_PREFS", &path);
+    let _ = std::fs::remove_file(&path);
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    // nothing saved: a quick export uses the factory settings with the plot own style
+    assert!(app.pexp.defaults.is_none());
+    let factory = app.quick_export_settings(w);
+    assert_eq!((factory.dpi, factory.width_pt), (300.0, 360.0));
+    let mut set = factory.clone();
+    set.dpi = 150.0;
+    set.width_pt = 216.0;
+    set.height_pt = 144.0;
+    set.unit = plot_export::Unit::Mm;
+    set.transparent = true;
+    set.gates = false;
+    set.style.grid = true;
+    set.style.pseudo_levels = 32;
+    app.save_export_prefs(&set).unwrap();
+    // a new session reads it back, and every quick export now follows it
+    let mut app2 = app_with_sample();
+    app2.load_export_prefs();
+    assert_eq!(app2.pexp.defaults.as_ref(), Some(&set));
+    let (w2, _) = ready_tab(&mut app2, &ctx);
+    assert_eq!(app2.quick_export_settings(w2), set);
+    let png = app2.export_bytes(w2, &plot_export::Settings { format: plot_export::Format::Png, ..app2.quick_export_settings(w2) }, "t").unwrap();
+    let (pw, ph) = set.pixels();
+    assert_eq!(&png[1..4], b"PNG");
+    assert_eq!((u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap())), (pw, ph), "the picture has the saved size and resolution");
+    // the editor opens on the saved preference
+    app2.open_plot_export(w2);
+    assert_eq!(app2.pexp.set, set);
+    // a damaged file is ignored with a message, not a crash
+    std::fs::write(&path, "{ not json").unwrap();
+    let mut app3 = app_with_sample();
+    app3.load_export_prefs();
+    assert!(app3.pexp.defaults.is_none() && app3.status.contains("Ignored"));
+    app2.reset_export_prefs();
+    assert!(app2.pexp.defaults.is_none() && !path.exists());
+    std::env::remove_var("STREAMFLOW_EXPORT_PREFS");
+}
+
+#[test]
+fn unmixed_channels_open_on_a_plot_and_lead_the_axis_lists() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let n = app.session.sample(0).n_events;
+    app.session.set_unmixed(0, vec!["FITC".into(), "PE".into(), "Residual".into()], vec![vec![1.0; n], vec![2.0; n], vec![0.5; n]], 262_144.0).unwrap();
+    app.open_unmixed_plot(0, true).unwrap();
+    settle(&mut app, &ctx);
+    let w = app.session.windows.last().unwrap();
+    assert_eq!((w.x_chan.as_str(), w.y_chan.as_str()), ("Unmix-FITC", "Unmix-PE"));
+    assert_eq!(app.module(), Module::Workstation);
+    assert!(matches!(app.ws.tab, Tab::Graph(id) if id == w.id));
+    // a sample with fewer than two unmixed markers says so
+    app.session.clear_unmixed(0);
+    assert!(app.open_unmixed_plot(0, true).is_err());
+}
+
+#[test]
+fn crowded_axis_labels_are_thinned_so_none_overlap() {
+    let ctx = egui::Context::default();
+    let font = egui::FontId::proportional(10.5);
+    let mut kept_total = 0;
+    let _ = ctx.run(egui::RawInput { screen_rect: Some(screen()), ..Default::default() }, |c| {
+        let p = c.layer_painter(egui::LayerId::background());
+        // twelve labels 6 points apart cannot all fit
+        let items: Vec<(f32, String)> = (0..12).map(|i| (100.0 + i as f32 * 6.0, if i == 3 { "0".to_string() } else { format!("{}k", i * 10) })).collect();
+        let keep = graph::declutter(&p, &items, &font, true, Some(3), 4.0);
+        assert!(keep[3], "the zero label is always kept");
+        let widths: Vec<f32> = items.iter().map(|(_, t)| p.layout_no_wrap(t.clone(), font.clone(), egui::Color32::BLACK).size().x).collect();
+        let kept: Vec<usize> = (0..12).filter(|&i| keep[i]).collect();
+        for a in &kept {
+            for b in &kept {
+                if a < b {
+                    assert!((items[*a].0 - items[*b].0).abs() >= (widths[*a] + widths[*b]) / 2.0, "labels {a} and {b} overlap");
+                }
+            }
+        }
+        kept_total = kept.len();
+        // well-spaced labels are all kept, and minor ticks (no text) never block
+        let spread: Vec<(f32, String)> = (0..5).map(|i| (i as f32 * 80.0, format!("{i}"))).chain([(40.0, String::new())]).collect();
+        assert_eq!(graph::declutter(&p, &spread, &font, true, None, 4.0), vec![true, true, true, true, true, false]);
+    });
+    assert!(kept_total >= 2 && kept_total < 12, "kept {kept_total}");
+}
