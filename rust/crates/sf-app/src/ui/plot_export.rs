@@ -406,6 +406,14 @@ impl App {
                     };
                 }
             }
+            if ui.add_enabled(have, egui::Button::new("All pages as PowerPoint…")).on_hover_text("One slide per page, as pictures at the chosen resolution").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("PowerPoint", &["pptx"]).set_file_name(format!("{stem}.pptx")).save_file() {
+                    self.status = match self.pages_pptx(pages, stem).and_then(|b| std::fs::write(&p, b).map_err(|e| e.to_string())) {
+                        Ok(()) => format!("Saved {} slide(s) to {}.", pages.len(), p.display()),
+                        Err(e) => format!("Could not save: {e}"),
+                    };
+                }
+            }
             if ui.add_enabled(have, egui::Button::new("Copy page")).on_hover_text("Copy this page as a picture to paste into a slide or document").clicked() {
                 self.status = match crate::raster::rasterize(&pages[current], self.pexp.set.dpi, false).and_then(|r| super::copy_rgba_to_clipboard(r.width as usize, r.height as usize, &r.rgba).map(|_| (r.width, r.height))) {
                     Ok((w, h)) => format!("Copied the page to the clipboard ({w} x {h} px)."),

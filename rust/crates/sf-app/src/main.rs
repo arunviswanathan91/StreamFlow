@@ -306,6 +306,9 @@ fn main() -> eframe::Result<()> {
         if args.iter().any(|a| a == "--no-dialogs") {
             app.close_dialogs();
         }
+        if args.iter().any(|a| a == "--export-group") {
+            app.open_group_export("Controls");
+        }
     }
     if args.iter().any(|a| a == "--compute-stats") {
         app.compute_statistics();

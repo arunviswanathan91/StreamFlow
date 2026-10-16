@@ -8,6 +8,7 @@ mod cross_view;
 mod discover_view;
 mod layout_editor;
 mod gate_menu;
+mod group_export;
 mod plot_export;
 mod plot_style_ui;
 mod layout_view;
@@ -122,6 +123,7 @@ pub struct App {
     pub(crate) export: export_view::State,
     pub(crate) pexp: plot_export::State,
     pub(crate) dlg: gate_menu::Dialogs,
+    pub(crate) gx: group_export::State,
     pub disc: discover_view::State,
     pub ana: analysis_view::State,
     pub cmp: compare_view::State,
@@ -165,6 +167,7 @@ impl App {
             export: export_view::State::default(),
             pexp: plot_export::State::default(),
             dlg: gate_menu::Dialogs::default(),
+            gx: group_export::State::default(),
             disc: discover_view::State::default(),
             ana: analysis_view::State::default(),
             cmp: compare_view::State::default(),
@@ -314,6 +317,7 @@ impl App {
         });
         self.plot_export_window(ctx);
         self.context_dialogs(ctx);
+        self.group_export_window(ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -357,6 +361,11 @@ impl App {
                     if ui.button("Save workspace…   Ctrl+S").clicked() {
                         ui.close_menu();
                         self.save_workspace();
+                    }
+                    if ui.button("Export group…").on_hover_text("Events, statistics and layout pages of a group of samples").clicked() {
+                        ui.close_menu();
+                        self.gx.group = self.ws.cur_group.clone().unwrap_or_else(|| crate::session::ALL_SAMPLES.to_string());
+                        self.gx.open = true;
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {

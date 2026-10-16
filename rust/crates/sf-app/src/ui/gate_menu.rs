@@ -823,6 +823,10 @@ impl App {
                         mgr.color = [0x1F, 0x6F, 0xEB];
                         mgr.synced = false;
                     }
+                    if ui.button("Export group…").clicked() {
+                        self.gx.group = mgr.sel.clone().filter(|g| g != "" && !mgr.creating).unwrap_or_else(|| ALL_SAMPLES.to_string());
+                        self.gx.open = true;
+                    }
                     ui.add_space(6.0);
                     ui.label(RichText::new("From a keyword").size(12.0).color(theme::MUTED));
                     egui::ComboBox::from_id_salt("grp_kw").width(190.0).selected_text(if mgr.keyword.is_empty() { "Choose keyword…".to_string() } else { mgr.keyword.clone() }).show_ui(ui, |ui| {
