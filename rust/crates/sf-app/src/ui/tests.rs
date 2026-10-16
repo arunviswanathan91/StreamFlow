@@ -1845,6 +1845,26 @@ fn the_plot_keeps_its_size_when_side_panes_open_and_close() {
 }
 
 #[test]
+fn a_graph_can_be_detached_into_its_own_window_and_docked_again() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.ws.detached.insert(w);
+    settle(&mut app, &ctx);
+    settle(&mut app, &ctx);
+    let floating = app.ws.graphs[&w].plot_rect;
+    assert!(floating.map_or(false, |r| r.width() > 50.0), "the floating window draws the plot");
+    app.ws.detached.remove(&w);
+    settle(&mut app, &ctx);
+    settle(&mut app, &ctx);
+    assert!(app.ws.graphs[&w].plot_rect.map_or(false, |r| r.width() > 50.0), "docked again");
+    // a window that no longer exists drops out of the detached set
+    app.ws.detached.insert(9_999);
+    settle(&mut app, &ctx);
+    assert!(!app.ws.detached.contains(&9_999));
+}
+
+#[test]
 fn slow_work_shows_its_cue_for_two_frames_before_it_runs() {
     let ctx = egui::Context::default();
     let mut app = app_with_sample();
