@@ -152,7 +152,11 @@ impl Default for App {
 impl App {
     pub fn new() -> App {
         App {
-            session: Session::new(),
+            session: {
+                let mut s = Session::new();
+                s.draw_target = crate::session::DrawTarget::app_default();
+                s
+            },
             module: Module::Workstation,
             nav_expanded: true,
             ws: workstation::State::default(),

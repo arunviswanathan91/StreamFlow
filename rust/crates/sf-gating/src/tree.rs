@@ -356,6 +356,19 @@ impl GateTree {
         Ok(())
     }
 
+    /// Replace a gate by another of any shape family (the group's version of it), keeping the name, the children
+    /// and the place in the tree. The new gate is validated like a new one. Only a gate can be replaced.
+    pub fn reset_gate(&mut self, id: NodeId, gate: Gate) -> Result<(), TreeError> {
+        if !matches!(&self.node(id)?.kind, NodeKind::Gate(_)) {
+            return Err(TreeError::BadExpression("only a gate can be replaced by a group's version".into()));
+        }
+        if !matches!(gate.kind, GateKind::Indexed(_)) {
+            Gate::new(gate.kind.clone(), &gate.x_chan, gate.y_chan.as_deref(), gate.xs.clone(), gate.ys.clone()).map_err(TreeError::Gate)?;
+        }
+        self.nodes[id].kind = NodeKind::Gate(gate);
+        Ok(())
+    }
+
     /// Remove a population and everything below it. The root cannot be removed. Ids are not reused.
     pub fn remove(&mut self, id: NodeId) -> Result<usize, TreeError> {
         if id == Self::ROOT {

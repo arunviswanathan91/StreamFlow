@@ -22,6 +22,9 @@ use std::path::Path;
 
 pub use crate::sample::LoadedSample;
 
+mod groups;
+pub use groups::{Applied, DrawTarget, GateOwner, Group, GroupDelete, ALL_SAMPLES};
+
 /// A short display name for a channel: `Comp-BV421-A` -> `BV421`, `FITC-A` -> `FITC`.
 pub fn short_name(channel: &str) -> String {
     let c = channel.strip_prefix(crate::sample::COMP_PREFIX).unwrap_or(channel);
@@ -92,6 +95,13 @@ pub struct Session {
     /// Messages for the status bar / log (load problems, evaluation warnings...).
     pub log: Vec<String>,
     fmo: BTreeMap<String, Fmo>,
+    /// Sample groups (besides the built-in All Samples) and the gates they own.
+    pub groups: Vec<Group>,
+    pub applied: Vec<Applied>,
+    /// Where a newly drawn gate goes.
+    pub draw_target: DrawTarget,
+    /// Whether gates owned by All Samples move together in every sample.
+    pub all_synced: bool,
 }
 
 impl Default for Session {
@@ -102,7 +112,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new() }
+        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
     }
 
     pub fn samples(&self) -> &[LoadedSample] {
@@ -308,6 +318,7 @@ impl Session {
             }
         };
         self.touch(w.sample);
+        self.apply_new_gate(w.sample, nid);
         Ok(nid)
     }
 
@@ -321,6 +332,7 @@ impl Session {
             return Err(e.to_string());
         }
         self.touch(sample);
+        self.propagate_if_synced(sample, node);
         Ok(self.count(sample, node))
     }
     /// A unique default name under `parent`: "Population 1", "Population 2", ...
@@ -331,6 +343,9 @@ impl Session {
     }
 
     pub fn rename(&mut self, sample: usize, node: NodeId, new_name: &str) -> Result<(), String> {
+        if self.gate_owner(sample, node).is_some() {
+            return self.rename_group_owned(sample, node, new_name);
+        }
         let t = &mut self.states[sample].tree;
         let parent = t.parent(node).map_err(|e| e.to_string())?.ok_or("the root cannot be renamed")?;
         if new_name.trim().is_empty() {
@@ -348,6 +363,14 @@ impl Session {
 
     /// Delete a population and everything beneath it; windows showing any of them are closed.
     pub fn delete(&mut self, sample: usize, node: NodeId) -> Result<usize, String> {
+        if let Some(o) = self.gate_owner(sample, node) {
+            return Err(format!("This gate is owned by the group '{}'. Delete it from the group (right-click ▸ Delete from group…) or release it to the samples first.", o.group));
+        }
+        self.delete_unchecked(sample, node)
+    }
+
+    /// Delete without the group-ownership check (used when deleting from the group itself).
+    pub(crate) fn delete_unchecked(&mut self, sample: usize, node: NodeId) -> Result<usize, String> {
         let doomed = self.states[sample].tree.self_and_descendants(node).map_err(|e| e.to_string())?;
         self.snapshot(sample);
         let n = match self.states[sample].tree.remove(node) {
@@ -363,6 +386,7 @@ impl Session {
         }
         self.states[sample].meta.retain(|k, _| !doomed.contains(k));
         self.touch(sample);
+        self.prune_applied();
         Ok(n)
     }
 
@@ -370,33 +394,7 @@ impl Session {
     /// running it twice leaves one copy (BUG-15). Returns how many samples received it; samples that lack
     /// the parent path are skipped with a log message.
     pub fn apply_to_all(&mut self, sample: usize, node: NodeId) -> Result<usize, String> {
-        let path = self.states[sample].tree.path(node).map_err(|e| e.to_string())?;
-        if path.is_empty() {
-            return Err("select a population first".into());
-        }
-        let gate = match self.states[sample].tree.kind(node).map_err(|e| e.to_string())? {
-            NodeKind::Gate(g) => g.clone(),
-            _ => return Err("only geometric gates can be applied to other samples".into()),
-        };
-        let mut done = 0;
-        for other in 0..self.samples.len() {
-            if other == sample {
-                continue;
-            }
-            let parent_path: Vec<&str> = path[..path.len() - 1].iter().map(String::as_str).collect();
-            let parent = if parent_path.is_empty() { Some(GateTree::ROOT) } else { self.states[other].tree.find(&parent_path) };
-            match parent {
-                Some(p) => {
-                    self.snapshot(other);
-                    // a gate referring to channels the other sample lacks is still added; evaluation reports it
-                    self.states[other].tree.replace_gate(p, path.last().unwrap(), gate.clone()).map_err(|e| e.to_string())?;
-                    self.touch(other);
-                    done += 1;
-                }
-                None => self.log.push(format!("{}: skipped — it has no '{}' to put the gate under", self.samples[other].name, parent_path.join(" > "))),
-            }
-        }
-        Ok(done)
+        self.apply_to_group(sample, node, ALL_SAMPLES)
     }
 
     // ---- undo / redo ----------------------------------------------------------------------------
@@ -480,6 +478,7 @@ impl Session {
             return Err(e.to_string());
         }
         self.touch(sample);
+        self.propagate_if_synced(sample, node);
         Ok(self.count(sample, node))
     }
 
@@ -670,6 +669,9 @@ impl Session {
             }
         }
         self.touch(w.sample);
+        for &n in &ids {
+            self.apply_new_gate(w.sample, n);
+        }
         Ok(ids)
     }
 
@@ -794,7 +796,7 @@ impl Session {
         for (ch, f) in &self.fmo {
             fmo = fmo.with(ch, Json::obj().with("level", Json::num(f.level)).with("source", Json::Str(f.source.clone())).with("n", Json::num(f.n as f64)).with("percentile", Json::num(f.percentile)));
         }
-        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo)
+        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("groups", self.groups_to_json())
     }
 
     /// Replace the gating trees of the currently loaded samples with those in a saved workspace (matched by
@@ -847,6 +849,8 @@ impl Session {
         for orphan in loaded.keys() {
             warnings.push(format!("the workspace has gates for '{orphan}', which is not loaded"));
         }
+        let sharing = doc.get("groups").cloned().unwrap_or_else(Json::obj);
+        warnings.extend(self.groups_from_json(&sharing));
         self.windows.clear();
         self.selected = None;
         Ok(warnings)
@@ -1078,6 +1082,7 @@ mod tests {
         let log_before = s.log.len();
         // remove P from c, then the child cannot be applied there
         let cp = s.tree(c).find(&["P"]).unwrap();
+        s.release_gate(c, cp).unwrap(); // a group-owned gate is released before this sample can drop it
         s.delete(c, cp).unwrap();
         assert_eq!(s.apply_to_all(a, child).unwrap(), 1);
         assert!(s.log[log_before..].iter().any(|m| m.contains("c.fcs") && m.contains("skipped")), "{:?}", s.log);
