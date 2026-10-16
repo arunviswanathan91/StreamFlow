@@ -1721,3 +1721,96 @@ fn gate_of_sample(app: &App, s: usize, node: usize) -> Gate {
         k => panic!("{k:?}"),
     }
 }
+
+#[test]
+fn a_group_exports_equivalent_populations_as_fcs_and_csv_alone_or_concatenated() {
+    use crate::ui::group_export::{DataFormat, TableFormat};
+    let ctx = egui::Context::default();
+    let mut app = three_sample_app();
+    let w = app.session.open_population(0, GateTree::ROOT).unwrap();
+    app.open_tab(0, GateTree::ROOT).unwrap();
+    settle(&mut app, &ctx);
+    app.session.commit_shape(w, &Shape::Rect { x0: 20_000.0, x1: 120_000.0, y0: 20_000.0, y1: 120_000.0 }, "Lymph").unwrap();
+    app.session.create_group("Pair", &[0, 2]).unwrap();
+    let pop = vec!["Lymph".to_string()];
+    assert_eq!(app.common_populations("Pair"), vec![Vec::<String>::new(), pop.clone()]);
+    let count = |app: &mut App, s: usize| {
+        let n = app.session.tree(s).find(&["Lymph"]).unwrap();
+        app.session.count(s, n)
+    };
+    let (c0, c2) = (count(&mut app, 0), count(&mut app, 2));
+    assert!(c0 > 100 && c2 > 100);
+    // one FCS per member, only the group's samples, each with that sample's events of the population
+    let (files, notes) = app.group_data_files("Pair", &pop, DataFormat::Fcs, false).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(files.iter().map(|f| f.0.clone()).collect::<Vec<_>>(), vec!["s0_Lymph.fcs", "s2_Lymph.fcs"]);
+    let f0 = sf_fcs::Fcs::parse(&files[0].1).unwrap();
+    assert_eq!((f0.n_events, f0.n_params()), (c0, 2));
+    // every exported event satisfies the gate
+    for r in 0..f0.n_events {
+        let (x, y) = (f0.events[r * 2], f0.events[r * 2 + 1]);
+        assert!((20_000.0..=120_000.0).contains(&x) && (20_000.0..=120_000.0).contains(&y), "event {r} = ({x}, {y})");
+    }
+    // channel CSV is the raw numbers, scale CSV is the transformed ones
+    let (csv, _) = app.group_data_files("Pair", &pop, DataFormat::CsvChannel, false).unwrap();
+    let text = String::from_utf8(csv[0].1.clone()).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next().unwrap(), "FSC-A,SSC-A");
+    let first: Vec<f64> = lines.next().unwrap().split(',').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(first, vec![f0.events[0] as f64, f0.events[1] as f64]);
+    assert_eq!(text.lines().count(), c0 + 1);
+    let (scaled, _) = app.group_data_files("Pair", &pop, DataFormat::CsvScale, false).unwrap();
+    let st = String::from_utf8(scaled[0].1.clone()).unwrap();
+    let sfirst: Vec<f64> = st.lines().nth(1).unwrap().split(',').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(sfirst[0], first[0], "scatter is linear, so scale = channel");
+    // concatenated: one file, a SampleID column that says which sample each event came from
+    let (cat, cnotes) = app.group_data_files("Pair", &pop, DataFormat::Fcs, true).unwrap();
+    assert_eq!(cat.len(), 1);
+    assert!(cnotes.iter().any(|n| n.contains("SampleID") && n.contains("1 = s0.fcs") && n.contains("2 = s2.fcs")), "{cnotes:?}");
+    let fc = sf_fcs::Fcs::parse(&cat[0].1).unwrap();
+    assert_eq!((fc.n_events, fc.n_params()), (c0 + c2, 3));
+    assert_eq!(fc.params[2].name, "SampleID");
+    let ids: Vec<f32> = (0..fc.n_events).map(|r| fc.events[r * 3 + 2]).collect();
+    assert_eq!(ids.iter().filter(|&&v| v == 1.0).count(), c0);
+    assert_eq!(ids.iter().filter(|&&v| v == 2.0).count(), c2);
+    // a population one member lacks is skipped and said so; none at all is an error
+    app.session.create_group("Mixed", &[0, 1]).unwrap();
+    let n1 = app.session.tree(1).find(&["Lymph"]).unwrap();
+    app.session.release_gate(1, n1).ok();
+    app.session.delete(1, n1).unwrap();
+    let (some, snotes) = app.group_data_files("Mixed", &pop, DataFormat::Fcs, false).unwrap();
+    assert_eq!(some.len(), 1);
+    assert!(snotes.iter().any(|n| n.contains("s1.fcs") && n.contains("skipped")), "{snotes:?}");
+    assert!(app.group_data_files("Pair", &["Nope".to_string()], DataFormat::Fcs, false).is_err());
+    // the group's statistics table: only its samples, as CSV, Excel and PDF
+    let csv = String::from_utf8(app.group_table_bytes("Pair", TableFormat::Csv).unwrap()).unwrap();
+    assert!(csv.contains("s0.fcs") && csv.contains("s2.fcs") && !csv.contains("s1.fcs"));
+    let xlsx = app.group_table_bytes("Pair", TableFormat::Excel).unwrap();
+    assert_eq!(&xlsx[..2], b"PK");
+    let pdf = app.group_table_bytes("Pair", TableFormat::Pdf).unwrap();
+    assert!(crate::figure::validate_pdf(&pdf).is_ok());
+    // the window draws, and opening the layout selects exactly the group
+    app.gx.open = true;
+    app.gx.group = "Pair".into();
+    settle(&mut app, &ctx);
+    app.use_group_in_layout("Pair");
+    assert_eq!(app.lay.sel, vec![true, false, true]);
+}
+
+#[test]
+fn layout_pages_become_a_powerpoint_deck_with_one_slide_each() {
+    let (mut app, ctx) = editor_app();
+    { let to = page_pt(&app, 0.3, 0.45); drag_sample(&mut app, &ctx, "t.fcs", to); }
+    settle(&mut app, &ctx);
+    app.editor_run_batch(Some(&ctx)).unwrap();
+    app.pexp.set.dpi = 72.0;
+    let pages = app.lay.ed.batch.clone();
+    let deck = app.pages_pptx(&pages, "Layout").unwrap();
+    assert_eq!(&deck[..2], b"PK");
+    let text = String::from_utf8_lossy(&deck);
+    for i in 1..=pages.len() {
+        assert!(text.contains(&format!("ppt/slides/slide{i}.xml")) && text.contains(&format!("ppt/media/image{i}.png")));
+    }
+    assert!(text.contains(&format!("page 1 of {}", pages.len())));
+    assert!(app.pages_pptx(&[], "x").is_err());
+}
