@@ -34,11 +34,20 @@ pub fn format_raw(v: f64) -> String {
 }
 
 /// A "nice" step (1, 2 or 5 times a power of ten) giving roughly `target` intervals over `span`.
-fn nice_step(span: f64, target: usize) -> f64 {
+pub fn nice_step(span: f64, target: usize) -> f64 {
     let raw = span / target.max(1) as f64;
     let mag = 10f64.powf(raw.log10().floor());
     let f = raw / mag;
     mag * if f < 1.5 { 1.0 } else if f < 3.5 { 2.0 } else if f < 7.5 { 5.0 } else { 10.0 }
+}
+
+/// The top of a count-style axis: the next multiple of a clean step at or above `v` (a 10.5k peak gets 12k, not 20k).
+pub fn nice_top(v: f64) -> f64 {
+    if !(v > 0.0) || !v.is_finite() {
+        return 1.0;
+    }
+    let step = nice_step(v, 5);
+    (v / step - 1e-9).ceil().max(1.0) * step
 }
 
 /// Ticks for an axis showing display-space range `[d0, d1]` on `scale`.
@@ -152,5 +161,21 @@ mod tests {
         let t = ticks(&sc, xf.forward(-500.0), xf.forward(100_000.0));
         assert!(t.iter().any(|k| k.label == "0") && t.iter().any(|k| k.label == "10k"));
         assert!(ticks(&ScaleSpec::Arcsinh { cofactor: -1.0 }, 0.0, 1.0).is_empty(), "invalid scale yields no ticks, not a panic");
+    }
+}
+
+#[cfg(test)]
+mod nice_top_tests {
+    use super::nice_top;
+
+    #[test]
+    fn the_axis_top_is_the_next_clean_step_at_or_above_the_value() {
+        for (v, want) in [(10_500.0, 12_000.0), (10_000.0, 10_000.0), (7.0, 7.0), (7.2, 8.0), (1.0, 1.0), (0.043, 0.05), (950.0, 1000.0)] {
+            let t = nice_top(v);
+            assert!(t >= v - 1e-12, "{t} must cover {v}");
+            assert!((t - want).abs() < want * 1e-9, "nice_top({v}) = {t}, wanted {want}");
+        }
+        assert_eq!(nice_top(0.0), 1.0);
+        assert_eq!(nice_top(f64::NAN), 1.0);
     }
 }

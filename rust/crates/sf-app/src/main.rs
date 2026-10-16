@@ -203,6 +203,24 @@ fn main() -> eframe::Result<()> {
     }
     if args.iter().any(|a| a == "--editor-demo") || flag("layout-batch-pdf").is_some() {
         app.demo_layout(flag("iterate-keyword"));
+        // `--tile-kinds=histogram,contour` and the same option flags for every tile
+        {
+            let kinds: Vec<sf_app::density::PlotKind> = flag("tile-kinds").map(|k| k.split(',').filter_map(sf_app::density::PlotKind::from_key).collect()).unwrap_or_default();
+            for (i, t) in app.lay.ed.doc.tiles.iter_mut().enumerate() {
+                if let Some(k) = kinds.get(i) {
+                    t.kind = *k;
+                }
+                if let Some(y) = flag("hist-y").and_then(|k| sf_app::density::HistY::from_key(&k)) {
+                    t.style.hist_y = y;
+                }
+                if let Some(n) = flag("contour-levels").and_then(|n| n.parse().ok()) {
+                    t.style.contour_levels = n;
+                }
+                t.style.outliers |= args.iter().any(|a| a == "--outliers");
+                t.style.adjunct |= args.iter().any(|a| a == "--adjunct");
+                t.style = t.style.clone().clamped();
+            }
+        }
         if let Some(p) = flag("layout-batch-pdf") {
             match app.editor_run_batch(None) {
                 Ok(n) => eprintln!("batch: {n} page(s)"),
@@ -213,6 +231,29 @@ fn main() -> eframe::Result<()> {
                 Err(e) => eprintln!("could not write {p}: {e}"),
             }
             std::process::exit(0);
+        }
+    }
+    // plot kind and options for the first graph window (screenshots, checks)
+    if flag("kind").is_some() || flag("hist-y").is_some() || flag("contour-levels").is_some() || args.iter().any(|a| a == "--outliers" || a == "--adjunct") {
+        if app.session.windows.is_empty() && !app.session.samples().is_empty() {
+            let _ = app.open_tab(0, GateTree::ROOT);
+        }
+        if let Some(id) = app.session.windows.first().map(|w| w.id) {
+            if let Some(k) = flag("kind").and_then(|k| sf_app::density::PlotKind::from_key(&k)) {
+                if let Some(win) = app.session.window_mut(id) {
+                    win.kind = k;
+                }
+            }
+            let st = app.plot_style_mut(id);
+            if let Some(y) = flag("hist-y").and_then(|k| sf_app::density::HistY::from_key(&k)) {
+                st.hist_y = y;
+            }
+            if let Some(n) = flag("contour-levels").and_then(|n| n.parse().ok()) {
+                st.contour_levels = n;
+            }
+            st.outliers |= args.iter().any(|a| a == "--outliers");
+            st.adjunct |= args.iter().any(|a| a == "--adjunct");
+            *st = st.clone().clamped();
         }
     }
     if args.iter().any(|a| a == "--compute-stats") {

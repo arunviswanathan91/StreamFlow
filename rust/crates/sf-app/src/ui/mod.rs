@@ -7,6 +7,7 @@ mod compare_view;
 mod cross_view;
 mod discover_view;
 mod layout_editor;
+mod plot_style_ui;
 mod layout_view;
 mod export_view;
 mod graph;

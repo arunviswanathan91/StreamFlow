@@ -2,7 +2,7 @@
 //! FMO reference lines and caption text. The figure can be written as SVG or PDF, or placed on a layout page.
 
 use crate::axis::ticks;
-use crate::density::{bin, histogram, render, render_dots, PlotKind, Range};
+use crate::density::{bin, hist_path, hist_ticks, histogram_curve, render_kind, unify_curves, HistCurve, HistStyle, PlotKind, PlotStyle, Range};
 use crate::figure::{text_width, Align, Figure, Item, Rgba, Stroke, Text, VAlign, WHITE};
 use sf_core::scale::ScaleSpec;
 use sf_gating::{Gate, GateKind};
@@ -49,6 +49,8 @@ pub struct PlotSpec<'a> {
     pub layers: Vec<PlotLayer>,
     /// List the layers in a legend (only when there is more than one).
     pub legend: bool,
+    /// Histogram, contour and density options.
+    pub style: PlotStyle,
     pub range: Range,
     pub kind: PlotKind,
     pub x_chan: String,
@@ -116,6 +118,10 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
     let (l, r, b) = (46.0, 10.0, 34.0 + footer_h);
     let top = 4.0 + caption_h + if caption_h > 0.0 { 4.0 } else { 0.0 };
     let fr = Frame { l, t: top, w: (spec.width - l - r).max(20.0), h: (spec.height - top - b).max(20.0), range: spec.range };
+    // adjunct histograms take a strip above and a strip to the right of the plot
+    const ADJ: f32 = 34.0;
+    let adjunct = spec.style.adjunct && !hist && spec.range.is_valid();
+    let fr = if adjunct { Frame { l: fr.l, t: fr.t + ADJ + 3.0, w: (fr.w - ADJ - 3.0).max(20.0), h: (fr.h - ADJ - 3.0).max(20.0), range: fr.range } } else { fr };
     for (i, c) in spec.captions.iter().enumerate() {
         let mut t = Text::new(4.0, 4.0 + i as f32 * 10.5, c.clone(), if i == 0 { 8.0 } else { 7.2 }).align(Align::Left, VAlign::Top).color(if i == 0 { INK } else { MUTED });
         if i == 0 {
@@ -129,6 +135,14 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         fig.push(Item::Rect { x: fr.l, y: fr.t, w: fr.w, h: fr.h, fill: None, stroke: Some(Stroke::new(AXIS, 0.6)) });
         return fig;
     }
+
+    // ---- the layers, and the histogram curves they make
+    let style = &spec.style;
+    let single = [PlotLayer { points: Vec::new(), color: [0, 100, 160, 255], label: String::new(), control: false }];
+    let layers: Vec<(&[(f64, f64)], Rgba)> = if spec.layers.is_empty() { vec![(spec.points, single[0].color)] } else { spec.layers.iter().map(|l| (l.points.as_slice(), l.color)).collect() };
+    let bins = (fr.w.round() as usize).clamp(32, 400);
+    let mut curves: Vec<HistCurve> = if hist { layers.iter().map(|(p, _)| histogram_curve(p.iter().map(|q| q.0), spec.range.x0, spec.range.x1, bins, style)).collect() } else { vec![] };
+    unify_curves(&mut curves);
 
     // ---- grid and ticks (under the data)
     let mut axes: Vec<Item> = Vec::new();
@@ -161,40 +175,40 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
                 axes.push(line((fr.l - 1.6, y), (fr.l, y), AXIS, 0.5));
             }
         }
+    } else if let Some(c) = curves.first() {
+        // the histogram's own Y axis, in the unit the style chose
+        for (frac, label) in hist_ticks(c) {
+            let y = fr.t + fr.h - frac as f32 * fr.h;
+            fig.push(line((fr.l, y), (fr.l + fr.w, y), GRID, 0.4));
+            axes.push(line((fr.l - 3.0, y), (fr.l, y), AXIS, 0.6));
+            axes.push(Item::Text(Text::new(fr.l - 4.5, y, label, 6.8).align(Align::Right, VAlign::Middle).color(INK)));
+        }
     }
 
     // ---- data
     let mut clipped: Vec<Item> = Vec::new();
-    let single = [PlotLayer { points: Vec::new(), color: [0, 100, 160, 255], label: String::new(), control: false }];
-    let layers: Vec<(&[(f64, f64)], Rgba)> = if spec.layers.is_empty() { vec![(spec.points, single[0].color)] } else { spec.layers.iter().map(|l| (l.points.as_slice(), l.color)).collect() };
     if hist {
-        let bins = (fr.w.round() as usize).clamp(32, 400);
-        for (pts_l, color) in &layers {
-            let h = histogram(pts_l.iter().map(|p| p.0), spec.range.x0, spec.range.x1, bins);
-            let sm: Vec<f32> = (0..h.len())
-                .map(|i| {
-                    let (a, c) = (i.saturating_sub(1), (i + 1).min(h.len() - 1));
-                    (h[a] as f32 + 2.0 * h[i] as f32 + h[c] as f32) / 4.0
-                })
-                .collect();
-            // every layer is scaled to its own peak, so a small control can be compared with a large sample
-            let mx = sm.iter().cloned().fold(0.0f32, f32::max);
-            if mx > 0.0 {
-                let mut pts = vec![(fr.l, fr.t + fr.h)];
-                for (i, v) in sm.iter().enumerate() {
-                    pts.push((fr.l + (i as f32 + 0.5) / bins as f32 * fr.w, fr.t + fr.h - v / mx * 0.94 * fr.h));
-                }
-                pts.push((fr.l + fr.w, fr.t + fr.h));
-                let many = layers.len() > 1;
-                let (fill, stroke) = if many { ([color[0], color[1], color[2], 45], *color) } else { ([0, 140, 200, 110], [0, 100, 160, 255]) };
-                clipped.push(Item::Poly { pts, closed: true, fill: Some(fill), stroke: Some(Stroke::new(stroke, if many { 1.0 } else { 0.7 })) });
+        let base = fr.t + fr.h;
+        let many = layers.len() > 1;
+        for (c, (_, color)) in curves.iter().zip(&layers) {
+            let path: Vec<(f32, f32)> = hist_path(c, style.hist_style).into_iter().map(|(xf, h)| (fr.l + xf as f32 * fr.w, base - h as f32 * fr.h)).collect();
+            if path.is_empty() || c.total <= 0.0 {
+                continue;
             }
+            let (fill, edge) = if many { ([color[0], color[1], color[2], 45], *color) } else { ([style.hist_fill[0], style.hist_fill[1], style.hist_fill[2], style.hist_fill_alpha], [style.hist_line[0], style.hist_line[1], style.hist_line[2], 255]) };
+            if style.hist_style != HistStyle::Line {
+                let mut poly = vec![(path[0].0, base)];
+                poly.extend(&path);
+                poly.push((path[path.len() - 1].0, base));
+                clipped.push(Item::Poly { pts: poly, closed: true, fill: Some(fill), stroke: None });
+            }
+            clipped.push(Item::Poly { pts: path, closed: false, fill: None, stroke: Some(Stroke::new(edge, if many { 1.0 } else { 0.8 })) });
         }
     } else {
         let gw = ((fr.w * SUPERSAMPLE) as usize).clamp(16, MAX_CELLS);
         let gh = ((fr.h * SUPERSAMPLE) as usize).clamp(16, MAX_CELLS);
         let grid = bin(layers[0].0.iter().copied(), spec.range, gw, gh);
-        let px = if spec.kind == PlotKind::Dot { render_dots(&grid, [31, 111, 235]) } else { render(&grid) };
+        let px = render_kind(&grid, spec.kind, style);
         // composite on white: the figure's image is opaque RGB
         let mut rgb = Vec::with_capacity(gw * gh * 3);
         for p in &px {
@@ -206,7 +220,7 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
         // overlays: the occupied cells of each further layer, in its own colour, on top of the base
         for (pts_l, color) in layers.iter().skip(1) {
             let g = bin(pts_l.iter().copied(), spec.range, gw, gh);
-            for (i, p) in render_dots(&g, [color[0], color[1], color[2]]).iter().enumerate() {
+            for (i, p) in crate::density::render_dots(&g, [color[0], color[1], color[2]]).iter().enumerate() {
                 if p[3] > 0 {
                     rgb[i * 3..i * 3 + 3].copy_from_slice(&p[..3]);
                 }
@@ -263,9 +277,34 @@ pub fn plot_figure(spec: &PlotSpec) -> Figure {
     }
     fig.push(Item::Text(Text::new(fr.l + fr.w / 2.0, fr.t + fr.h + 15.0, spec.x_chan.clone(), 8.0).align(Align::Center, VAlign::Top).color(INK)));
     if hist {
-        fig.push(Item::Text(Text::new(10.0, fr.t + fr.h / 2.0, "count", 8.0).align(Align::Center, VAlign::Middle).color(MUTED).vertical()));
+        let label = curves.first().map_or("count", |c| c.y_label);
+        fig.push(Item::Text(Text::new(10.0, fr.t + fr.h / 2.0, label, 8.0).align(Align::Center, VAlign::Middle).color(MUTED).vertical()));
     } else {
         fig.push(Item::Text(Text::new(10.0, fr.t + fr.h / 2.0, spec.y_chan.clone(), 8.0).align(Align::Center, VAlign::Middle).color(INK).vertical()));
+    }
+    if adjunct {
+        // the X and Y distributions of the first layer, along the top and the right-hand edge
+        let adj_style = PlotStyle { hist_y: crate::density::HistY::Mode, ..style.clone() };
+        let (fill, edge) = ([style.hist_fill[0], style.hist_fill[1], style.hist_fill[2], style.hist_fill_alpha], [style.hist_line[0], style.hist_line[1], style.hist_line[2], 255]);
+        let xs = histogram_curve(layers[0].0.iter().map(|q| q.0), spec.range.x0, spec.range.x1, bins, &adj_style);
+        let ys = histogram_curve(layers[0].0.iter().map(|q| q.1), spec.range.y0, spec.range.y1, (fr.h.round() as usize).clamp(32, 400), &adj_style);
+        let (top_base, right_base) = (fr.t - 3.0, fr.l + fr.w + 3.0);
+        if xs.total > 0.0 {
+            let path: Vec<(f32, f32)> = hist_path(&xs, style.hist_style).into_iter().map(|(xf, h)| (fr.l + xf as f32 * fr.w, top_base - h as f32 * ADJ)).collect();
+            let mut poly = vec![(path[0].0, top_base)];
+            poly.extend(&path);
+            poly.push((path[path.len() - 1].0, top_base));
+            fig.push(Item::Poly { pts: poly, closed: true, fill: Some(fill), stroke: None });
+            fig.push(Item::Poly { pts: path, closed: false, fill: None, stroke: Some(Stroke::new(edge, 0.7)) });
+        }
+        if ys.total > 0.0 {
+            let path: Vec<(f32, f32)> = hist_path(&ys, style.hist_style).into_iter().map(|(yf, h)| (right_base + h as f32 * ADJ, fr.t + fr.h - yf as f32 * fr.h)).collect();
+            let mut poly = vec![(right_base, path[0].1)];
+            poly.extend(&path);
+            poly.push((right_base, path[path.len() - 1].1));
+            fig.push(Item::Poly { pts: poly, closed: true, fill: Some(fill), stroke: None });
+            fig.push(Item::Poly { pts: path, closed: false, fill: None, stroke: Some(Stroke::new(edge, 0.7)) });
+        }
     }
     if let Some(f) = &spec.footer {
         fig.push(Item::Text(Text::new(fr.l + fr.w / 2.0, spec.height - 3.0, f.clone(), 7.0).align(Align::Center, VAlign::Bottom).color(MUTED)));
@@ -340,6 +379,7 @@ mod tests {
             points: pts,
             layers: vec![],
             legend: true,
+            style: PlotStyle::default(),
             range: Range { x0: 0.0, x1: 1000.0, y0: 0.0, y1: 500.0 },
             kind,
             x_chan: "FSC-A".into(),
@@ -415,7 +455,8 @@ mod tests {
         s.gates = vec![PlotGate { gate: Gate::interval("FSC-A", 200.0, 500.0).unwrap(), label: Some("Band".into()) }];
         let f = plot_figure(&s);
         assert!(images(&f).is_empty(), "a histogram is vector");
-        assert!(f.texts().contains(&"count".to_string()) && !f.texts().contains(&"SSC-A".to_string()));
+        assert!(f.texts().contains(&"Normalized to mode".to_string()) && !f.texts().contains(&"SSC-A".to_string()), "{:?}", f.texts());
+        assert!(f.texts().contains(&"100".to_string()) && f.texts().contains(&"0".to_string()), "a histogram has a real Y axis");
         let clip = f.items.iter().find_map(|i| if let Item::Clip { items, .. } = i { Some(items) } else { None }).unwrap();
         let dashed = clip.iter().filter(|i| matches!(i, Item::Line { stroke, .. } if stroke.dash.is_some())).count();
         assert_eq!(dashed, 1, "only the X-channel FMO line shows on a histogram");
@@ -490,6 +531,107 @@ mod tests {
         let first = im.2.chunks(3).position(|p| p == &[255, 0, 0]).unwrap();
         let (col, row) = (first % im.0, first / im.0);
         assert!(col as f32 / im.0 as f32 > 0.75 && (row as f32 / im.1 as f32) < 0.25, "({col}, {row}) of {} x {}", im.0, im.1);
+    }
+
+    fn clip_items(f: &Figure) -> Vec<Item> {
+        f.items.iter().find_map(|i| if let Item::Clip { items, .. } = i { Some(items.clone()) } else { None }).unwrap()
+    }
+
+    fn peaked(n: usize) -> Vec<(f64, f64)> {
+        (0..n).map(|i| (500.0 + ((i * 37) % 200) as f64 - 100.0, 250.0 + ((i * 11) % 100) as f64 - 50.0)).collect()
+    }
+
+    #[test]
+    fn the_histogram_y_axis_follows_the_chosen_unit_and_the_style_draws_fill_bars_or_line() {
+        let pts = peaked(4000);
+        for (y, label, top) in [(crate::density::HistY::Count, "Count", None), (crate::density::HistY::PercentMax, "% of max", Some("100")), (crate::density::HistY::UnitArea, "Unit area", None), (crate::density::HistY::Cdf, "Cumulative %", Some("100"))] {
+            let mut s = spec(&pts, PlotKind::Histogram);
+            s.style.hist_y = y;
+            let f = plot_figure(&s);
+            assert!(f.texts().contains(&label.to_string()), "{y:?}: {:?}", f.texts());
+            if let Some(t) = top {
+                assert!(f.texts().contains(&t.to_string()), "{y:?}");
+            }
+            assert_eq!(validate_pdf(&to_pdf(&[f], "h")), Ok(1));
+        }
+        // fill: a filled polygon plus an outline; line only: just the outline; bars: steps (two points per bin)
+        let polys = |st: HistStyle| -> Vec<(usize, bool)> {
+            let mut s = spec(&pts, PlotKind::Histogram);
+            s.style.hist_style = st;
+            clip_items(&plot_figure(&s)).iter().filter_map(|i| if let Item::Poly { pts, fill, .. } = i { Some((pts.len(), fill.is_some())) } else { None }).collect()
+        };
+        let filled = polys(HistStyle::Filled);
+        assert_eq!(filled.iter().filter(|(_, f)| *f).count(), 1);
+        assert_eq!(filled.len(), 2, "fill and outline");
+        assert_eq!(polys(HistStyle::Line), vec![(filled[1].0, false)], "line only has no fill");
+        let bars = polys(HistStyle::Bars);
+        assert!(bars[1].0 > 2 * filled[1].0 - 4, "a step per bin has about twice the points: {bars:?} vs {filled:?}");
+        // the style's colours are used
+        let mut s = spec(&pts, PlotKind::Histogram);
+        s.style.hist_fill = [10, 200, 10];
+        s.style.hist_fill_alpha = 77;
+        s.style.hist_line = [200, 10, 10];
+        let items = clip_items(&plot_figure(&s));
+        assert!(items.iter().any(|i| matches!(i, Item::Poly { fill: Some([10, 200, 10, 77]), .. })));
+        assert!(items.iter().any(|i| matches!(i, Item::Poly { stroke: Some(st), .. } if st.color == [200, 10, 10, 255])));
+    }
+
+    #[test]
+    fn smoothing_options_change_the_exported_curve() {
+        let pts = peaked(600);
+        let rough = |smooth: bool, bw: f64| -> f32 {
+            let mut s = spec(&pts, PlotKind::Histogram);
+            s.style.hist_smooth = smooth;
+            s.style.hist_bandwidth = bw;
+            let items = clip_items(&plot_figure(&s));
+            let line = items.iter().find_map(|i| if let Item::Poly { pts, fill: None, .. } = i { Some(pts.clone()) } else { None }).unwrap();
+            line.windows(2).map(|w| (w[1].1 - w[0].1).abs()).sum()
+        };
+        let (off, light, heavy) = (rough(false, 0.5), rough(true, 0.2), rough(true, 0.9));
+        assert!(light < off && heavy < light, "{off} {light} {heavy}");
+    }
+
+    #[test]
+    fn contour_density_and_zebra_export_as_images_and_contour_lines_carry_the_chosen_colour() {
+        let pts = points(30_000);
+        for k in [PlotKind::Contour, PlotKind::Density, PlotKind::Zebra] {
+            let f = plot_figure(&spec(&pts, k));
+            assert_eq!(images(&f).len(), 1, "{k:?}");
+            assert_eq!(validate_pdf(&to_pdf(&[f], "c")), Ok(1));
+        }
+        let mut s = spec(&pts, PlotKind::Contour);
+        s.style.contour_color = [250, 20, 20];
+        let f = plot_figure(&s);
+        let img = clip_items(&f).into_iter().find_map(|i| if let Item::Image { rgb, .. } = i { Some(rgb) } else { None }).unwrap();
+        let non_white = img.chunks(3).filter(|p| p != &[255, 255, 255]).count();
+        let red = img.chunks(3).filter(|p| p == &[250, 20, 20]).count();
+        assert!(non_white > 100 && red == non_white, "a contour image is white with lines in the chosen colour: {red}/{non_white}");
+        // more levels, more line
+        let lines = |n: usize| {
+            let mut s = spec(&pts, PlotKind::Contour);
+            s.style.contour_levels = n;
+            clip_items(&plot_figure(&s)).into_iter().find_map(|i| if let Item::Image { rgb, .. } = i { Some(rgb.chunks(3).filter(|p| p != &[255, 255, 255]).count()) } else { None }).unwrap()
+        };
+        assert!(lines(20) > lines(5));
+    }
+
+    #[test]
+    fn adjunct_histograms_add_a_strip_above_and_to_the_right_and_shrink_the_plot() {
+        let pts = peaked(3000);
+        let plain = plot_figure(&spec(&pts, PlotKind::Pseudocolor));
+        let mut s = spec(&pts, PlotKind::Pseudocolor);
+        s.style.adjunct = true;
+        let adj = plot_figure(&s);
+        let plot_w = |f: &Figure| f.items.iter().find_map(|i| if let Item::Rect { w, stroke: Some(_), fill: None, .. } = i { Some(*w) } else { None }).unwrap();
+        assert!(plot_w(&adj) < plot_w(&plain) - 30.0, "the plot gives up room for the strips");
+        let top_level_polys = |f: &Figure| f.items.iter().filter(|i| matches!(i, Item::Poly { .. })).count();
+        assert_eq!(top_level_polys(&plain), 0);
+        assert_eq!(top_level_polys(&adj), 4, "a fill and an outline for each of X and Y");
+        assert_eq!(validate_pdf(&to_pdf(&[adj], "a")), Ok(1));
+        // a histogram has no adjuncts
+        let mut h = spec(&pts, PlotKind::Histogram);
+        h.style.adjunct = true;
+        assert_eq!(top_level_polys(&plot_figure(&h)), 0);
     }
 
     #[test]

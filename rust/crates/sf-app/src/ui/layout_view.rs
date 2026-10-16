@@ -2,7 +2,7 @@
 //! page as SVG). Also the single-plot figure behind the graph window's Export menu.
 
 use super::{theme, App};
-use crate::density::PlotKind;
+use crate::density::{PlotKind, PlotStyle};
 use crate::figure::{to_pdf, to_svg, Figure, Item, Rgba, Text};
 use crate::layout::{build_pages, collect, BatchRequest, LayoutSpec, PageSetup, View};
 use crate::plot_figure::{plot_figure, PlotSpec};
@@ -24,6 +24,7 @@ pub struct State {
     pub x_chan: String,
     pub y_chan: String,
     pub kind: PlotKind,
+    pub style: PlotStyle,
     pub sel: Vec<bool>,
     pub spec: LayoutSpec,
     pub a4: bool,
@@ -41,7 +42,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        State { tab: LayTab::Grid, ed: Default::default(), population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, sel: vec![], spec: LayoutSpec::default(), a4: false, landscape: true, show_gates: true, show_fmo: true, pages: vec![], page: 0, built_for: None, notes: vec![], textures: vec![] }
+        State { tab: LayTab::Grid, ed: Default::default(), population: vec![], x_chan: String::new(), y_chan: String::new(), kind: PlotKind::Pseudocolor, style: PlotStyle::default(), sel: vec![], spec: LayoutSpec::default(), a4: false, landscape: true, show_gates: true, show_fmo: true, pages: vec![], page: 0, built_for: None, notes: vec![], textures: vec![] }
     }
 }
 
@@ -83,8 +84,7 @@ fn paint_items(painter: &egui::Painter, o: Pos2, s: f32, items: &[Item], texture
             Item::Poly { pts, closed, fill, stroke: st } => {
                 let p: Vec<Pos2> = pts.iter().map(|(x, y)| pt(*x, *y)).collect();
                 if let (Some(f), true) = (fill, *closed) {
-                    // a concave outline cannot use convex_polygon: fill as a path
-                    painter.add(egui::Shape::Path(egui::epaint::PathShape { points: p.clone(), closed: true, fill: color(*f), stroke: egui::epaint::PathStroke::NONE }));
+                    fill_under_curve(painter, &p, color(*f));
                 }
                 if let Some(st) = st {
                     painter.add(if *closed { egui::Shape::closed_line(p, stroke(st)) } else { egui::Shape::line(p, stroke(st)) });
@@ -103,6 +103,26 @@ fn paint_items(painter: &egui::Painter, o: Pos2, s: f32, items: &[Item], texture
             }
         }
     }
+}
+
+/// Fill a polygon of the form `[baseline start, curve..., baseline end]` (a histogram) as trapezoid strips. egui
+/// cannot fill a concave outline in one piece, and a histogram is concave.
+fn fill_under_curve(painter: &egui::Painter, p: &[Pos2], fill: Color32) {
+    if p.len() < 4 {
+        return;
+    }
+    let base = p[0].y;
+    let curve = &p[1..p.len() - 1];
+    let mut mesh = egui::epaint::Mesh::default();
+    for w in curve.windows(2) {
+        let i = mesh.vertices.len() as u32;
+        for q in [Pos2::new(w[0].x, base), w[0], w[1], Pos2::new(w[1].x, base)] {
+            mesh.colored_vertex(q, fill);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i, i + 2, i + 3);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 fn paint_text(painter: &egui::Painter, o: Pos2, s: f32, t: &Text) {
@@ -175,6 +195,7 @@ impl App {
             x_scale: default_scale(&self.lay.x_chan, s0.range_of(&self.lay.x_chan)),
             y_scale: default_scale(&self.lay.y_chan, s0.range_of(&self.lay.y_chan)),
             kind: self.lay.kind,
+            style: self.lay.style.clone(),
             samples: (0..self.session.samples().len()).filter(|&i| self.lay.sel.get(i).copied().unwrap_or(false)).collect(),
             view: View::FitAll,
             show_gates: self.lay.show_gates,
@@ -221,7 +242,7 @@ impl App {
         let w = self.session.window(id).ok_or("no such window")?.clone();
         let range = self.ws.graphs.get(&id).and_then(|g| g.range).filter(|r| r.is_valid()).ok_or("this plot has no view to export yet")?;
         let (show_gates, show_fmo) = self.ws.graphs.get(&id).map_or((true, true), |g| (true, g.style.fmo));
-        let req = BatchRequest { population: self.session.tree(w.sample).path(w.node).unwrap_or_default(), x_chan: w.x_chan.clone(), y_chan: w.y_chan.clone(), x_scale: w.x_scale.clone(), y_scale: w.y_scale.clone(), kind: w.kind, samples: vec![w.sample], view: View::Fixed(range), show_gates, show_fmo };
+        let req = BatchRequest { population: self.session.tree(w.sample).path(w.node).unwrap_or_default(), x_chan: w.x_chan.clone(), y_chan: w.y_chan.clone(), x_scale: w.x_scale.clone(), y_scale: w.y_scale.clone(), kind: w.kind, style: self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default(), samples: vec![w.sample], view: View::Fixed(range), show_gates, show_fmo };
         let (common, cells) = collect(&mut self.session, &req)?;
         let cell = &cells[0];
         let pts = cell.points.as_ref().ok_or_else(|| cell.note.clone().unwrap_or_else(|| "no data".into()))?;
@@ -232,6 +253,7 @@ impl App {
             points: pts,
             layers: vec![],
             legend: false,
+            style: common.style.clone(),
             range: common.range,
             kind: common.kind,
             x_chan: common.x_chan.clone(),
@@ -385,10 +407,13 @@ impl App {
                 });
             });
         }
-        ui.horizontal(|ui| {
-            for k in [PlotKind::Pseudocolor, PlotKind::Dot, PlotKind::Histogram] {
+        egui::ComboBox::from_id_salt("lay_kind").width(190.0).selected_text(format!("Plot type: {}", self.lay.kind.label())).show_ui(ui, |ui| {
+            for k in PlotKind::ALL {
                 ui.selectable_value(&mut self.lay.kind, k, k.label());
             }
+        });
+        egui::CollapsingHeader::new("Plot style").default_open(false).show(ui, |ui| {
+            super::plot_style_ui::plot_style_controls(ui, self.lay.kind, &mut self.lay.style, "lay_style");
         });
         ui.checkbox(&mut self.lay.show_gates, "Draw the population's gates, with their %");
         ui.checkbox(&mut self.lay.show_fmo, "Draw FMO reference lines");

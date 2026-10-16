@@ -2,7 +2,7 @@
 
 use super::{cross_view::short_all, theme, workstation::Tab, App};
 use crate::axis::ticks;
-use crate::density::{bin, histogram, render, render_dots, PlotKind, Range};
+use crate::density::{bin, hist_path, hist_ticks, histogram, histogram_curve, render_kind, HistCurve, HistStyle, PlotKind, PlotStyle, Range};
 use crate::drawing::{Drawing, Shape, Tool};
 use crate::gate_edit::{self, Handle, Side};
 use crate::session::{default_scale, GraphWindow};
@@ -66,8 +66,6 @@ pub struct GraphUi {
     /// Population points cached per (version, node, axes), so resizing only re-bins.
     pts: Option<(u64, Vec<(f64, f64)>)>,
     summary: Option<(u64, Vec<(String, String)>)>,
-    /// Histogram bar heights (normalised 0..1) of the last render.
-    hist: Vec<f32>,
     /// A gate being moved or resized: nothing is committed until the button is released.
     pub edit: Option<EditDrag>,
     /// Dragging an FMO line: `true` = the X channel's line.
@@ -79,6 +77,10 @@ pub struct GraphUi {
     pub strip_rects: Vec<(usize, Rect)>,
     /// The whole canvas (plot and axis labels) as last drawn, for exporting what is shown.
     pub canvas_rect: Option<Rect>,
+    /// Histogram, contour and density options of this plot.
+    pub plot: PlotStyle,
+    /// The histogram as last computed (heights, Y axis), for drawing and exporting.
+    pub curve: Option<HistCurve>,
 }
 
 /// One sample's picture in the compare strip.
@@ -100,7 +102,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, hist: Vec::new(), edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), curve: None }
     }
 }
 
@@ -463,6 +465,11 @@ impl App {
                     }
                 }
             });
+            egui::CollapsingHeader::new("Plot style").default_open(true).show(ui, |ui| {
+                if let Some(g) = self.ws.graphs.get_mut(&id) {
+                    super::plot_style_ui::plot_style_controls(ui, w.kind, &mut g.plot, "gw_style");
+                }
+            });
             egui::CollapsingHeader::new("Gates").default_open(true).show(ui, |ui| {
                 if let Some(g) = self.ws.graphs.get_mut(&id) {
                     ui.horizontal(|ui| {
@@ -611,7 +618,8 @@ impl App {
         }
         painter.rect_filled(plot, 0.0, Color32::WHITE);
         self.paint_population(ctx, id, &w, &map, &painter);
-        draw_axes(&painter, &map, &w, hist);
+        let curve = self.ws.graphs.get(&id).and_then(|g| g.curve.clone());
+        draw_axes(&painter, &map, &w, hist, curve.as_ref());
         let style = self.ws.graphs[&id].style.clone();
         self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
         self.draw_child_gates(&painter, &map, &w, &style, id);
@@ -802,6 +810,11 @@ impl App {
                 self.begin_capture(rect, super::CaptureDest::Clipboard);
             }
         }
+    }
+
+    /// The histogram / contour / density options of a graph window (created if the window has not been drawn yet).
+    pub fn plot_style_mut(&mut self, id: u64) -> &mut PlotStyle {
+        &mut self.ws.graphs.entry(id).or_insert_with(GraphUi::new).plot
     }
 
     /// Open or close the compare strip of a graph window.
@@ -1041,7 +1054,8 @@ impl App {
             StripThumb::Hist(h.into_iter().map(|c| c as f32 / mx).collect())
         } else {
             let grid = bin(pts.iter().copied(), range, 100, 75);
-            let px = if w.kind == PlotKind::Dot { render_dots(&grid, [31, 111, 235]) } else { render(&grid) };
+            let style = self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default();
+            let px = render_kind(&grid, w.kind, &style);
             let pixels: Vec<Color32> = px.into_iter().map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])).collect();
             StripThumb::Tex(ctx.load_texture(format!("strip{id}_{si}"), egui::ColorImage { size: [100, 75], pixels }, TextureOptions::NEAREST))
         };
@@ -1246,54 +1260,33 @@ impl App {
         }
         let gw = ((map.rect.width() / 2.0) as usize / 16 * 16).clamp(128, 512);
         let gh = ((map.rect.height() / 2.0) as usize / 16 * 16).clamp(128, 512);
-        let key = hash_of((pkey, range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits(), gw, gh, w.kind as u8));
+        let style_key = self.ws.graphs.get(&id).map(|g| format!("{:?}", g.plot)).unwrap_or_default();
+        let key = hash_of((pkey, range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits(), gw, gh, w.kind as u8, style_key));
         let stale = self.ws.graphs.get(&id).map_or(true, |g| g.key != key);
         if stale {
             let Some(g) = self.ws.graphs.get_mut(&id) else { return };
             let pts = &g.pts.as_ref().unwrap().1;
             if w.kind == PlotKind::Histogram {
-                let h = histogram(pts.iter().map(|p| p.0), range.x0, range.x1, gw);
-                // light smoothing so a noisy histogram reads as a distribution
-                let sm: Vec<f32> = (0..h.len())
-                    .map(|i| {
-                        let (a, b) = (i.saturating_sub(1), (i + 1).min(h.len() - 1));
-                        (h[a] as f32 + 2.0 * h[i] as f32 + h[b] as f32) / 4.0
-                    })
-                    .collect();
-                let mx = sm.iter().cloned().fold(0.0f32, f32::max).max(1.0);
-                g.hist = sm.into_iter().map(|v| v / mx).collect();
-                g.shown = h.iter().map(|&c| c as usize).sum();
+                let curve = histogram_curve(pts.iter().map(|p| p.0), range.x0, range.x1, gw, &g.plot);
+                g.shown = curve.total as usize;
+                g.curve = Some(curve);
                 g.tex = None;
             } else {
                 let grid = bin(pts.iter().copied(), range, gw, gh);
-                let px = if w.kind == PlotKind::Dot { render_dots(&grid, [31, 111, 235]) } else { render(&grid) };
+                let px = render_kind(&grid, w.kind, &g.plot);
                 let pixels: Vec<Color32> = px.into_iter().map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])).collect();
                 let tex = ctx.load_texture(format!("graph{id}"), egui::ColorImage { size: [gw, gh], pixels }, TextureOptions::NEAREST);
                 g.tex = Some(tex);
                 g.shown = grid.inside;
-                g.hist.clear();
+                g.curve = None;
             }
             g.key = key;
         }
         let Some(g) = self.ws.graphs.get(&id) else { return };
         if w.kind == PlotKind::Histogram {
-            let n = g.hist.len().max(1);
-            let mut pts: Vec<Pos2> = Vec::with_capacity(n + 2);
-            pts.push(Pos2::new(map.rect.left(), map.rect.bottom()));
-            for (i, v) in g.hist.iter().enumerate() {
-                let x = map.rect.left() + (i as f32 + 0.5) / n as f32 * map.rect.width();
-                pts.push(Pos2::new(x, map.rect.bottom() - v * 0.94 * map.rect.height()));
+            if let Some(c) = &g.curve {
+                draw_histogram(painter, map, c, &g.plot);
             }
-            pts.push(Pos2::new(map.rect.right(), map.rect.bottom()));
-            painter.add(egui::Shape::convex_polygon(vec![], Color32::TRANSPARENT, Stroke::NONE)); // no-op placeholder keeps z-order stable
-            // filled as vertical strips (a concave outline cannot use convex_polygon)
-            for i in 0..g.hist.len() {
-                let x0 = map.rect.left() + i as f32 / n as f32 * map.rect.width();
-                let x1 = map.rect.left() + (i + 1) as f32 / n as f32 * map.rect.width();
-                let top = map.rect.bottom() - g.hist[i] * 0.94 * map.rect.height();
-                painter.rect_filled(Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1 + 0.5, map.rect.bottom())), 0.0, Color32::from_rgba_unmultiplied(0, 140, 200, 120));
-            }
-            painter.add(egui::Shape::line(pts[1..pts.len() - 1].to_vec(), Stroke::new(1.4_f32, Color32::from_rgb(0, 100, 160))));
         } else if let Some(tex) = &g.tex {
             painter.image(tex.id(), map.rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
@@ -1395,7 +1388,24 @@ fn axis_controls_scale_only(ui: &mut egui::Ui, id: (&str, u64), _chan: &mut Stri
     *scale != before
 }
 
-fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool) {
+/// The histogram curve: filled strips (or bars) under the path, then the outline, in the style's colours.
+fn draw_histogram(painter: &egui::Painter, map: &Mapper, c: &HistCurve, style: &PlotStyle) {
+    let (r, n) = (map.rect, c.heights.len().max(1));
+    let to = |xf: f64, h: f64| Pos2::new(r.left() + xf as f32 * r.width(), r.bottom() - h as f32 * r.height());
+    if style.hist_style != HistStyle::Line {
+        let fill = Color32::from_rgba_unmultiplied(style.hist_fill[0], style.hist_fill[1], style.hist_fill[2], style.hist_fill_alpha);
+        for (i, h) in c.heights.iter().enumerate() {
+            let (x0, x1) = (r.left() + i as f32 / n as f32 * r.width(), r.left() + (i + 1) as f32 / n as f32 * r.width());
+            painter.rect_filled(Rect::from_min_max(Pos2::new(x0, r.bottom() - *h as f32 * r.height()), Pos2::new(x1 + 0.5, r.bottom())), 0.0, fill);
+        }
+    }
+    let path: Vec<Pos2> = hist_path(c, style.hist_style).into_iter().map(|(xf, h)| to(xf, h)).collect();
+    if path.len() > 1 {
+        painter.add(egui::Shape::line(path, Stroke::new(1.4_f32, Color32::from_rgb(style.hist_line[0], style.hist_line[1], style.hist_line[2]))));
+    }
+}
+
+fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>) {
     let axis = Stroke::new(1.0_f32, Color32::from_gray(150));
     let grid = Stroke::new(0.5_f32, Color32::from_gray(228));
     let text = theme::TEXT;
@@ -1422,7 +1432,15 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool) {
             }
         }
     } else {
-        p.text(Pos2::new(r.left() - 8.0, r.center().y), Align2::RIGHT_CENTER, "count", FontId::proportional(10.5), theme::MUTED);
+        if let Some(c) = curve {
+            for (frac, label) in hist_ticks(c) {
+                let y = r.bottom() - frac as f32 * r.height();
+                p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], grid);
+                p.line_segment([Pos2::new(r.left() - 5.0, y), Pos2::new(r.left(), y)], axis);
+                p.text(Pos2::new(r.left() - 8.0, y), Align2::RIGHT_CENTER, label, FontId::proportional(10.5), text);
+            }
+            p.text(Pos2::new(r.left() + 4.0, r.top() + 3.0), Align2::LEFT_TOP, c.y_label, FontId::proportional(11.5), Color32::from_gray(60));
+        }
     }
     p.rect_stroke(r, 0.0, axis);
     p.text(Pos2::new(r.center().x, r.bottom() + 20.0), Align2::CENTER_TOP, &w.x_chan, FontId::proportional(11.5), text);

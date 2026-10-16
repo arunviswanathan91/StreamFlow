@@ -367,10 +367,13 @@ impl App {
                 });
             });
         }
-        ui.horizontal(|ui| {
-            for k in [PlotKind::Pseudocolor, PlotKind::Dot, PlotKind::Histogram] {
+        egui::ComboBox::from_id_salt("led_kind").width(190.0).selected_text(format!("Plot type: {}", t.kind.label())).show_ui(ui, |ui| {
+            for k in PlotKind::ALL {
                 ui.selectable_value(&mut t.kind, k, k.label());
             }
+        });
+        egui::CollapsingHeader::new("Plot style").default_open(false).show(ui, |ui| {
+            super::plot_style_ui::plot_style_controls(ui, t.kind, &mut t.style, "led_style");
         });
         let mut lock = t.view == ViewMode::Lock;
         if ui.checkbox(&mut lock, "Same view on every page").on_hover_text("Locks the axes to the union of everything the batch shows, so pages are comparable").changed() {

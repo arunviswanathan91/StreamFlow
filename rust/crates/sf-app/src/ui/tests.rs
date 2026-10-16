@@ -1306,3 +1306,94 @@ fn the_editor_runs_a_batch_with_controls_and_tokens_and_the_layout_survives_a_sa
     assert!(empty.write_batch_pdf(&scratch("never.pdf")).unwrap_err().contains("run the batch first"));
 }
 
+
+// ---- plot kinds and their options, on screen and in exports ------------------------------------------------------
+
+#[test]
+fn every_plot_kind_draws_on_screen_and_exports_and_the_histogram_unit_follows_the_option() {
+    use crate::density::{HistStyle, HistY, PlotKind};
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    app.session.window_mut(w).unwrap().y_chan = "CD4-A".into();
+    app.refit_window(w);
+    settle(&mut app, &ctx);
+    for kind in PlotKind::ALL {
+        app.session.window_mut(w).unwrap().kind = kind;
+        settle(&mut app, &ctx);
+        let g = &app.ws.graphs[&w];
+        assert_eq!(g.curve.is_some(), kind == PlotKind::Histogram, "{kind:?}: only a histogram has a curve");
+        assert_eq!(g.tex.is_some(), kind != PlotKind::Histogram, "{kind:?}: every 2-D kind has an image");
+        let fig = app.window_figure(w, 460.0, 400.0).unwrap();
+        assert_eq!(crate::figure::validate_pdf(&crate::figure::to_pdf(&[fig], "k")), Ok(1), "{kind:?}");
+    }
+    // the histogram's Y unit is what the option says, on screen and in the export
+    app.session.window_mut(w).unwrap().kind = PlotKind::Histogram;
+    for y in HistY::ALL {
+        app.ws.graphs.get_mut(&w).unwrap().plot.hist_y = y;
+        settle(&mut app, &ctx);
+        assert_eq!(app.ws.graphs[&w].curve.as_ref().unwrap().y_label, y.label(), "on screen");
+        assert!(app.window_figure(w, 460.0, 400.0).unwrap().texts().contains(&y.label().to_string()), "in the export: {y:?}");
+    }
+    // count: the axis top is a clean number at or above the tallest bin of the events shown
+    app.ws.graphs.get_mut(&w).unwrap().plot.hist_y = HistY::Count;
+    app.ws.graphs.get_mut(&w).unwrap().plot.hist_smooth = false;
+    settle(&mut app, &ctx);
+    let c = app.ws.graphs[&w].curve.clone().unwrap();
+    let peak = c.heights.iter().cloned().fold(0.0, f64::max) * c.axis_max;
+    assert!(peak >= 1.0 && c.axis_max >= peak && (c.total as usize) <= 3000, "peak {peak}, axis {}, total {}", c.axis_max, c.total);
+    // the style changes what is drawn: bars have a different outline from the filled curve
+    let outline = |app: &mut App, st: HistStyle| -> usize {
+        app.ws.graphs.get_mut(&w).unwrap().plot.hist_style = st;
+        let fig = app.window_figure(w, 460.0, 400.0).unwrap();
+        fig.items.iter().find_map(|i| if let crate::figure::Item::Clip { items, .. } = i { items.iter().find_map(|x| if let crate::figure::Item::Poly { pts, fill: None, .. } = x { Some(pts.len()) } else { None }) } else { None }).unwrap()
+    };
+    let (filled, bars) = (outline(&mut app, HistStyle::Filled), outline(&mut app, HistStyle::Bars));
+    assert!(bars > filled, "{bars} vs {filled}");
+    // contour options reach the export
+    app.session.window_mut(w).unwrap().kind = PlotKind::Contour;
+    let lines = |app: &mut App, n: usize| -> usize {
+        app.ws.graphs.get_mut(&w).unwrap().plot.contour_levels = n;
+        let fig = app.window_figure(w, 460.0, 400.0).unwrap();
+        fig.items.iter().find_map(|i| if let crate::figure::Item::Clip { items, .. } = i { items.iter().find_map(|x| if let crate::figure::Item::Image { rgb, .. } = x { Some(rgb.chunks(3).filter(|p| *p != [255, 255, 255]).count()) } else { None }) } else { None }).unwrap()
+    };
+    assert!(lines(&mut app, 25) > lines(&mut app, 4));
+}
+
+#[test]
+fn a_layout_tile_carries_its_plot_kind_and_style_into_the_batch_pdf() {
+    use crate::density::{HistY, PlotKind, PlotStyle};
+    let (mut app, ctx) = editor_app();
+    { let to = page_pt(&app, 0.3, 0.45); drag_sample(&mut app, &ctx, "t.fcs", to); }
+    settle(&mut app, &ctx);
+    let id = app.lay.ed.doc.tiles[0].id;
+    {
+        let t = app.lay.ed.doc.tile_mut(id).unwrap();
+        t.x_chan = "CD3-A".into();
+        t.y_chan = "CD4-A".into();
+        t.kind = PlotKind::Contour;
+        t.style = PlotStyle { contour_levels: 12, contour_color: [250, 20, 20], adjunct: true, ..PlotStyle::default() };
+    }
+    settle(&mut app, &ctx); // the editor draws the tile and its properties with the style controls
+    app.editor_run_batch(Some(&ctx)).unwrap();
+    let page = &app.lay.ed.batch[0];
+    let clip = page.items.iter().find_map(|i| if let crate::figure::Item::Clip { items, .. } = i { Some(items.clone()) } else { None }).unwrap();
+    let rgb = clip.into_iter().find_map(|i| if let crate::figure::Item::Image { rgb, .. } = i { Some(rgb) } else { None }).expect("a contour image");
+    assert!(rgb.chunks(3).any(|p| p == [250, 20, 20]), "the contour is drawn in the tile's colour");
+    assert!(page.items.iter().filter(|i| matches!(i, crate::figure::Item::Poly { .. })).count() >= 4, "adjunct histograms are on the page");
+    // switch the same tile to a histogram with a count axis
+    {
+        let t = app.lay.ed.doc.tile_mut(id).unwrap();
+        t.kind = PlotKind::Histogram;
+        t.style.hist_y = HistY::Count;
+    }
+    app.editor_run_batch(None).unwrap();
+    assert!(app.lay.ed.batch[0].texts().contains(&"Count".to_string()));
+    // and the style survives a saved workspace
+    let json = app.workspace_document().write();
+    let mut other = two_sample_app();
+    other.apply_workspace_document(&sf_core::json::Json::parse(&json).unwrap()).unwrap();
+    assert_eq!(other.lay.ed.doc.tiles[0].style, app.lay.ed.doc.tiles[0].style);
+    assert_eq!(other.lay.ed.doc.tiles[0].kind, PlotKind::Histogram);
+}

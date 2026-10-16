@@ -254,6 +254,7 @@ pub fn render_page(session: &mut Session, doc: &LayoutDoc, unit: Option<&Unit>, 
             points: &[],
             layers: plot_layers,
             legend: tile.legend,
+            style: tile.style.clone(),
             range: range.unwrap_or(Range { x0: 0.0, x1: 0.0, y0: 0.0, y1: 0.0 }),
             kind: tile.kind,
             x_chan: ax.x_chan.clone(),
@@ -381,7 +382,7 @@ mod tests {
         assert_eq!(legend(&pages[0]), vec![("a".into(), false), ("d".into(), true)]);
         assert_eq!(legend(&pages[2]), vec![("c".into(), false), ("d".into(), true)]);
         // when the iterator sample IS the control, it appears once (as the iterator), not twice
-        let curves = pages[3].items.iter().find_map(|i| if let Item::Clip { items, .. } = i { Some(items.iter().filter(|x| matches!(x, Item::Poly { .. })).count()) } else { None }).unwrap();
+        let curves = pages[3].items.iter().find_map(|i| if let Item::Clip { items, .. } = i { Some(items.iter().filter(|x| matches!(x, Item::Poly { fill: None, stroke: Some(_), .. })).count()) } else { None }).unwrap();
         assert_eq!(curves, 1, "one curve, not the same sample twice (and so no legend)");
         assert_eq!(validate_pdf(&to_pdf(&pages, "b")), Ok(4));
     }
