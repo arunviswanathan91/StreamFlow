@@ -859,6 +859,7 @@ impl App {
             _ => {}
         }
         if let Some(shape) = finished {
+            self.disc.tool = Tool::Pointer; // next: double-click the region
             self.disc_region_to_population(&emb, &shape);
         }
     }
