@@ -149,7 +149,7 @@ pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[Str
             continue;
         }
         if shown > 1 {
-            ui.label(RichText::new(*title).size(10.5).strong().color(theme::MUTED));
+            ui.label(RichText::new(format!("{title}  ({})", list.len())).size(10.5).strong().color(if *title == "Unmixed" { theme::ACCENT } else { theme::MUTED }));
         }
         for c in list {
             ui.selectable_value(chan, (*c).clone(), c.as_str());
@@ -225,7 +225,7 @@ impl App {
         self.graph_shortcuts(ctx, id, &w);
         let w = self.session.window(id).cloned().unwrap_or(w);
 
-        egui::TopBottomPanel::top(egui::Id::new(("g_tools", id))).frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
+        egui::TopBottomPanel::top(egui::Id::new(("g_tools", id))).resizable(false).exact_height(78.0).frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show_inside(ui, |ui| self.graph_toolbar(ui, id, &w));
         egui::TopBottomPanel::top(egui::Id::new(("g_crumb", id))).frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 4.0))).show_inside(ui, |ui| self.breadcrumb(ui, id, &w));
         egui::TopBottomPanel::bottom(egui::Id::new(("g_hint", id))).frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0))).show_inside(ui, |ui| {
             ui.add(egui::Label::new(RichText::new("P polygon · R rectangle · E ellipse · I interval · Q quadrant · N pointer · Del remove gate · Ctrl+Z / Ctrl+Y undo / redo · ← → sample · wheel zoom · drag a gate or its handles to move or resize it · drag empty space to pan").size(11.0).color(theme::MUTED)).truncate());
@@ -240,7 +240,7 @@ impl App {
             egui::Area::new(egui::Id::new(("g_opts", id))).order(egui::Order::Middle).fixed_pos(Pos2::new((r.right() - width - 24.0).max(r.left()), r.top() + 6.0)).show(ui.ctx(), |ui| {
                 egui::Frame::none().fill(theme::PANEL_2).rounding(8.0).stroke(Stroke::new(1.0_f32, Color32::from_gray(70))).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
                     ui.set_width(width);
-                    self.graph_options(ui, id, &w);
+                    egui::ScrollArea::vertical().id_salt(("g_opts_scroll", id)).max_height((r.height() - 36.0).max(160.0)).show(ui, |ui| self.graph_options(ui, id, &w));
                 });
             });
         }
@@ -332,6 +332,34 @@ impl App {
         }
     }
 
+    /// Put this window on unmixed markers: the first two, then each press steps to the next pair.
+    fn unmixed_axes(&mut self, id: u64) {
+        let Some(w) = self.session.window(id).cloned() else { return };
+        let chans: Vec<String> = self.session.sample(w.sample).channels.iter().filter(|c| c.starts_with(crate::sample::UNMIX_PREFIX) && !c.ends_with("Residual") && !c.ends_with("-AF")).cloned().collect();
+        if chans.len() < 2 {
+            self.status = "This sample has fewer than two unmixed markers.".into();
+            return;
+        }
+        let at = chans.iter().position(|c| *c == w.x_chan).map_or(0, |i| (i + 1) % chans.len());
+        let (cx, cy) = (chans[at].clone(), chans[(at + 1) % chans.len()].clone());
+        let (xr, yr) = {
+            let s = self.session.sample(w.sample);
+            (s.range_of(&cx), s.range_of(&cy))
+        };
+        if let Some(win) = self.session.window_mut(id) {
+            win.x_scale = crate::session::default_scale(&cx, xr);
+            win.y_scale = crate::session::default_scale(&cy, yr);
+            win.x_chan = cx.clone();
+            win.y_chan = cy.clone();
+            win.kind = PlotKind::Pseudocolor;
+            win.drawing.cancel();
+        }
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.refit = true;
+        }
+        self.status = format!("Showing {cx} against {cy}.");
+    }
+
     fn hop_sample(&mut self, id: u64, sample: usize) {
         match self.session.retarget_window(id, sample) {
             Ok(()) => {
@@ -345,7 +373,7 @@ impl App {
     }
 
     fn graph_toolbar(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
-        egui::ScrollArea::horizontal().id_salt(("g_tools_scroll", id)).auto_shrink([false, true]).show(ui, |ui| ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
             let n = self.session.samples().len();
             let (prev, next) = (self.step_sample(w.sample, -1), self.step_sample(w.sample, 1));
             if ui.add_enabled(prev.is_some(), egui::Button::new("◀")).on_hover_text("Previous sample (←)").clicked() {
@@ -390,7 +418,7 @@ impl App {
             ui.separator();
             for (tool, icon) in [(Tool::Pointer, "↖"), (Tool::Polygon, "⬠"), (Tool::Rectangle, "▭"), (Tool::Ellipse, "◯"), (Tool::Interval, "↔"), (Tool::Quadrant, "✚")] {
                 let disabled = w.kind == PlotKind::Histogram && !matches!(tool, Tool::Interval | Tool::Pointer);
-                let r = ui.add_enabled(!disabled, egui::SelectableLabel::new(w.tool == tool, RichText::new(format!("{icon}  {}", tool.label())).size(12.5)));
+                let r = ui.add_enabled(!disabled, egui::SelectableLabel::new(w.tool == tool, RichText::new(icon).size(15.0))).on_hover_text(tool.label());
                 if r.clicked() {
                     if let Some(win) = self.session.window_mut(id) {
                         win.tool = tool;
@@ -398,7 +426,8 @@ impl App {
                     }
                 }
             }
-            ui.separator();
+        });
+        ui.horizontal(|ui| {
             if ui.add_enabled(self.session.can_undo(w.sample), egui::Button::new("↶ Undo")).on_hover_text("Ctrl+Z").clicked() {
                 self.do_undo(w.sample);
             }
@@ -429,6 +458,9 @@ impl App {
                     ui.close_menu();
                 }
             });
+            if self.session.sample(w.sample).unmixed && ui.button("◈ Unmixed").on_hover_text("Plot this sample's unmixed markers (Unmix-…): the first two, then press again for the next pair").clicked() {
+                self.unmixed_axes(id);
+            }
             let fmo_set = self.session.fmo(&w.x_chan).is_some() || (w.kind != PlotKind::Histogram && self.session.fmo(&w.y_chan).is_some());
             if ui.button(if fmo_set { "⌖ Clear FMO" } else { "⌖ Set FMO" }).on_hover_text("Use this population as the FMO control: its 95th percentile becomes a dashed reference line on every plot of the channel").clicked() {
                 self.toggle_fmo(id, w);
@@ -451,7 +483,7 @@ impl App {
                     self.ws.detached.insert(id);
                 }
             }
-        }));
+        });
     }
 
     fn breadcrumb(&mut self, ui: &mut egui::Ui, id: u64, w: &GraphWindow) {
@@ -860,7 +892,12 @@ impl App {
         }
         if let Some((cx, cy)) = quadrant_at {
             self.status = match self.session.commit_quadrants(id, cx, cy) {
-                Ok(ids) => format!("Added {} quadrant populations. Ctrl+Z to undo.", ids.len()),
+                Ok(ids) => {
+                    if let Some(win) = self.session.window_mut(id) {
+                        win.tool = Tool::Pointer;
+                    }
+                    format!("Added {} quadrant populations. Double-click one to open it; Ctrl+Z to undo.", ids.len())
+                }
                 Err(e) => format!("Could not add the quadrant: {e}"),
             };
             if let Some(g) = self.ws.graphs.get_mut(&id) {
@@ -874,6 +911,10 @@ impl App {
                     let c = self.session.count(w.sample, nid);
                     self.session.selected = Some((w.sample, nid));
                     self.status = format!("Added '{name}' — {c} events. Double-click the gate to open it; Ctrl+Z to undo.");
+                    // the natural next move is to double-click the new gate, so go back to the pointer
+                    if let Some(win) = self.session.window_mut(id) {
+                        win.tool = Tool::Pointer;
+                    }
                     if let Some(g) = self.ws.graphs.get_mut(&id) {
                         g.key = 0;
                     }

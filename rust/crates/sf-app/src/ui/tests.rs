@@ -211,6 +211,7 @@ fn every_gate_tool_creates_its_gate_through_the_real_event_path() {
     frame(&mut app, &ctx);
     let kids = children(&app);
     assert_eq!(kids.len(), 1, "one rectangle gate was created; status: {}", app.status);
+    assert_eq!(app.session.window(w).unwrap().tool, Tool::Pointer, "after a gate is drawn the pointer is back, so a double click opens it");
     let g = match app.session.tree(0).kind(kids[0]).unwrap() {
         NodeKind::Gate(g) => g.clone(),
         k => panic!("{k:?}"),
@@ -268,6 +269,7 @@ fn every_gate_tool_creates_its_gate_through_the_real_event_path() {
     assert_eq!(kids.len(), before + 4, "status: {}", app.status);
     let quads: Vec<usize> = kids[before..].to_vec();
     assert_eq!(quads.iter().map(|&q| app.session.count(0, q)).sum::<usize>(), 3000);
+    assert_eq!(app.session.window(w).unwrap().tool, Tool::Pointer, "and after quadrants too");
     assert!(app.session.log.is_empty(), "{:?}", app.session.log);
 }
 
@@ -1845,6 +1847,60 @@ fn the_plot_keeps_its_size_when_side_panes_open_and_close() {
 }
 
 #[test]
+fn the_scatter_gate_of_a_control_is_drawn_moved_and_resized_without_losing_it() {
+    let ctx = egui::Context::default();
+    let size = egui::vec2(300.0, 260.0);
+    let pts: Vec<(f32, f32, bool)> = (0..200).map(|i| (i as f32 * 0.5, 50.0, true)).collect();
+    let range = [(0.0f32, 100.0f32), (0.0f32, 100.0f32)];
+    let mut gate: Option<[f64; 4]> = None;
+    let origin = std::cell::Cell::new(None::<Pos2>);
+    let mut t = 0.0;
+    let mut run = |gate: &mut Option<[f64; 4]>, events: Vec<egui::Event>| {
+        t += 0.05;
+        let input = egui::RawInput { screen_rect: Some(screen()), time: Some(t), events, ..Default::default() };
+        let _ = ctx.run(input, |c| {
+            egui::CentralPanel::default().show(c, |ui| {
+                origin.set(Some(origin.get().unwrap_or_else(|| ui.next_widget_position())));
+                comp_wizard_view::scatter_editor(ui, &pts, range, size, "x", "y", Some(gate));
+            });
+        });
+    };
+    run(&mut gate, vec![]);
+    let o = origin.get().unwrap();
+    // data (0..100) -> screen: the plot is the widget minus 6 px left/top/right and 16 px bottom
+    let scr = |x: f64, y: f64| Pos2::new(o.x + 6.0 + (x / 100.0) as f32 * (size.x - 12.0), o.y + 6.0 + (1.0 - y / 100.0) as f32 * (size.y - 22.0));
+    let drag = |run: &mut dyn FnMut(&mut Option<[f64; 4]>, Vec<egui::Event>), gate: &mut Option<[f64; 4]>, a: Pos2, b: Pos2| {
+        run(gate, vec![egui::Event::PointerMoved(a)]);
+        run(gate, vec![button(a, true)]);
+        run(gate, vec![egui::Event::PointerMoved(Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))]);
+        run(gate, vec![egui::Event::PointerMoved(b)]);
+        run(gate, vec![button(b, false)]);
+        run(gate, vec![]);
+    };
+    // draw
+    drag(&mut run, &mut gate, scr(20.0, 30.0), scr(60.0, 70.0));
+    let g = gate.expect("a gate was drawn");
+    assert!((g[0] - 20.0).abs() < 1.5 && (g[1] - 60.0).abs() < 1.5 && (g[2] - 30.0).abs() < 1.5 && (g[3] - 70.0).abs() < 1.5, "{g:?}");
+    // move: dragging inside keeps the size and shifts the gate (the old one does not disappear)
+    drag(&mut run, &mut gate, scr(40.0, 50.0), scr(50.0, 40.0));
+    let m = gate.unwrap();
+    assert!(((m[1] - m[0]) - (g[1] - g[0])).abs() < 0.5 && ((m[3] - m[2]) - (g[3] - g[2])).abs() < 0.5, "size kept: {m:?}");
+    assert!((m[0] - g[0] - 10.0).abs() < 1.5 && (m[2] - g[2] + 10.0).abs() < 1.5, "moved by (+10, -10): {m:?} from {g:?}");
+    // resize by the right edge: only that edge moves
+    drag(&mut run, &mut gate, scr(m[1], (m[2] + m[3]) / 2.0), scr(m[1] - 15.0, (m[2] + m[3]) / 2.0));
+    let r = gate.unwrap();
+    assert!((r[1] - (m[1] - 15.0)).abs() < 1.5 && (r[0] - m[0]).abs() < 0.5 && (r[2] - m[2]).abs() < 0.5 && (r[3] - m[3]).abs() < 0.5, "{r:?} from {m:?}");
+    // a corner moves two edges
+    drag(&mut run, &mut gate, scr(r[0], r[3]), scr(r[0] + 5.0, r[3] + 8.0));
+    let c = gate.unwrap();
+    assert!((c[0] - (r[0] + 5.0)).abs() < 1.5 && (c[3] - (r[3] + 8.0)).abs() < 1.5 && (c[1] - r[1]).abs() < 0.5, "{c:?} from {r:?}");
+    // empty space draws a new one
+    drag(&mut run, &mut gate, scr(85.0, 10.0), scr(95.0, 20.0));
+    let n = gate.unwrap();
+    assert!(n[0] > 80.0 && n[1] < 99.0 && n[2] < 25.0, "{n:?}");
+}
+
+#[test]
 fn a_graph_can_be_detached_into_its_own_window_and_docked_again() {
     let ctx = egui::Context::default();
     let mut app = app_with_sample();
@@ -2016,6 +2072,13 @@ fn the_compensation_wizard_calculates_from_real_controls_and_its_windows_draw() 
         app.comp.wiz.show = tab;
         settle(&mut app, &ctx);
     }
+    // the two pages and the maximised window draw, and the setup page has the controls' histograms and scatter gate
+    for results in [true, false, true] {
+        app.demo_comp_wizard_page(results);
+        settle(&mut app, &ctx);
+    }
+    assert!(app.comp.wiz.maximized);
+    app.comp.wiz.page = comp_wizard_view::Page::Setup;
     app.comp.wiz.inspect = Some(1);
     settle(&mut app, &ctx);
     app.comp.wiz.rows[1].manual = Some((300.0, 3000.0));
@@ -2030,4 +2093,33 @@ fn the_compensation_wizard_calculates_from_real_controls_and_its_windows_draw() 
     app.comp.wiz.rows.iter_mut().for_each(|r| r.detector = None);
     app.wizard_calculate();
     assert!(app.comp.wiz.result.as_ref().unwrap().is_err());
+}
+
+#[test]
+fn the_compensation_wizard_fits_the_screen_on_both_pages_maximised_or_not() {
+    let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test-assests/fcs/multi stain"));
+    if !dir.join("apc alone.fcs").exists() {
+        eprintln!("SKIPPED: fixtures missing");
+        return;
+    }
+    let ctx = egui::Context::default();
+    let mut app = App::new();
+    let files: Vec<std::path::PathBuf> = ["apc alone", "bv421 alone", "fitc alone", "pe alone", "AF700 alone", "bv711 alone", "unstained"].iter().map(|n| dir.join(format!("{n}.fcs"))).collect();
+    app.load_files(&files);
+    app.set_module(Module::Compensation);
+    app.open_comp_wizard();
+    app.wizard_calculate();
+    for (maximised, results) in [(true, false), (true, true), (false, false), (false, true)] {
+        app.comp.wiz.maximized = maximised;
+        app.comp.wiz.page = if results { comp_wizard_view::Page::Results } else { comp_wizard_view::Page::Setup };
+        app.comp.wiz.request_resize();
+        for _ in 0..4 {
+            frame(&mut app, &ctx);
+        }
+        let r = ctx.memory(|m| m.area_rect(egui::Id::new("Compensation wizard"))).unwrap();
+        assert!(r.left() >= -0.5 && r.right() <= screen().right() + 0.5 && r.bottom() <= screen().bottom() + 0.5, "maximised {maximised}, results {results}: {r:?} outside {:?}", screen());
+        if maximised {
+            assert!(r.width() > screen().width() - 40.0 && r.height() > screen().height() - 120.0, "a maximised wizard fills the window: {r:?}");
+        }
+    }
 }

@@ -89,7 +89,13 @@ impl App {
         if let Some(&first) = done.first() {
             let _ = self.open_unmixed_plot(first, false);
         }
-        self.status = format!("Unmixed {} sample(s). The new channels (Unmix-…) are listed first on every axis menu; use Show plot below to see them.", done.len());
+        self.status = if done.is_empty() {
+            format!("Nothing was unmixed: {}", lines.first().cloned().unwrap_or_else(|| "no sample was selected".into()))
+        } else if done.len() < samples.len() {
+            format!("Unmixed {} of {} sample(s); the others failed (see Last unmixing). The new channels (Unmix-…) are the first section of every axis menu.", done.len(), samples.len())
+        } else {
+            format!("Unmixed {} sample(s). The new channels (Unmix-…) are the first section of every axis menu, and the ◈ Unmixed button on a graph plots them.", done.len())
+        };
         self.spec.done = done;
         self.spec.log = lines;
     }
