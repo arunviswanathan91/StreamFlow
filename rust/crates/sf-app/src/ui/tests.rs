@@ -2068,7 +2068,7 @@ fn the_compensation_wizard_calculates_from_real_controls_and_its_windows_draw() 
     assert!(worst(&got[0], &got[1]) < 0.25);
     app.comp.wiz.opt.method = crate::comp_wizard::Method::Refined;
     // the windows draw: results tabs, an opened control with a hand-set limit, and the matrix goes to the editor
-    for tab in [comp_wizard_view::Tab::Summary, comp_wizard_view::Tab::Spread, comp_wizard_view::Tab::Cosine] {
+    for tab in [comp_wizard_view::Tab::Summary, comp_wizard_view::Tab::Before, comp_wizard_view::Tab::Spread, comp_wizard_view::Tab::Cosine] {
         app.comp.wiz.show = tab;
         settle(&mut app, &ctx);
     }
