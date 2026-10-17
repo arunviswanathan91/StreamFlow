@@ -318,7 +318,7 @@ fn main() -> eframe::Result<()> {
     if let Some(v) = args.iter().find_map(|a| a.strip_prefix("--comp-wizard")) {
         app.demo_comp_wizard(v.strip_prefix('=').and_then(|n| n.parse().ok()));
         if let Some(p) = flag("wizard-page") {
-            app.demo_comp_wizard_page(p == "results");
+            app.demo_comp_wizard_page(p == "results" || p == "before");
         }
     }
     if flag("nav").as_deref() == Some("collapsed") {

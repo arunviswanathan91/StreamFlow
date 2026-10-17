@@ -68,11 +68,26 @@ pub struct WizState {
     resize: bool,
     after_calc: bool,
     cache: HashMap<usize, Cached>,
+    /// The Before / after tab: which sample and channel pair, and the plots built for them.
+    pub ba: BaState,
+}
+
+#[derive(Default)]
+pub struct BaState {
+    sample: Option<usize>,
+    x: String,
+    y: String,
+    key: u64,
+    before: Vec<(f32, f32, bool)>,
+    after: Vec<(f32, f32, bool)>,
+    zhi: f32,
+    err: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Summary,
+    Before,
     Spread,
     Cosine,
 }
@@ -85,7 +100,7 @@ pub enum Page {
 
 impl Default for WizState {
     fn default() -> Self {
-        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary, strength: 1.0, page: Page::Setup, sel: None, maximized: false, resize: false, after_calc: false, cache: HashMap::new() }
+        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary, strength: 1.0, page: Page::Setup, sel: None, maximized: false, resize: false, after_calc: false, cache: HashMap::new(), ba: BaState::default() }
     }
 }
 
@@ -196,6 +211,10 @@ impl App {
     /// Show a page of the wizard (screenshots, checks).
     pub fn demo_comp_wizard_page(&mut self, results: bool) {
         self.comp.wiz.page = if results { Page::Results } else { Page::Setup };
+        if std::env::args().any(|a| a == "--wizard-page=before") {
+            self.comp.wiz.page = Page::Results;
+            self.comp.wiz.show = Tab::Before;
+        }
         self.comp.wiz.maximized = true;
         self.comp.wiz.request_resize();
     }
@@ -578,13 +597,14 @@ impl App {
             Some(Ok(r)) => {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut wiz.show, Tab::Summary, "Summary and matrix");
+                    ui.selectable_value(&mut wiz.show, Tab::Before, "Before / after");
                     ui.selectable_value(&mut wiz.show, Tab::Spread, "Spillover spreading");
                     ui.selectable_value(&mut wiz.show, Tab::Cosine, "Signature similarity");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (what, text) = match wiz.show {
                             Tab::Spread => ("spillover_spreading.csv", square_csv(&r.matrix.detectors, &r.spread)),
                             Tab::Cosine => ("signature_similarity.csv", square_csv(&r.matrix.detectors, &r.cosine)),
-                            Tab::Summary => ("spillover.csv", square_csv(&r.matrix.detectors, &r.matrix.spill)),
+                            Tab::Summary | Tab::Before => ("spillover.csv", square_csv(&r.matrix.detectors, &r.matrix.spill)),
                         };
                         if ui.small_button("Export CSV…").clicked() {
                             if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(what).save_file() {
@@ -602,6 +622,10 @@ impl App {
                         result_summary(ui, r, &self.session);
                         ui.add_space(6.0);
                         matrix_table(ui, "wiz_matrix", &r.matrix.detectors, &r.matrix.spill, 1.0, [60, 150, 90], "The spillover matrix: row = the stained control's detector, column = the detector that sees its light (1 on the diagonal).");
+                    }
+                    Tab::Before => {
+                        let sel_det = wiz.sel.and_then(|i| wiz.rows.get(i)).and_then(|r| r.detector.clone());
+                        before_after(ui, r, &mut wiz.ba, &mut wiz.strength, wiz.sel, sel_det, &self.session);
                     }
                     Tab::Spread => matrix_table(ui, "wiz_spread", &r.matrix.detectors, &r.spread, 1.0, [224, 120, 40], "Noise each stained control adds to every other detector after compensation (standard deviation per √intensity). Large values mean that pair is hard to resolve."),
                     Tab::Cosine => matrix_table(ui, "wiz_cos", &r.matrix.detectors, &r.cosine, 1.0, [0, 150, 200], "Cosine similarity of the spillover rows: close to 1 means two fluorochromes look alike on this instrument."),
@@ -720,6 +744,115 @@ impl App {
         }
         self.comp.wiz = wiz;
     }
+}
+
+/// Any sample on any pair of channels, as it was recorded and as it is after compensation, side by side, with the
+/// share of the compensation as a slider (under- and over-compensation).
+fn before_after(ui: &mut egui::Ui, r: &WizardResult, ba: &mut BaState, strength: &mut f64, sel: Option<usize>, sel_det: Option<String>, session: &crate::session::Session) {
+    let n = session.samples().len();
+    if n == 0 {
+        return;
+    }
+    if ba.sample.map_or(true, |s| s >= n) {
+        ba.sample = Some(sel.filter(|&s| s < n).unwrap_or(0));
+    }
+    let si = ba.sample.unwrap_or(0);
+    let dets = &r.matrix.detectors;
+    if !dets.contains(&ba.x) {
+        ba.x = sel_det.filter(|d| dets.contains(d)).or_else(|| dets.first().cloned()).unwrap_or_default();
+    }
+    if !dets.contains(&ba.y) || ba.y == ba.x {
+        ba.y = strongest_spill(r, &ba.x).unwrap_or_default();
+    }
+    let name = |i: usize| session.samples()[i].name.trim_end_matches(".fcs").to_string();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Sample");
+        egui::ComboBox::from_id_salt("ba_sample").width(200.0).selected_text(name(si)).show_ui(ui, |ui| {
+            for i in 0..n {
+                ui.selectable_value(&mut ba.sample, Some(i), name(i));
+            }
+        });
+        ui.label("X");
+        egui::ComboBox::from_id_salt("ba_x").width(130.0).selected_text(ba.x.trim_end_matches("-A")).show_ui(ui, |ui| {
+            for d in dets {
+                ui.selectable_value(&mut ba.x, d.clone(), d.trim_end_matches("-A"));
+            }
+        });
+        ui.label("Y");
+        egui::ComboBox::from_id_salt("ba_y").width(130.0).selected_text(ba.y.trim_end_matches("-A")).show_ui(ui, |ui| {
+            for d in dets {
+                ui.selectable_value(&mut ba.y, d.clone(), d.trim_end_matches("-A"));
+            }
+        });
+        ui.separator();
+        ui.label("Compensation applied");
+        ui.spacing_mut().slider_width = 200.0;
+        ui.add(egui::Slider::new(strength, 0.0..=3.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)).custom_parser(|t| t.trim().trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0)));
+        if ui.small_button("Reset").clicked() {
+            *strength = 1.0;
+        }
+    });
+    let si = ba.sample.unwrap_or(0);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (si, &ba.x, &ba.y, strength.to_bits()).hash(&mut h);
+        for v in &r.matrix.spill {
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    };
+    if key != ba.key || (ba.before.is_empty() && ba.err.is_none()) {
+        ba.key = key;
+        ba.err = None;
+        let s = session.sample(si);
+        let k = dets.len();
+        let mut scaled = r.matrix.clone();
+        let mut ident = r.matrix.clone();
+        for a in 0..k {
+            for b in 0..k {
+                scaled.spill[a * k + b] = if a == b { 1.0 } else { r.matrix.spill[a * k + b] * *strength };
+                ident.spill[a * k + b] = if a == b { 1.0 } else { 0.0 };
+            }
+        }
+        match (compensated_pair(s, &ident, &ba.x, &ba.y), compensated_pair(s, &scaled, &ba.x, &ba.y)) {
+            (Ok(b), Ok(a)) => {
+                let pts = |(x, y): (Vec<f64>, Vec<f64>)| -> Vec<(f32, f32, bool)> {
+                    let step = (x.len() / 30000).max(1);
+                    (0..x.len()).step_by(step).map(|i| (z_of(x[i]) as f32, z_of(y[i]) as f32, true)).collect()
+                };
+                ba.before = pts(b);
+                ba.after = pts(a);
+                let top = ba.before.iter().chain(&ba.after).flat_map(|p| [p.0, p.1]).fold(1.0f32, f32::max);
+                ba.zhi = top;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                ba.err = Some(e);
+                ba.before.clear();
+                ba.after.clear();
+            }
+        }
+    }
+    if let Some(e) = &ba.err {
+        ui.label(RichText::new(format!("✕ {e}")).color(theme::GATE_RED));
+        return;
+    }
+    let lo = z_of(-2000.0) as f32;
+    let rng = [(lo, ba.zhi), (lo, ba.zhi)];
+    let avail = ui.available_size();
+    let w = ((avail.x - 20.0) / 2.0).max(220.0);
+    let h = (avail.y - 52.0).max(220.0);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(format!("Before — {} vs {}", ba.x.trim_end_matches("-A"), ba.y.trim_end_matches("-A"))).strong());
+            scatter_editor(ui, &ba.before, rng, Vec2::new(w, h), &ba.x, &ba.y, None);
+        });
+        ui.vertical(|ui| {
+            ui.label(RichText::new(format!("After compensation ({:.0}%)", *strength * 100.0)).strong());
+            scatter_editor(ui, &ba.after, rng, Vec2::new(w, h), &ba.x, &ba.y, None);
+        });
+    });
+    theme::caption(ui, "Good compensation: after, the populations sit on the axes instead of leaning in a diagonal.");
 }
 
 fn strongest_spill(r: &WizardResult, det: &str) -> Option<String> {
