@@ -23,3 +23,6 @@ png = "0.18"
 ab_glyph = "0.2"
 miniz_oxide = "0.8"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+
+[build-dependencies]
+winresource = "0.1"
