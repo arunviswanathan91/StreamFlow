@@ -9,6 +9,16 @@ use std::collections::HashMap;
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test-assests/fcs/multi stain/AF700 alone.fcs");
 const REFERENCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference_gating.txt");
 
+/// The fixture lives in `test-assests/`, which is not in the repository (CI has no copy). Absent, the
+/// tests here skip themselves; present, a file that will not parse is still a failure.
+fn fixture() -> Option<Fcs> {
+    if !std::path::Path::new(FIXTURE).exists() {
+        eprintln!("SKIPPED: fixture missing ({FIXTURE})");
+        return None;
+    }
+    Some(Fcs::read(FIXTURE).expect("fixture"))
+}
+
 struct Case {
     name: String,
     gate: Option<Gate>,
@@ -76,13 +86,14 @@ fn load_reference() -> (usize, Vec<Case>) {
 }
 
 /// Build the tree for one edge rule, evaluate on the fixture, return `name -> count`.
-fn counts_with(edges: EdgeRule) -> (usize, HashMap<String, usize>, HashMap<String, usize>) {
-    let (n, got, want, _) = build(edges);
-    (n, got, want)
+/// `None` when the fixture is absent.
+fn counts_with(edges: EdgeRule) -> Option<(usize, HashMap<String, usize>, HashMap<String, usize>)> {
+    let (n, got, want, _) = build(edges)?;
+    Some((n, got, want))
 }
 
-fn build(edges: EdgeRule) -> (usize, HashMap<String, usize>, HashMap<String, usize>, GateTree) {
-    let fcs = Fcs::read(FIXTURE).expect("fixture");
+fn build(edges: EdgeRule) -> Option<(usize, HashMap<String, usize>, HashMap<String, usize>, GateTree)> {
+    let fcs = fixture()?;
     let channels: Vec<String> = fcs.params.iter().map(|p| p.name.clone()).collect();
     let view = EventView::new(&fcs.events, fcs.n_params(), &channels).unwrap();
     let (n_events, cases) = load_reference();
@@ -115,12 +126,12 @@ fn build(edges: EdgeRule) -> (usize, HashMap<String, usize>, HashMap<String, usi
     assert!(ev.warnings.is_empty(), "{:?}", ev.warnings);
     let got: HashMap<String, usize> = ids.iter().map(|(k, &id)| (k.clone(), ev.counts[id])).collect();
     let want: HashMap<String, usize> = cases.iter().map(|c| (c.name.clone(), c.flowkit)).collect();
-    (n_events, got, want, t)
+    Some((n_events, got, want, t))
 }
 
 #[test]
 fn every_gate_and_boolean_matches_flowkit_exactly_with_gatingml_half_open_edges() {
-    let (_, got, want) = counts_with(EdgeRule::HalfOpen);
+    let Some((_, got, want)) = counts_with(EdgeRule::HalfOpen) else { return };
     let mut bad = Vec::new();
     for (name, w) in &want {
         if got[name] != *w {
@@ -134,7 +145,7 @@ fn every_gate_and_boolean_matches_flowkit_exactly_with_gatingml_half_open_edges(
 
 #[test]
 fn the_default_inclusive_rule_reproduces_the_java_style_counts_and_really_differs_on_quantised_data() {
-    let (_, got, _) = counts_with(EdgeRule::Inclusive);
+    let Some((_, got, _)) = counts_with(EdgeRule::Inclusive) else { return };
     let (_, cases) = load_reference();
     let mut max_gap = 0i64;
     for c in cases.iter().filter(|c| c.inclusive.is_some()) {
@@ -149,7 +160,7 @@ fn the_default_inclusive_rule_reproduces_the_java_style_counts_and_really_differ
 /// to reload in FlowKit. Also checks the file is well-formed and lists every gate it claims to export.
 #[test]
 fn gatingml_export_is_well_formed_and_complete_for_the_reference_gates() {
-    let (_, got, _, tree) = build(EdgeRule::HalfOpen);
+    let Some((_, got, _, tree)) = build(EdgeRule::HalfOpen) else { return };
     let ex = sf_gating::gatingml::to_gatingml(&tree, &HashMap::new());
     assert!(ex.warnings.is_empty(), "{:?}", ex.warnings);
     assert_eq!(ex.exported.len(), 14);
@@ -167,7 +178,7 @@ fn gatingml_export_is_well_formed_and_complete_for_the_reference_gates() {
 /// Same gates nested three deep (rect -> ellipse -> polygon), exported with `parent_id`, for FlowKit to reload.
 #[test]
 fn nested_gatingml_export_for_flowkit() {
-    let fcs = Fcs::read(FIXTURE).expect("fixture");
+    let Some(fcs) = fixture() else { return };
     let channels: Vec<String> = fcs.params.iter().map(|p| p.name.clone()).collect();
     let view = EventView::new(&fcs.events, fcs.n_params(), &channels).unwrap();
     let (_, cases) = load_reference();
