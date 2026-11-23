@@ -114,6 +114,7 @@ flowjo*/
 
 # Markdown / instructional documents are kept local, not in the repo
 *.md
+!/README.md
 *.mdc
 AGENTS.md
 GEMINI.md
