@@ -1,0 +1,8 @@
+# Link the C runtime statically on Windows. Without this streamflow.exe needs VCRUNTIME140.dll,
+# which a clean Windows install does not have: the user double-clicks the download and gets
+# "VCRUNTIME140.dll was not found" instead of the app. The release is a single self-contained exe.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

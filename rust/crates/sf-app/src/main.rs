@@ -1,3 +1,7 @@
+// Release builds are a windowed program: no console window opens behind the app when it is started from
+// Explorer. Debug builds keep the console so `eprintln!` output stays visible while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use sf_app::ui::App;
 use sf_gating::GateTree;
 use std::path::PathBuf;
@@ -331,8 +335,25 @@ fn main() -> eframe::Result<()> {
         app.request_screenshot(PathBuf::from(p), 60);
     }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_maximized(true).with_min_inner_size([960.0, 600.0]).with_title("StreamFLOW"),
+        viewport: eframe::egui::ViewportBuilder::default().with_maximized(true).with_min_inner_size([960.0, 600.0]).with_title("StreamFLOW").with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native("StreamFLOW", options, Box::new(move |_cc| Ok(Box::new(app))))
+}
+
+/// The window / taskbar icon, decoded from the PNG compiled into the binary. A damaged image gives the default
+/// icon rather than stopping the app from starting.
+fn app_icon() -> eframe::egui::IconData {
+    fn decode() -> Option<eframe::egui::IconData> {
+        let bytes: &[u8] = include_bytes!("../../../../streamflow-icon.png");
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+        let mut rgba = vec![0u8; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut rgba).ok()?;
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            return None;
+        }
+        rgba.truncate(info.buffer_size());
+        Some(eframe::egui::IconData { rgba, width: info.width, height: info.height })
+    }
+    decode().unwrap_or_default()
 }

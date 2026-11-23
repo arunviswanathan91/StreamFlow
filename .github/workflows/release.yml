@@ -1,17 +1,18 @@
 name: release
 
-# Builds the self-contained Windows StreamFLOW.exe installer (jpackage) and publishes it as a
-# GitHub Release asset. The installer bundles the JavaFX app, a private JRE, the engine scripts,
-# and a portable Python (FlowKit) runtime, so the end user needs no Java or Python installed.
+# Builds and publishes StreamFLOW for Windows as a GitHub Release.
 #
-# Python-only by DEFAULT (smaller, faster). The R-plugin runway is preserved: set the "bundle_r"
-# input to true to ALSO bundle R-Portable + the R-based plugins (FlowMagic, PeacoQC). When bundle_r
-# is false the R download step is skipped and package.ps1 runs with -SkipR. Tag-triggered releases
-# are always Python-only; use "Run workflow" with bundle_r=true for an R-enabled build.
+# StreamFLOW ships as ONE native executable built from rust/ :
+#   StreamFLOW-<version>-win-x64.exe   download and double-click. No installer, no Java, no Python,
+#                                      no Visual C++ redistributable - nothing else on the PC.
 #
 # Triggers:
-#   * push a tag like v1.2.0      -> Python-only release named after the tag
-#   * manual "Run workflow"       -> provide the version; optionally bundle_r=true for an R build
+#   * push a tag like v0.1.0   -> test, build, check, PUBLISH the release
+#   * manual "Run workflow"    -> test, build, check; publishes only if "publish" is ticked.
+#                                 Left unticked it is a full dry run: the exe is attached to the
+#                                 workflow run as an artifact and nothing public is created.
+#
+# Nothing is published unless the whole test suite passed and the binary check passed.
 
 on:
   push:
@@ -20,144 +21,186 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'App version to build and release (e.g. 1.2.1)'
-        required: true
-        default: '1.2.0'
-      bundle_r:
-        description: 'Also bundle R-Portable + R plugins (FlowMagic/PeacoQC)? Leave false for a Python-only build.'
+        description: 'Version to build, e.g. 0.1.0. Blank = the version in rust/Cargo.toml.'
+        required: false
+        default: ''
+      publish:
+        description: 'Publish a public GitHub Release? Leave unticked for a dry run.'
         type: boolean
         required: false
         default: false
-      r_portable_tag:
-        description: 'R-Portable release tag to bundle (only used when bundle_r is true; blank = default below)'
-        required: false
-        default: ''
 
 env:
-  # Default R-Portable release tag — used only when bundle_r=true. Update after running stage-r-portable.
-  R_PORTABLE_TAG: r-portable-2026-07-04
-  # Run all JavaScript actions on Node 24 — Node 20 is deprecated on the runners.
+  # Run all JavaScript actions on Node 24 - Node 20 is deprecated on the runners.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write          # required to create the release and upload assets
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
-    timeout-minutes: 90
+  # ---------------------------------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version + tag
+      - name: Resolve and check the version
         id: ver
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          # The one place the version is written: [workspace.package] in rust/Cargo.toml. It is
+          # what the exe's own version resource reports (Properties > Details).
+          cargo_version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          if [[ -z "$cargo_version" ]]; then
+            echo "::error file=rust/Cargo.toml::Could not read [workspace.package] version."; exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="$INPUT_VERSION"
+          else
+            version="$cargo_version"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$version' is not of the form 1.2.3"; exit 1
+          fi
+          # A download named one number whose Properties page says another is the kind of mistake
+          # nobody notices until a user reports it, so refuse to build until they agree.
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "::error file=rust/Cargo.toml::rust/Cargo.toml says $cargo_version but the release is $version. Bump [workspace.package] version (and run cargo build so Cargo.lock follows)."; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing StreamFLOW $version"
+
+  # ---------------------------------------------------------------------------------------------
+  build:
+    name: native exe (Rust)
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            $v = ($env:GITHUB_REF -replace '^refs/tags/v', '')
-            $tag = ($env:GITHUB_REF -replace '^refs/tags/', '')
-          } else {
-            $v = '${{ github.event.inputs.version }}'
-            $tag = "v$v"
-          }
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "tag=$tag"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Building StreamFLOW $v (tag $tag)"
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
 
-      - name: Set up JDK 25 (Microsoft, LTS — provides jpackage)
-        uses: actions/setup-java@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          distribution: 'microsoft'
-          java-version: '25'
-          cache: maven
+          workspaces: rust
 
-      # Gate: if the app doesn't compile or a test fails, the job stops here and NO release is
-      # published (later steps, including "Publish GitHub Release", only run on success).
-      # Deliberately no `clean` — a later step stages the engine into app\target.
-      # Tests needing R or large FCS fixtures self-skip via JUnit assumptions.
-      - name: Build + test (release gate)
-        working-directory: app
-        shell: cmd
-        run: mvn -B test
+      # Release gate. Tests that need the large FCS fixtures (test-assests/, not in the repo) skip
+      # themselves.
+      - name: Test (whole workspace, release)
+        working-directory: rust
+        run: cargo test --workspace --release --locked
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          # No pip cache — stage-python.ps1 builds a self-contained venv; there is
-          # no root-level requirements.txt for setup-python to key the cache on.
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked -p sf-app
 
-      - name: Stage portable Python (FlowKit engine)
+      # Windowed (no console), C runtime linked statically, icon + version resources embedded.
+      - name: Check the binary is self-contained and carries its icon
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File engine\stage-python.ps1
+        run: powershell -ExecutionPolicy Bypass -File rust/check-binary.ps1 -Exe rust/target/release/streamflow.exe
 
-      - name: Download R-Portable from release assets
-        if: ${{ github.event.inputs.bundle_r == 'true' }}
+      - name: The exe reports the release version
         shell: pwsh
         run: |
-          # Prefer the workflow-dispatch override, then fall back to the env default.
-          $tag = '${{ github.event.inputs.r_portable_tag }}'
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = '${{ env.R_PORTABLE_TAG }}' }
-          Write-Host "Downloading R-Portable from release: $tag"
+          $want = "${{ needs.version.outputs.version }}"
+          $got = (Get-Item rust/target/release/streamflow.exe).VersionInfo.ProductVersion
+          Write-Host "ProductVersion: $got"
+          if (-not "$got".StartsWith($want)) { throw "The exe says version '$got' but the release is $want." }
 
-          # Download via gh CLI (uses the repo's GITHUB_TOKEN, no auth setup needed).
-          gh release download $tag --pattern "r-portable-win64.tar.gz" --output r-portable-win64.tar.gz
-          if (-not (Test-Path "r-portable-win64.tar.gz")) {
-            throw "r-portable-win64.tar.gz not found after download"
-          }
-          $mb = [math]::Round((Get-Item "r-portable-win64.tar.gz").Length / 1MB)
-          Write-Host "Downloaded: r-portable-win64.tar.gz  (${mb} MB)"
+      # Hosted runners have no GPU and only the OpenGL 1.1 software driver, which the app's renderer
+      # cannot use, so a failure to draw HERE says nothing about a real PC. Reported, not enforced.
+      # Run rust/smoke-test.ps1 on a real machine before tagging.
+      - name: Start the application (informational on hosted runners)
+        continue-on-error: true
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File rust/smoke-test.ps1 -Exe rust/target/release/streamflow.exe
 
-          # Extract into app\target\ — the archive contains an R-Portable\ directory
-          New-Item -ItemType Directory -Force "app\target" | Out-Null
-          tar -xzf r-portable-win64.tar.gz -C app\target
-          if (-not (Test-Path "app\target\R-Portable")) {
-            throw "app\target\R-Portable not found after extraction"
-          }
-          Write-Host "R-Portable extracted to app\target\R-Portable"
+      - name: Name the binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $name = "StreamFLOW-${{ needs.version.outputs.version }}-win-x64.exe"
+          Copy-Item rust/target/release/streamflow.exe (Join-Path out $name)
+          $mb = [math]::Round((Get-Item (Join-Path out $name)).Length / 1MB, 1)
+          Write-Host "$name ($mb MB)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StreamFLOW-${{ needs.version.outputs.version }}-win-x64
+          path: out/*.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------------------------
+  publish:
+    name: publish GitHub Release
+    needs: [version, build]
+    # A tag push always publishes; a manual run only when asked to.
+    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          ls -la
+          sha256sum *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cat > ../notes.md <<EOF
+          ## Download
+
+          | File | What it is |
+          |---|---|
+          | \`StreamFLOW-${VERSION}-win-x64.exe\` | **StreamFLOW for Windows 10/11 (64-bit).** One file, no installation: download and double-click. Nothing else needs to be installed. |
+          | \`SHA256SUMS.txt\` | Checksum of the file. |
+
+          **First run:** the file is not code-signed, so Windows SmartScreen may show
+          "Windows protected your PC". Choose **More info**, then **Run anyway**.
+
+          EOF
+
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: Install WiX Toolset (jpackage .exe installer backend)
-        shell: pwsh
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          choco install wixtoolset --no-progress -y
-          # Expose WiX bin dir to PATH for the jpackage step (choco's PATH change
-          # only takes effect in a new process; GITHUB_PATH persists across steps).
-          $wix = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory -ErrorAction SilentlyContinue |
-                 Sort-Object Name -Descending | Select-Object -First 1
-          if ($wix) { Join-Path $wix.FullName "bin" | Out-File $env:GITHUB_PATH -Append }
-          else { Write-Warning "WiX install dir not found under 'Program Files (x86)'" }
-
-      - name: Build Windows installer (jpackage)
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File app\package.ps1 -Installer -Version ${{ steps.ver.outputs.version }}
-
-      - name: Locate installer
-        id: exe
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem app\target\dist -Filter *.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "No .exe produced by jpackage in app\target\dist." }
-          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host ("Installer: {0} ({1} MB)" -f $exe.FullName, [math]::Round($exe.Length / 1MB))
-
-      - name: Upload installer as a build artifact (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: StreamFLOW-${{ steps.ver.outputs.version }}-win-x64
-          path: app/target/dist/*.exe
-          if-no-files-found: warn
-
-      # Only publishes when every prior step succeeded (build, tests, jpackage, installer located).
-      - name: Publish GitHub Release
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          name: StreamFLOW ${{ steps.ver.outputs.version }}
-          tag_name: ${{ steps.ver.outputs.tag }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: app/target/dist/*.exe
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists - replacing its files."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "StreamFLOW $VERSION" \
+              --notes-file notes.md \
+              --generate-notes \
+              --target "$GITHUB_SHA"
+          fi
+          gh release view "$TAG" --json url,assets -q '.url, (.assets[] | "  \(.name)  \(.size) bytes")'

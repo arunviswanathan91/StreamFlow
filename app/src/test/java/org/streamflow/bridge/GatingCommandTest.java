@@ -43,7 +43,7 @@ class GatingCommandTest {
 
     private static boolean rAvailable() {
         try {
-            Process p = new ProcessBuilder(RPaths.rscript().toString(), "--version")
+            Process p = new ProcessBuilder(RPaths.rscript().toString(), "-e", "library(jsonlite)")
                     .redirectErrorStream(true).start();
             return p.waitFor(15, TimeUnit.SECONDS) && p.exitValue() == 0;
         } catch (Exception e) {
