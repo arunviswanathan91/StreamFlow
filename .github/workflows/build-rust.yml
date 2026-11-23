@@ -1,0 +1,69 @@
+name: build-rust
+
+# CI for the native Rust app (rust/, egui). Runs the whole workspace test suite in release mode
+# (the t-SNE / UMAP / clustering reference tests are slow unoptimised) and proves the release
+# binary builds and starts.
+#
+# Tests that need the large FCS fixtures (test-assests/, gitignored) skip themselves when the
+# files are absent - that is expected here.
+
+on:
+  push:
+    paths:
+      - 'rust/**'
+      - 'build/icon.ico'
+      - 'streamflow-icon.png'
+      - '.github/workflows/build-rust.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Test (whole workspace, release)
+        working-directory: rust
+        run: cargo test --workspace --release --locked
+
+      - name: Build the application
+        working-directory: rust
+        run: cargo build --release --locked -p sf-app
+
+      - name: Check the binary is self-contained and carries its icon
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File rust/check-binary.ps1 -Exe rust/target/release/streamflow.exe
+
+      # Hosted runners have no GPU and only the OpenGL 1.1 software driver, which the app's renderer
+      # cannot use, so a failure to draw HERE says nothing about a real PC. Reported, not enforced.
+      - name: Start the built application (informational on hosted runners)
+        continue-on-error: true
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File rust/smoke-test.ps1 -Exe rust/target/release/streamflow.exe
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamflow-native-win-x64
+          path: rust/target/release/streamflow.exe
+          if-no-files-found: error
