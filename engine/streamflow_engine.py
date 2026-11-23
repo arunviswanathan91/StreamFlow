@@ -394,7 +394,10 @@ def _render_plot(i, a):
     dpi = 100.0
     ev = s.get_events(source="comp" if STATE.get("comp_applied") else "raw")
     n = ev.shape[0]
-    idx = np.random.choice(n, 20000, replace=False) if n > 20000 else np.arange(n)
+    # Seeded: the same request must draw the same events, or a re-rendered figure differs from the
+    # one already exported (same rule as the seeded draw in get_events).
+    rng = np.random.RandomState(int(a.get("seed", 12345)))
+    idx = rng.choice(n, 20000, replace=False) if n > 20000 else np.arange(n)
     x = ev[idx, pnn.index(xch)]
 
     # FlowJo-style ramp: low density blue -> high red, empty bins white.
@@ -417,7 +420,7 @@ def _render_plot(i, a):
             ax.hist2d(x, y, bins=200, cmap=cmap, cmin=1)
             try:
                 from scipy.stats import gaussian_kde
-                sub = idx if len(idx) <= 4000 else np.random.choice(idx, 4000, replace=False)
+                sub = idx if len(idx) <= 4000 else rng.choice(idx, 4000, replace=False)
                 xs, ys = ev[sub, pnn.index(xch)], ev[sub, pnn.index(ych)]
                 k = gaussian_kde(np.vstack([xs, ys]))
                 gx, gy = np.mgrid[xs.min():xs.max():60j, ys.min():ys.max():60j]

@@ -14,7 +14,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -101,9 +100,13 @@ class CytoPlotColorBarExportTest {
         assertTrue(w > 0 && h > 0, "empty image");
 
         // The last column of the crop is the far edge of the colour-bar strip: background, never ink.
+        // Compared with a tolerance, not exactly: the software pipeline on the CI runners returns
+        // 0xFDFDFD for this pixel where a GPU pipeline returns 0xFFFFFF. An exact match kept the
+        // build red from July to November 2026 with no defect behind it. The dark surround this
+        // guards against (#0D1B2A) is nowhere near the threshold.
         Color topRight = image.getPixelReader().getColor(w - 1, 0);
-        assertEquals(Color.WHITE, topRight,
-                "top-right pixel should be white background, not the dark surround");
+        assertTrue(distance(topRight, Color.WHITE) < 0.03,
+                "top-right pixel should be white background, not the dark surround: " + topRight);
 
         // And the strip as a whole must contain no #0D1B2A. Sample the rightmost column.
         Color navy = Color.web("#0D1B2A");

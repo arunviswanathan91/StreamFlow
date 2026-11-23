@@ -66,8 +66,15 @@ jobs:
           # flowkit pulls flowio, flowutils, numpy, scipy, pandas; matplotlib is used
           # by the render/stats commands; scikit-learn/umap-learn/openTSNE power the
           # Dim. Reduction, Clustering and Classifier modules.
-          engine\py-env\Scripts\python.exe -m pip install flowkit matplotlib scikit-learn umap-learn openTSNE phenograph flowsom
+          engine\py-env\Scripts\python.exe -m pip install flowkit matplotlib scikit-learn umap-learn openTSNE phenograph flowsom FlowCal
           engine\py-env\Scripts\python.exe -c "import flowkit; print('FlowKit', flowkit.__version__)"
+
+      # The Python engine is what ships. These drive its real command handlers.
+      - name: Engine unit tests (Python)
+        shell: pwsh
+        run: |
+          engine/py-env/Scripts/python.exe -m pip install --quiet pytest
+          engine/py-env/Scripts/python.exe -m pytest engine/tests -q
 
       - name: Set up R 4.4 (legacy engine fallback)
         uses: r-lib/actions/setup-r@v2

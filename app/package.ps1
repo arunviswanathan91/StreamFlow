@@ -12,13 +12,18 @@
 #
 # NOTE: first run needs validation (jpackage classpath + runtime path resolution).
 #
-#   -Installer        build a Windows .exe installer (needs WiX 3.x on PATH) instead of an app-image
+#   -Installer        ALSO wrap the app-image into a Windows .exe installer (needs WiX 3.x on PATH)
+#   -SkipSmoke        do not run app\smoke-test.ps1 against the built image (not for releases)
+#   -SkipLaunch       smoke test without starting StreamFLOW.exe (no desktop session)
 #   -SkipR            build a Python-only fat binary (omit the bundled R runtime / R plugins)
 #   -Version <x.y.z>  app version stamped into the package (default 1.2.0)
 #
 # CI-friendly: if the repo-bundled JDK/Maven are absent it falls back to JAVA_HOME / the `mvn`
 # on PATH, and R is skipped automatically when R-Portable has not been staged.
-param([switch]$Installer, [switch]$SkipR, [string]$Version = "1.2.0")
+#
+# Outputs:  app/target/image/StreamFLOW/              the app-image (always)
+#           app/target/dist/StreamFLOW-<version>.exe  the installer (-Installer)
+param([switch]$Installer, [switch]$SkipR, [switch]$SkipSmoke, [switch]$SkipLaunch, [string]$Version = "1.2.0")
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path     # app\
@@ -83,7 +88,7 @@ function Remove-BuildDir([string]$path) {
 
 # NOTE: "content" is deliberately absent - it is staged under $env:TEMP now (see step 2). A tree
 # left at target\content by an older build is stale and intentionally ignored.
-foreach ($d in @("classes", "test-classes", "libs", "dist",
+foreach ($d in @("classes", "test-classes", "libs", "dist", "image",
                  "generated-sources", "maven-status", "surefire-reports")) {
     Remove-BuildDir (Join-Path $here "target\$d")
 }
@@ -123,22 +128,26 @@ robocopy $pyportable (Join-Path $content "python") /E /NFL /NDL /NJH /NJS | Out-
 if ($bundleR) { robocopy $rportable (Join-Path $content "R-Portable") /E /NFL /NDL /NJH /NJS | Out-Null }
 
 # 3) jpackage app-image (JavaFX runs from the classpath; the openjfx win jars carry natives).
-$dist = Join-Path $here "target\dist"
+#    The image is ALWAYS built first, into target\image, and the installer (step 5) is made FROM
+#    it. That way the thing the smoke test checked is byte-for-byte the thing that ships, and
+#    target\dist holds nothing but the installer.
+$imageRoot = Join-Path $here "target\image"
+$dist      = Join-Path $here "target\dist"
+Remove-BuildDir $imageRoot
 Remove-BuildDir $dist
-$type = if ($Installer) { "exe" } else { "app-image" }
 # NOTE: --main-class is org.streamflow.Launcher, NOT StreamFlowApp. jpackage puts the OpenJFX jars
 # on the CLASSPATH, and the JVM refuses to launch a main class that extends Application in that
 # configuration ("JavaFX runtime components are missing"). Because StreamFLOW.exe is a windowed
 # binary with no console, that error is invisible and the app just does nothing when clicked.
 # Launcher does not extend Application. Do not point this back at StreamFlowApp.
 #
-# NOTE: jpackage places --app-content at the IMAGE ROOT, while $APPDIR is <image>\app - so the
+# NOTE: jpackage places --app-content at the IMAGE ROOT, while $APPDIR is <image>/app - so the
 # bundled engine lives at <image>\content, one level UP from $APPDIR. An earlier build passed
 # "-Dstreamflow.appDir=$APPDIR\content", a directory that never exists, so the packaged app could
 # not find its engine or Python at all. Do not "simplify" the ..\ away.
-Write-Host "Running jpackage ($type)…"
+Write-Host "Running jpackage (app-image)…"
 & (Join-Path $jdk "bin\jpackage.exe") `
-    --type $type `
+    --type "app-image" `
     --name "StreamFLOW" `
     --app-version $Version `
     --input (Join-Path $here "target\libs") `
@@ -146,14 +155,54 @@ Write-Host "Running jpackage ($type)…"
     --main-class "org.streamflow.Launcher" `
     --app-content $content `
     --icon (Join-Path $repo "build\icon.ico") `
-    --dest $dist `
+    --dest $imageRoot `
     --java-options "-Dstreamflow.appDir=`$APPDIR\..\content" `
     --java-options "-Dstreamflow.engine.kind=python" `
     --vendor "StreamFLOW"
-if ($LASTEXITCODE -ne 0) { throw "jpackage failed (exit $LASTEXITCODE)." }
+if ($LASTEXITCODE -ne 0) { throw "jpackage (app-image) failed (exit $LASTEXITCODE)." }
 
 # jpackage has copied the content tree into the image; the staging copy is no longer needed.
 Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue
 
-Write-Host "Built -> $dist"
-Get-ChildItem $dist | ForEach-Object { Write-Host ("  {0}" -f $_.Name) }
+$image = Join-Path $imageRoot "StreamFLOW"
+
+# 4) Smoke-test the image itself: bundled engine answers, StreamFLOW.exe really starts. A green
+#    `mvn test` says nothing about either - see app\smoke-test.ps1 for the history.
+if ($SkipSmoke) {
+    Write-Warning "Smoke test SKIPPED (-SkipSmoke). Do not release this build."
+} else {
+    $smokeArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $here "smoke-test.ps1"), "-Image", $image)
+    if ($SkipLaunch) { $smokeArgs += "-SkipLaunch" }
+    & powershell.exe @smokeArgs
+    if ($LASTEXITCODE -ne 0) { throw "Smoke test failed (exit $LASTEXITCODE) - not packaging a broken image." }
+}
+
+# 5) Installer, built from the image that was just tested.
+#    --win-upgrade-uuid is FIXED so a newer version upgrades the installed one in place instead of
+#    installing beside it. Never change it. Per-user install: no administrator prompt.
+#    Without --win-menu / --win-shortcut the installer leaves no way to find the app afterwards.
+if ($Installer) {
+    Write-Host "Running jpackage (exe installer)…"
+    & (Join-Path $jdk "bin\jpackage.exe") `
+        --type "exe" `
+        --app-image $image `
+        --name "StreamFLOW" `
+        --app-version $Version `
+        --vendor "StreamFLOW" `
+        --description "StreamFLOW flow cytometry analysis" `
+        --icon (Join-Path $repo "build\icon.ico") `
+        --license-file (Join-Path $repo "LICENSE") `
+        --win-per-user-install `
+        --win-dir-chooser `
+        --win-menu `
+        --win-menu-group "StreamFLOW" `
+        --win-shortcut `
+        --win-upgrade-uuid "7b0f5c1e-3a94-4d6b-9c58-2f1d6a8e4b17" `
+        --dest $dist
+    if ($LASTEXITCODE -ne 0) { throw "jpackage (installer) failed (exit $LASTEXITCODE)." }
+    $installer = Get-ChildItem $dist -Filter "*.exe" | Select-Object -First 1
+    if (-not $installer) { throw "jpackage reported success but left no .exe in $dist." }
+    Write-Host ("Installer -> {0} ({1} MB)" -f $installer.FullName, [math]::Round($installer.Length / 1MB))
+}
+
+Write-Host "App-image -> $image"
