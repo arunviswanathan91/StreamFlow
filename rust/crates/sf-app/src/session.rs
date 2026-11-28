@@ -34,7 +34,7 @@ pub fn short_name(channel: &str) -> String {
 /// The scale a channel is shown on by default: scatter/time linear, fluorescence logicle.
 pub fn default_scale(channel: &str, range: f64) -> ScaleSpec {
     let up = channel.to_ascii_uppercase();
-    if up.contains("FSC") || up.contains("SSC") || up.contains("TIME") || up.contains("WIDTH") || up.ends_with("-W") || up.ends_with("-H") && up.starts_with("FSC") {
+    if up.starts_with("MAP-") || up.contains("FSC") || up.contains("SSC") || up.contains("TIME") || up.contains("WIDTH") || up.ends_with("-W") || up.ends_with("-H") && up.starts_with("FSC") {
         ScaleSpec::Identity
     } else {
         ScaleSpec::Logicle { t: range.max(262_144.0), w: 0.5, m: 4.5, a: 0.0 }
@@ -623,6 +623,32 @@ impl Session {
         true
     }
 
+    /// Set the events of the index-set population `name` under `parent`, as one undoable step. An existing one is
+    /// updated IN PLACE, so the gates drawn below it stay; otherwise it is added.
+    pub fn set_index_population(&mut self, sample: usize, parent: NodeId, name: &str, rows: Vec<u32>) -> Result<NodeId, String> {
+        if !self.states[sample].tree.is_alive(parent) {
+            return Err("that population no longer exists".into());
+        }
+        let t = &self.states[sample].tree;
+        let old = t.children(parent).map_err(|e| e.to_string())?.iter().copied().find(|&k| t.name(k).ok() == Some(name));
+        self.snapshot(sample);
+        let gate = sf_gating::Gate::indexed(rows);
+        let r = match old {
+            Some(k) => self.states[sample].tree.reset_gate(k, gate).map(|_| k),
+            None => self.states[sample].tree.add_gate(parent, name, gate),
+        };
+        match r {
+            Ok(n) => {
+                self.touch(sample);
+                Ok(n)
+            }
+            Err(e) => {
+                self.discard_snapshot(sample);
+                Err(e.to_string())
+            }
+        }
+    }
+
     /// Add several index-set populations under `parent` as ONE undoable step; same-named siblings are replaced
     /// (never stacked).
     pub fn add_index_populations(&mut self, sample: usize, parent: NodeId, groups: Vec<(String, Vec<u32>)>) -> Result<Vec<NodeId>, String> {
@@ -734,6 +760,18 @@ impl Session {
         self.samples[sample].set_unmixed(names, data, range)?;
         self.touch(sample);
         Ok(())
+    }
+
+    /// Attach a pooled map's coordinates to a sample as `Map-1` / `Map-2` (see [`LoadedSample::set_map`]).
+    pub fn set_map(&mut self, sample: usize, x: Vec<f32>, y: Vec<f32>, range: f64) -> Result<(), String> {
+        self.samples[sample].set_map(x, y, range)?;
+        self.touch(sample);
+        Ok(())
+    }
+
+    pub fn clear_map(&mut self, sample: usize) {
+        self.samples[sample].clear_map();
+        self.touch(sample);
     }
 
     pub fn clear_unmixed(&mut self, sample: usize) {

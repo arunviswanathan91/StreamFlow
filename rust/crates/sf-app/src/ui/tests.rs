@@ -2482,3 +2482,73 @@ fn analysis_results_become_ordinary_gates_on_every_sample_with_a_live_table() {
     app.module = Module::CellCycle;
     settle(&mut app, &ctx);
 }
+
+#[test]
+fn a_pooled_map_becomes_an_ordinary_plot_that_every_gate_tool_works_on() {
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    app.set_module(Module::DimReduction);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 500;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the embedding", |a| a.disc.emb.is_some());
+
+    app.disc_open_map();
+    assert!(app.status.starts_with("The map is now a plot"), "{}", app.status);
+    assert_eq!(app.module, Module::Workstation);
+    // both pooled samples carry the map as two channels and a population of exactly the pooled events
+    for i in 0..2 {
+        let s = app.session.sample(i);
+        assert!(s.has_map() && s.channel_index("Map-1").is_some() && s.channel_index("Map-2").is_some(), "sample {i}");
+        let node = app.session.tree(i).find(&[embed::MAP_POPULATION]).unwrap();
+        assert_eq!(app.session.count(i, node), 500, "sample {i}: the pooled events");
+    }
+    let (w, plot) = {
+        let Tab::Graph(w) = app.ws.tab else { panic!("the map is shown in a graph tab") };
+        settle(&mut app, &ctx);
+        (w, app.ws.graphs[&w].plot_rect.expect("drawn"))
+    };
+    let win = app.session.window(w).unwrap().clone();
+    assert_eq!((win.x_chan.as_str(), win.y_chan.as_str(), win.x_scale.clone()), ("Map-1", "Map-2", ScaleSpec::Identity), "linear map axes");
+    assert_eq!(app.ws.graphs[&w].shown, 500, "every pooled event of this sample is on the plot");
+
+    // an ordinary rectangle gate, drawn with the pointer on the left half of the map
+    app.session.window_mut(w).unwrap().tool = Tool::Rectangle;
+    settle(&mut app, &ctx);
+    drag(&mut app, &ctx, Pos2::new(plot.left() + 2.0, plot.top() + 2.0), Pos2::new(plot.center().x, plot.bottom() - 2.0));
+    let parent = app.session.tree(0).find(&[embed::MAP_POPULATION]).unwrap();
+    let kids = app.session.tree(0).children(parent).unwrap().to_vec();
+    assert_eq!(kids.len(), 1, "one gate under the map population");
+    let (gate, name) = (gate_of(&app, kids[0]), app.session.tree(0).name(kids[0]).unwrap().to_string());
+    assert!(matches!(gate.kind, GateKind::Rectangle) && gate.x_chan == "Map-1");
+    let inside = app.session.count(0, kids[0]);
+    assert!(inside > 50 && inside < 450, "part of the 500 map events: {inside}");
+    // it went to the other sample too (the draw target is All Samples), under that sample's own map events
+    let other = app.session.tree(1).find(&[embed::MAP_POPULATION, name.as_str()]).expect("the gate exists in the second sample");
+    assert!(app.session.count(1, other) > 0 && app.session.count(1, other) < 500);
+    // it moves like any gate, and Ctrl+Z works
+    app.session.window_mut(w).unwrap().tool = Tool::Pointer;
+    settle(&mut app, &ctx);
+    let map = Mapper { rect: plot, range: app.ws.graphs[&w].range.unwrap() };
+    let centre = map.to_screen(((gate.xs[0] + gate.xs[1]) / 2.0, (gate.ys[0] + gate.ys[1]) / 2.0));
+    drag(&mut app, &ctx, centre, Pos2::new(centre.x + 0.2 * plot.width(), centre.y));
+    assert_ne!(gate_of(&app, kids[0]).xs, gate.xs, "the gate was dragged");
+    assert!(app.session.undo(0));
+    assert_eq!(gate_of(&app, kids[0]).xs, gate.xs);
+
+    // events that were not pooled have no map position: a map gate on ALL events holds only map events
+    let root = app.open_tab(0, GateTree::ROOT).unwrap();
+    {
+        let wr = app.session.window_mut(root).unwrap();
+        (wr.x_chan, wr.y_chan, wr.x_scale, wr.y_scale) = ("Map-1".into(), "Map-2".into(), ScaleSpec::Identity, ScaleSpec::Identity);
+    }
+    let all = app.session.commit_shape(root, &Shape::Rect { x0: -1e9, x1: 1e9, y0: -1e9, y1: 1e9 }, "everywhere on the map").unwrap();
+    assert_eq!(app.session.count(0, all), 500, "1500 events in the file, 500 on the map");
+
+    // running the map again replaces the positions and keeps the gates drawn on it
+    app.disc_open_map();
+    let parent2 = app.session.tree(0).find(&[embed::MAP_POPULATION]).unwrap();
+    assert_eq!(parent2, parent);
+    assert_eq!(app.session.tree(0).children(parent2).unwrap().len(), 1, "the gate is still there");
+    settle(&mut app, &ctx);
+}

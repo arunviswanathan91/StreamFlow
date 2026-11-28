@@ -583,6 +583,41 @@ impl App {
         }
     }
 
+    /// Hand the current map to the gating system and show it as an ordinary plot in the Workstation.
+    pub fn disc_open_map(&mut self) {
+        let Some(emb) = self.disc.emb.clone() else {
+            self.status = "Run the embedding first.".into();
+            return;
+        };
+        let done = match embed::attach_map(&mut self.session, &emb) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("Could not open the map for gating: {e}");
+                return;
+            }
+        };
+        let Some((si, node)) = done.first else { return };
+        match self.open_tab(si, node) {
+            Ok(id) => {
+                if let Some(w) = self.session.window_mut(id) {
+                    w.x_chan = format!("{}1", crate::sample::MAP_PREFIX);
+                    w.y_chan = format!("{}2", crate::sample::MAP_PREFIX);
+                    w.x_scale = sf_core::scale::ScaleSpec::Identity;
+                    w.y_scale = sf_core::scale::ScaleSpec::Identity;
+                    w.kind = crate::density::PlotKind::Pseudocolor;
+                    w.tool = Tool::Pointer;
+                    w.drawing.cancel();
+                }
+                if let Some(g) = self.ws.graphs.get_mut(&id) {
+                    g.refit = true;
+                }
+                self.module = super::Module::Workstation;
+                self.status = format!("The map is now a plot: {} events of {} sample(s) under '{}', on the channels Map-1 / Map-2. Gates drawn here are ordinary gates and go to every sample of the draw target.", done.events, done.samples, embed::MAP_POPULATION);
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
     pub fn disc_approve_clusters(&mut self, scope: Scope) {
         let (Some(input), Some(res)) = (self.disc.input.clone(), self.disc.clus.clone()) else { return };
         let which = self.disc.picked.clone();
@@ -698,6 +733,9 @@ impl App {
                 }
             }
             theme::caption(ui, "Draw a region to turn the events inside it into a population.");
+            if self.disc.emb.is_some() && ui.button("Gate this map in the Workstation ▸").on_hover_text("Adds the map to every pooled sample as the channels Map-1 / Map-2 and opens it as an ordinary plot: all gate tools, move and resize, rename, undo, groups, compare and export work on it.").clicked() {
+                self.disc_open_map();
+            }
             if let Some(l) = self.disc.job_label() {
                 ui.add(egui::Spinner::new());
                 ui.label(RichText::new(l).color(theme::WARN));

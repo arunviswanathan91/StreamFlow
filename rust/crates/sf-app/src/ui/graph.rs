@@ -156,11 +156,12 @@ fn scale_name(s: &ScaleSpec) -> &'static str {
 /// `labels[i]` is what is shown for `channels[i]` (the channel with its marker).
 pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[String], labels: &[String]) {
     let shown_as = |c: &String| channels.iter().position(|x| x == c).and_then(|i| labels.get(i)).cloned().unwrap_or_else(|| c.clone());
-    use crate::sample::{COMP_PREFIX, UNMIX_PREFIX};
-    let sections: [(&str, Vec<&String>); 3] = [
+    use crate::sample::{COMP_PREFIX, MAP_PREFIX, UNMIX_PREFIX};
+    let sections: [(&str, Vec<&String>); 4] = [
+        ("Map (t-SNE / UMAP)", channels.iter().filter(|c| c.starts_with(MAP_PREFIX)).collect()),
         ("Unmixed", channels.iter().filter(|c| c.starts_with(UNMIX_PREFIX)).collect()),
         ("Compensated", channels.iter().filter(|c| c.starts_with(COMP_PREFIX)).collect()),
-        ("Measured", channels.iter().filter(|c| !c.starts_with(UNMIX_PREFIX) && !c.starts_with(COMP_PREFIX)).collect()),
+        ("Measured", channels.iter().filter(|c| !c.starts_with(UNMIX_PREFIX) && !c.starts_with(COMP_PREFIX) && !c.starts_with(MAP_PREFIX)).collect()),
     ];
     let shown = sections.iter().filter(|(_, v)| !v.is_empty()).count();
     for (title, list) in &sections {
@@ -168,7 +169,7 @@ pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[Str
             continue;
         }
         if shown > 1 {
-            ui.label(RichText::new(format!("{title}  ({})", list.len())).size(10.5).strong().color(if *title == "Unmixed" { theme::ACCENT } else { theme::MUTED }));
+            ui.label(RichText::new(format!("{title}  ({})", list.len())).size(10.5).strong().color(if *title != "Measured" && *title != "Compensated" { theme::ACCENT } else { theme::MUTED }));
         }
         for c in list {
             ui.selectable_value(chan, (*c).clone(), shown_as(c));

@@ -174,6 +174,58 @@ pub fn run_embedding(input: &EmbedInput) -> Result<Vec<f64>, String> {
     }
 }
 
+// ---- the map as channels ------------------------------------------------------------------------------
+
+/// Name of the population that holds the events of a pooled map in each sample.
+pub const MAP_POPULATION: &str = "Map events";
+
+/// What [`attach_map`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapAttached {
+    pub samples: usize,
+    pub events: usize,
+    /// `(sample, population)` of the first sample's map events, to open a plot on.
+    pub first: Option<(usize, NodeId)>,
+}
+
+/// Make a pooled map part of the gating system: every pooled sample gets the channels `Map-1` / `Map-2` (its
+/// events' positions; NaN for events that were not pooled) and a population "Map events" holding exactly the
+/// pooled events, under the population the map was made from. A plot of that population on the two map channels
+/// IS the map, so every gate tool, group, comparison and export works on it. Attaching again replaces the earlier
+/// map and its event list; gates drawn under "Map events" stay.
+pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached, String> {
+    let input = &emb.input;
+    let n = input.n();
+    if emb.xy.len() != 2 * n {
+        return Err("the map does not match its events".into());
+    }
+    let range = emb.xy.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+    let (mut done, mut first) = (0, None);
+    for &si in &input.request.samples {
+        let rows: Vec<(usize, u32)> = input.rows.iter().enumerate().filter(|(_, r)| r.0 == si).map(|(i, r)| (i, r.1)).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let Some(parent) = restrict_node(session, si, &input.request.restrict) else { continue };
+        let ne = session.sample(si).n_events;
+        let (mut x, mut y) = (vec![f32::NAN; ne], vec![f32::NAN; ne]);
+        for &(i, r) in &rows {
+            x[r as usize] = emb.xy[2 * i] as f32;
+            y[r as usize] = emb.xy[2 * i + 1] as f32;
+        }
+        session.set_map(si, x, y, range)?;
+        let node = session.set_index_population(si, parent, MAP_POPULATION, rows.iter().map(|r| r.1).collect())?;
+        if first.is_none() {
+            first = Some((si, node));
+        }
+        done += 1;
+    }
+    if done == 0 {
+        return Err("none of the pooled samples is loaded any more".into());
+    }
+    Ok(MapAttached { samples: done, events: n, first })
+}
+
 // ---- clustering -------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]

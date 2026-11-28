@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 pub const COMP_PREFIX: &str = "Comp-";
 pub const UNMIX_PREFIX: &str = "Unmix-";
+/// Prefix of the two channels holding an event's position on a pooled map (t-SNE / UMAP).
+pub const MAP_PREFIX: &str = "Map-";
 
 /// The spillover matrix applied to a sample.
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +200,26 @@ impl LoadedSample {
         self.append_derived(names, vec![String::new(); k], vec![range; k], &data);
         self.unmixed = true;
         Ok(())
+    }
+
+    /// Attach the positions of this sample's events on a pooled map (t-SNE / UMAP) as the channels `Map-1` and
+    /// `Map-2`, replacing an earlier map. Events that were not pooled carry NaN: they are on no plot of the map and
+    /// inside no gate drawn on it.
+    pub fn set_map(&mut self, x: Vec<f32>, y: Vec<f32>, range: f64) -> Result<(), String> {
+        if x.len() != self.n_events || y.len() != self.n_events {
+            return Err("map coordinates do not match the sample's event count".into());
+        }
+        self.drop_derived(MAP_PREFIX);
+        self.append_derived(vec![format!("{MAP_PREFIX}1"), format!("{MAP_PREFIX}2")], vec![String::new(); 2], vec![range; 2], &[x, y]);
+        Ok(())
+    }
+
+    pub fn clear_map(&mut self) {
+        self.drop_derived(MAP_PREFIX);
+    }
+
+    pub fn has_map(&self) -> bool {
+        self.channels.iter().any(|c| c.starts_with(MAP_PREFIX))
     }
 
     pub fn clear_unmixed(&mut self) {
