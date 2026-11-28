@@ -190,8 +190,8 @@ impl App {
         if w.rows.len() != n {
             w.rows = (0..n).map(|i| WizRow { detector: detector_from_name(&self.session.samples()[i].name, &dets), ..Default::default() }).collect();
             w.unstained = (0..n).find(|&i| {
-                let nm = self.session.samples()[i].name.to_ascii_lowercase();
-                nm.contains("unstain") || nm.contains("negative") || nm.contains("blank")
+                let nm = &self.session.samples()[i].name;
+                crate::spectral_app::looks_unstained(nm) || nm.to_ascii_lowercase().contains("negative")
             });
             w.result = None;
             w.cache.clear();
@@ -378,14 +378,29 @@ impl App {
                             if ui.selectable_label(wiz.sel == Some(i), RichText::new(label).size(12.0)).on_hover_text("Click to see this control's scatter gate").clicked() && wiz.rows[i].detector.is_some() {
                                 wiz.sel = Some(i);
                             }
-                            let cur = wiz.rows[i].detector.clone().unwrap_or_else(|| "—".into());
+                            let cur = wiz.rows[i].detector.clone().unwrap_or_else(|| if is_un { "Unstained".into() } else { "—".into() });
                             egui::ComboBox::from_id_salt(("wiz_det", i)).width(110.0).selected_text(cur).show_ui(ui, |ui| {
-                                if ui.selectable_label(wiz.rows[i].detector.is_none(), "—").clicked() {
+                                if ui.selectable_label(wiz.rows[i].detector.is_none() && !is_un, "—").clicked() {
                                     wiz.rows[i] = WizRow::default();
+                                    if is_un {
+                                        wiz.unstained = None;
+                                    }
                                 }
+                                // the file name is only a guess: any tube can be named the unstained one here
+                                if ui.selectable_label(is_un, "Unstained").on_hover_text("This tube is the unstained control (one per experiment). Choose “Unstained tube” under Negative to subtract it.").clicked() {
+                                    wiz.rows[i] = WizRow::default();
+                                    wiz.unstained = Some(i);
+                                    if wiz.sel == Some(i) {
+                                        wiz.sel = None;
+                                    }
+                                }
+                                ui.separator();
                                 for d in dets {
                                     if ui.selectable_label(wiz.rows[i].detector.as_deref() == Some(d.as_str()), d).clicked() {
                                         wiz.rows[i] = WizRow { detector: Some(d.clone()), ..Default::default() };
+                                        if is_un {
+                                            wiz.unstained = None;
+                                        }
                                     }
                                 }
                             });

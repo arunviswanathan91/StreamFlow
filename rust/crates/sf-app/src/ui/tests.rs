@@ -2123,3 +2123,134 @@ fn the_compensation_wizard_fits_the_screen_on_both_pages_maximised_or_not() {
         }
     }
 }
+
+/// Type into whatever holds the keyboard: select everything, then the text.
+fn type_over(app: &mut App, ctx: &egui::Context, text: &str) {
+    pointer(app, ctx, vec![key(egui::Key::A, true, false)]);
+    pointer(app, ctx, vec![egui::Event::Text(text.to_string())]);
+}
+
+#[test]
+fn renaming_a_population_commits_on_enter_and_on_clicking_away_and_escape_cancels() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    let g = app.session.commit_shape(w, &Shape::Rect { x0: 0.0, x1: 1e5, y0: 0.0, y1: 5e4 }, "Population 1").unwrap();
+    settle(&mut app, &ctx);
+
+    // Enter keeps the new name and closes the box
+    app.start_rename(0, g);
+    settle(&mut app, &ctx);
+    assert!(app.ws.rename.is_some() && app.ws.rename_focused, "the box is open and holds the keyboard");
+    type_over(&mut app, &ctx, "Live");
+    assert_eq!(app.ws.rename.as_ref().unwrap().2, "Live", "typing reaches the box");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Enter, false, false)]);
+    settle(&mut app, &ctx);
+    assert!(app.ws.rename.is_none(), "Enter closes the box");
+    assert_eq!(app.session.tree(0).name(g).unwrap(), "Live");
+    assert!(app.status.contains("Renamed"), "{}", app.status);
+
+    // Escape drops what was typed
+    app.start_rename(0, g);
+    settle(&mut app, &ctx);
+    type_over(&mut app, &ctx, "Dead");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Escape, false, false)]);
+    settle(&mut app, &ctx);
+    assert!(app.ws.rename.is_none());
+    assert_eq!(app.session.tree(0).name(g).unwrap(), "Live");
+
+    // clicking somewhere else keeps it
+    app.start_rename(0, g);
+    settle(&mut app, &ctx);
+    type_over(&mut app, &ctx, "Lymphocytes");
+    let away = Pos2::new(1400.0, 860.0);
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(away)]);
+    pointer(&mut app, &ctx, vec![button(away, true)]);
+    pointer(&mut app, &ctx, vec![button(away, false)]);
+    settle(&mut app, &ctx);
+    assert!(app.ws.rename.is_none(), "the box closes when the keyboard leaves it");
+    assert_eq!(app.session.tree(0).name(g).unwrap(), "Lymphocytes");
+    // the rename is one undo step
+    assert!(app.session.undo(0));
+    assert_eq!(app.session.tree(0).name(g).unwrap(), "Live");
+}
+
+#[test]
+fn a_gates_name_on_the_plot_takes_the_right_click_and_a_double_click_opens_the_gate() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    let g = app.session.commit_shape(w, &Shape::Rect { x0: 4e4, x1: 1e5, y0: 2e4, y1: 5e4 }, "Population 1").unwrap();
+    settle(&mut app, &ctx);
+    let (node, rect) = *app.ws.graphs[&w].label_rects.last().expect("the gate's name was drawn");
+    assert_eq!(node, g);
+    let at = rect.center();
+    assert_eq!(app.gate_label_at(w, at), Some(g));
+    // the name sits outside the outline, so the gate itself is not under this point
+    let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+    pointer(&mut app, &ctx, vec![egui::Event::PointerMoved(at)]);
+    pointer(&mut app, &ctx, vec![secondary(true)]);
+    pointer(&mut app, &ctx, vec![secondary(false)]);
+    settle(&mut app, &ctx);
+    assert_eq!(app.ws.graphs[&w].menu.map(|m| m.1), Some(Some(g)), "the menu is the gate's menu (with Rename), not the plot's");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Escape, false, false)]);
+    settle(&mut app, &ctx);
+
+    for _ in 0..2 {
+        pointer(&mut app, &ctx, vec![button(at, true)]);
+        pointer(&mut app, &ctx, vec![button(at, false)]);
+    }
+    settle(&mut app, &ctx);
+    assert!(app.ws.rename.is_none(), "double-clicking the name does not rename");
+    assert!(app.session.windows.iter().any(|x| x.sample == 0 && x.node == g), "it opens the population, like double-clicking the gate itself");
+}
+
+#[test]
+fn channel_markers_label_axes_and_exports_and_are_saved_with_the_workspace() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    assert_eq!(app.session.channel_label("CD3-A"), "CD3-A", "no marker: just the channel");
+    app.session.set_marker("CD3-A", Some(" CD45 "));
+    assert_eq!(app.session.marker("CD3-A").as_deref(), Some("CD45"));
+    assert_eq!(app.session.channel_label("CD3-A"), "CD3-A :: CD45");
+    assert_eq!(app.session.channel_label("Comp-CD3-A"), "Comp-CD3-A :: CD45", "a compensated channel shares its detector's marker");
+    // the exported figure's axis title carries it
+    let (w, _) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().x_chan = "CD3-A".into();
+    settle(&mut app, &ctx);
+    let fig = app.window_figure(w, 300.0, 300.0).unwrap();
+    assert!(crate::figure::to_svg(&fig).contains("CD3-A :: CD45"));
+    // the window with the table opens and draws
+    app.ws.markers_open = true;
+    settle(&mut app, &ctx);
+    // saved and restored; an emptied name hides the label, a reset brings the file's back
+    let doc = app.session.to_workspace_json();
+    let mut other = app_with_sample();
+    other.session.apply_workspace_json(&doc).unwrap();
+    assert_eq!(other.session.channel_label("CD3-A"), "CD3-A :: CD45");
+    other.session.set_marker("CD3-A", Some(""));
+    assert_eq!(other.session.channel_label("CD3-A"), "CD3-A");
+    other.session.set_marker("CD3-A", None);
+    assert!(other.session.marker_override("CD3-A").is_none());
+}
+
+#[test]
+fn a_histogram_keeps_the_y_axis_column_so_the_plot_does_not_move() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot_2d) = ready_tab(&mut app, &ctx);
+    app.session.window_mut(w).unwrap().kind = crate::density::PlotKind::Histogram;
+    app.ws.graphs.get_mut(&w).unwrap().refit = true;
+    settle(&mut app, &ctx);
+    let plot_h = app.ws.graphs[&w].plot_rect.unwrap();
+    assert_eq!(plot_h.left(), plot_2d.left(), "the Y axis column (now saying Histogram) is still there");
+    assert_eq!(app.ws.graphs[&w].last_2d, Some(crate::density::PlotKind::Pseudocolor), "the plot type to go back to is remembered");
+}
+
+#[test]
+fn characters_the_export_font_lacks_are_replaced_like_the_pdf_does() {
+    assert_eq!(crate::figure::ascii_fallback('▸'), Some('>'));
+    assert_eq!(crate::figure::ascii_fallback('→'), Some('>'));
+    assert_eq!(crate::figure::ascii_fallback('A'), None);
+    assert_eq!(crate::figure::ascii_fallback('é'), None, "a character WinAnsi has is kept");
+}

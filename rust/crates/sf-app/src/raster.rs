@@ -265,6 +265,9 @@ impl Canvas {
         for ch in t.text.chars() {
             let adv = text_width(&ch.to_string(), t.size, t.bold) * self.scale;
             if ch != ' ' {
+                // a character the font has no outline for would print as an empty box: draw what the PDF writer
+                // substitutes for it (an arrow becomes '>') so every export format reads the same
+                let ch = if scaled.glyph_id(ch).0 == 0 { crate::figure::ascii_fallback(ch).unwrap_or(ch) } else { ch };
                 let glyph = scaled.glyph_id(ch).with_scale_and_position(scaled.scale(), point(0.0, 0.0));
                 if let Some(og) = scaled.outline_glyph(glyph) {
                     // centre the outline in its Helvetica advance so spacing matches the vector exports

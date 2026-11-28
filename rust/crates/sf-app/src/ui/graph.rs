@@ -86,6 +86,10 @@ pub struct GraphUi {
     pub menu: Option<super::gate_menu::MenuTarget>,
     /// The histogram as last computed (heights, Y axis), for drawing and exporting.
     pub curve: Option<HistCurve>,
+    /// Where each child gate's name was drawn last frame: a right-click or double-click there means that gate.
+    pub label_rects: Vec<(NodeId, Rect)>,
+    /// The two-parameter plot type shown before switching to a histogram, to go back to.
+    pub last_2d: Option<PlotKind>,
 }
 
 /// One sample's picture in the compare strip.
@@ -107,7 +111,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), menu: None, curve: None }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), menu: None, curve: None, label_rects: Vec::new(), last_2d: None }
     }
 }
 
@@ -136,7 +140,9 @@ fn scale_name(s: &ScaleSpec) -> &'static str {
 
 /// The channel list of an axis menu, in sections so derived channels are easy to find: unmixed (spectral), then
 /// compensated, then the measured channels. Headings appear only when a section is not the only one.
-pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[String]) {
+/// `labels[i]` is what is shown for `channels[i]` (the channel with its marker).
+pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[String], labels: &[String]) {
+    let shown_as = |c: &String| channels.iter().position(|x| x == c).and_then(|i| labels.get(i)).cloned().unwrap_or_else(|| c.clone());
     use crate::sample::{COMP_PREFIX, UNMIX_PREFIX};
     let sections: [(&str, Vec<&String>); 3] = [
         ("Unmixed", channels.iter().filter(|c| c.starts_with(UNMIX_PREFIX)).collect()),
@@ -152,16 +158,27 @@ pub(super) fn channel_list(ui: &mut egui::Ui, chan: &mut String, channels: &[Str
             ui.label(RichText::new(format!("{title}  ({})", list.len())).size(10.5).strong().color(if *title == "Unmixed" { theme::ACCENT } else { theme::MUTED }));
         }
         for c in list {
-            ui.selectable_value(chan, (*c).clone(), c.as_str());
+            ui.selectable_value(chan, (*c).clone(), shown_as(c));
         }
     }
 }
 
 /// Channel + scale pickers for one axis. Returns true when anything changed.
-fn axis_controls(ui: &mut egui::Ui, id: (&str, u64), channels: &[String], ranges: &[f64], chan: &mut String, scale: &mut ScaleSpec, width: f32) -> bool {
+/// `histogram`, when given, adds a "Histogram" entry above the channels and is set when it is picked.
+#[allow(clippy::too_many_arguments)]
+fn axis_controls(ui: &mut egui::Ui, id: (&str, u64), channels: &[String], labels: &[String], ranges: &[f64], chan: &mut String, scale: &mut ScaleSpec, width: f32, histogram: Option<&mut bool>) -> bool {
     let (before_c, before_s) = (chan.clone(), scale.clone());
-    egui::ComboBox::from_id_salt((id, "chan")).width(width).selected_text(chan.clone()).show_ui(ui, |ui| {
-        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| channel_list(ui, chan, channels));
+    let shown = channels.iter().position(|c| c == chan).and_then(|i| labels.get(i)).cloned().unwrap_or_else(|| chan.clone());
+    egui::ComboBox::from_id_salt((id, "chan")).width(width).truncate().selected_text(shown).show_ui(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            if let Some(h) = histogram {
+                if ui.selectable_label(false, "Histogram").on_hover_text("Show the X channel alone, as a histogram").clicked() {
+                    *h = true;
+                }
+                ui.separator();
+            }
+            channel_list(ui, chan, channels, labels)
+        });
     });
     if *chan != before_c {
         let r = channels.iter().position(|c| c == chan).map_or(262_144.0, |i| ranges[i]);
@@ -308,6 +325,11 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The child gate whose name label (as drawn last frame) is under a screen position.
+    pub fn gate_label_at(&self, id: u64, p: Pos2) -> Option<NodeId> {
+        self.ws.graphs.get(&id)?.label_rects.iter().rev().find(|(_, r)| r.contains(p)).map(|(k, _)| *k)
     }
 
     pub(crate) fn do_undo(&mut self, sample: usize) {
@@ -670,22 +692,47 @@ impl App {
             (s.channels.clone(), s.ranges.clone())
         };
         let hist = w.kind == PlotKind::Histogram;
-        // ---- Y axis column
-        let mut changed = false;
-        let (mut nx, mut ny, mut xs, mut ys) = (w.x_chan.clone(), w.y_chan.clone(), w.x_scale.clone(), w.y_scale.clone());
+        let labels: Vec<String> = channels.iter().map(|c| self.session.channel_label(c)).collect();
         if !hist {
-            egui::SidePanel::left("g_y").exact_width(124.0).resizable(false).frame(egui::Frame::none()).show_inside(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new("Y axis").size(11.0).strong().color(theme::MUTED));
-                changed |= axis_controls(ui, ("y", id), &channels, &ranges, &mut ny, &mut ys, 116.0);
-            });
+            if let Some(g) = self.ws.graphs.get_mut(&id) {
+                g.last_2d = Some(w.kind);
+            }
         }
+        // ---- Y axis column. Always there, so the plot does not jump sideways between plot types: on a histogram it
+        // says "Histogram", and picking a channel goes back to a two-parameter plot.
+        let mut changed = false;
+        let (mut to_hist, mut to_2d) = (false, false);
+        let (mut nx, mut ny, mut xs, mut ys) = (w.x_chan.clone(), w.y_chan.clone(), w.x_scale.clone(), w.y_scale.clone());
+        egui::SidePanel::left("g_y").exact_width(124.0).resizable(false).frame(egui::Frame::none()).show_inside(ui, |ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Y axis").size(11.0).strong().color(theme::MUTED));
+            if hist {
+                let mut pick = String::new();
+                egui::ComboBox::from_id_salt(("y", id, "chan_hist")).width(116.0).selected_text("Histogram").show_ui(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        let _ = ui.selectable_label(true, "Histogram");
+                        ui.separator();
+                        channel_list(ui, &mut pick, &channels, &labels);
+                    });
+                });
+                if !pick.is_empty() {
+                    let r = channels.iter().position(|c| *c == pick).map_or(262_144.0, |i| ranges[i]);
+                    ys = default_scale(&pick, r);
+                    ny = pick;
+                    to_2d = true;
+                    changed = true;
+                }
+            } else {
+                changed |= axis_controls(ui, ("y", id), &channels, &labels, &ranges, &mut ny, &mut ys, 116.0, Some(&mut to_hist));
+            }
+        });
         // ---- X axis row
         egui::TopBottomPanel::bottom("g_x").frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 6.0))).show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("X axis").size(11.0).strong().color(theme::MUTED));
-                egui::ComboBox::from_id_salt(("x", id, "chan")).width(150.0).selected_text(nx.clone()).show_ui(ui, |ui| {
-                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| channel_list(ui, &mut nx, &channels));
+                let x_shown = channels.iter().position(|c| *c == nx).map_or_else(|| nx.clone(), |i| labels[i].clone());
+                egui::ComboBox::from_id_salt(("x", id, "chan")).width(190.0).truncate().selected_text(x_shown).show_ui(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| channel_list(ui, &mut nx, &channels, &labels));
                 });
                 if nx != w.x_chan {
                     let r = channels.iter().position(|c| *c == nx).map_or(262_144.0, |i| ranges[i]);
@@ -704,6 +751,19 @@ impl App {
                 win.y_chan = ny;
                 win.x_scale = xs;
                 win.y_scale = ys;
+                win.drawing.cancel();
+            }
+            if let Some(g) = self.ws.graphs.get_mut(&id) {
+                g.refit = true;
+            }
+        }
+        if to_hist || to_2d {
+            let back = self.ws.graphs.get(&id).and_then(|g| g.last_2d).unwrap_or(PlotKind::Pseudocolor);
+            if let Some(win) = self.session.window_mut(id) {
+                win.kind = if to_hist { PlotKind::Histogram } else { back };
+                if to_hist && !matches!(win.tool, Tool::Interval | Tool::Pointer) {
+                    win.tool = Tool::Interval; // a histogram has no second axis
+                }
                 win.drawing.cancel();
             }
             if let Some(g) = self.ws.graphs.get_mut(&id) {
@@ -750,7 +810,7 @@ impl App {
         self.paint_population(ctx, id, &w, &map, &painter);
         let curve = self.ws.graphs.get(&id).and_then(|g| g.curve.clone());
         let st = self.ws.graphs.get(&id).map(|g| g.plot.clone()).unwrap_or_default();
-        draw_axes(&painter, &map, &w, hist, curve.as_ref(), &st);
+        draw_axes(&painter, &map, &w, hist, curve.as_ref(), &st, &self.session.channel_label(&w.x_chan), &self.session.channel_label(&w.y_chan));
         let style = self.ws.graphs[&id].style.clone();
         self.gate_edit_input(ctx, id, &w, &resp, &map, hist);
         self.draw_child_gates(&painter, &map, &w, &style, id);
@@ -811,7 +871,9 @@ impl App {
         // ---- right-click: the gate under the pointer, or the plot itself
         if resp.secondary_clicked() {
             let at = resp.interact_pointer_pos().filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
-            let hit = at.and_then(|a| self.gate_under(&w, a));
+            // a gate's name sits outside its outline: a click on the name means that gate too
+            let on_label = resp.interact_pointer_pos().and_then(|p| self.gate_label_at(id, p));
+            let hit = on_label.or_else(|| at.and_then(|a| self.gate_under(&w, a)));
             if let Some(k) = hit {
                 self.session.selected = Some((w.sample, k));
             }
@@ -820,6 +882,19 @@ impl App {
             }
         }
         resp.context_menu(|ui| self.plot_menu(ui, id));
+        // A gate's name behaves like its body: click selects, double-click OPENS the population. It must not rename:
+        // the name sits a few pixels from the outline, so whether a double-click opened or renamed would depend on
+        // where exactly it landed. Renaming is on the right-click menu.
+        if w.tool == Tool::Pointer && (resp.clicked() || resp.double_clicked()) {
+            if let Some(k) = resp.interact_pointer_pos().and_then(|p| self.gate_label_at(id, p)) {
+                self.session.selected = Some((w.sample, k));
+                if resp.double_clicked() {
+                    if let Err(e) = self.open_tab(w.sample, k) {
+                        self.status = e;
+                    }
+                }
+            }
+        }
 
         // ---- gate drawing
         let pointer = resp.interact_pointer_pos().filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
@@ -876,7 +951,8 @@ impl App {
             }
         }
         if let Some((_, dbl)) = clicked_gate {
-            if let Some(pos) = resp.interact_pointer_pos() {
+            // a click on a gate's name was handled above (it means that gate, though it lies outside the outline)
+            if let Some(pos) = resp.interact_pointer_pos().filter(|p| self.gate_label_at(id, *p).is_none()) {
                 self.pick_gate(&w, map.to_data(pos), dbl);
             }
         }
@@ -1477,6 +1553,7 @@ impl App {
         let kids: Vec<NodeId> = self.session.tree(w.sample).children(w.node).map(|c| c.to_vec()).unwrap_or_default();
         let parent_count = self.session.count(w.sample, w.node).max(1);
         let painter = painter.with_clip_rect(map.rect.expand(2.0));
+        let mut label_rects: Vec<(NodeId, Rect)> = Vec::new();
         for k in kids {
             let (name, mut gate) = match (self.session.tree(w.sample).name(k), self.session.tree(w.sample).kind(k)) {
                 (Ok(n), Ok(NodeKind::Gate(g))) => (n.to_string(), g.clone()),
@@ -1510,6 +1587,7 @@ impl App {
                     let at = a + egui::vec2(3.0, -3.0 - 13.0 * (style.labels as u8 + style.freqs as u8 + 2 * style.medians as u8) as f32);
                     let text = format!("✎ edited · {}", o.group);
                     let r = painter.text(at, Align2::LEFT_BOTTOM, &text, FontId::proportional(10.5), Color32::TRANSPARENT);
+                    label_rects.push((k, r.expand(2.0)));
                     painter.rect_filled(r.expand(2.0), 3.0, Color32::from_rgba_unmultiplied(255, 244, 214, 235));
                     painter.text(at, Align2::LEFT_BOTTOM, text, FontId::proportional(10.5), Color32::from_rgb(160, 80, 0));
                 }
@@ -1544,9 +1622,13 @@ impl App {
                         text.push('\n');
                         text.push_str(&line);
                     }
-                    painter.text(a + egui::vec2(3.0, -3.0), Align2::LEFT_BOTTOM, text, FontId::proportional(11.0), Color32::from_rgb(120, 15, 15));
+                    let r = painter.text(a + egui::vec2(3.0, -3.0), Align2::LEFT_BOTTOM, text, FontId::proportional(11.0), Color32::from_rgb(120, 15, 15));
+                    label_rects.push((k, r.expand(2.0)));
                 }
             }
+        }
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.label_rects = label_rects;
         }
     }
 }
@@ -1655,7 +1737,8 @@ pub(super) fn declutter(p: &egui::Painter, items: &[(f32, String)], font: &FontI
     keep
 }
 
-fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, st: &PlotStyle) {
+#[allow(clippy::too_many_arguments)]
+fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve: Option<&HistCurve>, st: &PlotStyle, x_title: &str, y_title: &str) {
     let (show_grid, sci) = (st.grid, st.sci);
     let lab = |l: &str| if sci { crate::axis::sci_label(l) } else { l.to_string() };
     let axis = Stroke::new(1.0_f32, Color32::from_gray(150));
@@ -1706,9 +1789,9 @@ fn draw_axes(p: &egui::Painter, map: &Mapper, w: &GraphWindow, hist: bool, curve
         }
     }
     p.rect_stroke(r, 0.0, axis);
-    p.text(Pos2::new(r.center().x, r.bottom() + 20.0), Align2::CENTER_TOP, &w.x_chan, FontId::proportional(11.5), text);
+    p.text(Pos2::new(r.center().x, r.bottom() + 20.0), Align2::CENTER_TOP, x_title, FontId::proportional(11.5), text);
     if !hist {
-        p.text(Pos2::new(r.left() + 4.0, r.top() + 3.0), Align2::LEFT_TOP, &w.y_chan, FontId::proportional(11.5), Color32::from_gray(60));
+        p.text(Pos2::new(r.left() + 4.0, r.top() + 3.0), Align2::LEFT_TOP, y_title, FontId::proportional(11.5), Color32::from_gray(60));
     }
 }
 

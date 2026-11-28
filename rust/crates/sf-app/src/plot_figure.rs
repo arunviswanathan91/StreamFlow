@@ -53,6 +53,7 @@ pub struct PlotSpec<'a> {
     pub style: PlotStyle,
     pub range: Range,
     pub kind: PlotKind,
+    /// The axis titles as printed (the channel, with its marker name when it has one).
     pub x_chan: String,
     pub y_chan: String,
     pub x_scale: ScaleSpec,

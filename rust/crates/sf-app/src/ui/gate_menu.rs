@@ -245,9 +245,7 @@ impl App {
             }
             if ui.button("Rename…").clicked() {
                 ui.close_menu();
-                self.ws.pops_open = true;
-                self.ws.tree_sample = si;
-                self.ws.rename = Some((si, node, name.clone()));
+                self.start_rename(si, node);
             }
             let kind = gate.as_ref().map(|g| g.kind.clone());
             let convertible = matches!(kind, Some(GateKind::Rectangle | GateKind::Ellipse));
@@ -779,6 +777,7 @@ impl App {
             }
         }
         self.group_manager(ctx);
+        self.markers_window(ctx);
     }
 
     fn group_manager(&mut self, ctx: &egui::Context) {

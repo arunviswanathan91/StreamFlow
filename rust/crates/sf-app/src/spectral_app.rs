@@ -23,11 +23,19 @@ pub enum Role {
     Other,
 }
 
+/// Whether a file name says "unstained": the word itself, `blank`, or one of the short forms people write as a
+/// separate word (`US`, `UNS`, `UNST`: `TREG_US_001.fcs`). Only a guess; every wizard lets the user set it by hand.
+pub fn looks_unstained(sample_name: &str) -> bool {
+    let lower = sample_name.to_ascii_lowercase();
+    let lower = lower.trim_end_matches(".fcs");
+    lower.contains("unstain") || lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| matches!(t, "us" | "uns" | "unst" | "blank"))
+}
+
 /// Guess what a file is from its name: `fitc alone.fcs` -> `FITC`, `Unstained.fcs` -> unstained.
 pub fn guess_role(sample_name: &str) -> Role {
     let base = sample_name.trim_end_matches(".fcs").trim_end_matches(".FCS").trim();
     let lower = base.to_ascii_lowercase();
-    if lower.contains("unstained") || lower.contains("unstain") || lower == "blank" {
+    if looks_unstained(sample_name) {
         return Role::Unstained;
     }
     for suffix in [" alone", " single", " only", " ss", " control", " stain"] {
@@ -255,6 +263,12 @@ mod tests {
         assert_eq!(guess_role("AF700 alone.fcs"), Role::Single("AF700".into()));
         assert_eq!(guess_role("BV421 single.fcs"), Role::Single("BV421".into()));
         assert_eq!(guess_role("Unstained.fcs"), Role::Unstained);
+        for name in ["TREG_US_001.fcs", "US.fcs", "panel unst 2.fcs", "Blank.fcs", "TREG_UNSTAINED 2_002.fcs"] {
+            assert!(looks_unstained(name), "{name}");
+        }
+        for name in ["TREG_CD45 FITC_008.fcs", "house mouse.fcs", "plus_003.fcs", "blanket.fcs"] {
+            assert!(!looks_unstained(name), "{name}");
+        }
         assert_eq!(guess_role("multistain-bv421-pe.fcs"), Role::Other);
     }
 

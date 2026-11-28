@@ -25,6 +25,10 @@ pub struct State {
     pub graphs: HashMap<u64, GraphUi>,
     pub collapsed: HashSet<(usize, NodeId)>,
     pub rename: Option<(usize, NodeId, String)>,
+    /// The rename box has held the keyboard at least once (so losing it means the user is done).
+    pub rename_focused: bool,
+    /// The channel-naming window is open.
+    pub markers_open: bool,
     pub filter: String,
     pub tree_sample: usize,
     pub overview_x: String,
@@ -53,6 +57,8 @@ impl Default for State {
             graphs: HashMap::new(),
             collapsed: HashSet::new(),
             rename: None,
+            rename_focused: false,
+            markers_open: false,
             filter: String::new(),
             tree_sample: 0,
             overview_x: String::new(),
@@ -89,6 +95,77 @@ impl App {
         let id = self.session.open_population(sample, node)?;
         self.ws.tab = Tab::Graph(id);
         Ok(id)
+    }
+
+    /// Start renaming a population in the tree (the panel is opened on its sample so the box is visible).
+    pub(crate) fn start_rename(&mut self, si: usize, node: NodeId) {
+        if node == GateTree::ROOT {
+            return;
+        }
+        let Ok(name) = self.session.tree(si).name(node).map(|n| n.to_string()) else { return };
+        // every ancestor must be expanded or the row holding the box is not drawn
+        let mut up = self.session.tree(si).parent(node).ok().flatten();
+        while let Some(p) = up {
+            self.ws.collapsed.remove(&(si, p));
+            up = self.session.tree(si).parent(p).ok().flatten();
+        }
+        self.ws.pops_open = true;
+        self.ws.tree_sample = si;
+        self.ws.filter.clear();
+        self.ws.rename = Some((si, node, name));
+        self.ws.rename_focused = false;
+    }
+
+    /// The channels of the loaded samples with the marker each carries; typing a name changes it everywhere.
+    pub(super) fn markers_window(&mut self, ctx: &egui::Context) {
+        if !self.ws.markers_open {
+            return;
+        }
+        use crate::sample::{COMP_PREFIX, UNMIX_PREFIX};
+        let mut channels: Vec<String> = Vec::new();
+        for s in self.session.samples() {
+            for c in &s.channels {
+                if !c.starts_with(COMP_PREFIX) && !c.starts_with(UNMIX_PREFIX) && !channels.contains(c) {
+                    channels.push(c.clone());
+                }
+            }
+        }
+        let mut open = true;
+        egui::Window::new("Channel markers").open(&mut open).collapsible(false).resizable(true).default_width(380.0).show(ctx, |ui| {
+            if channels.is_empty() {
+                theme::caption(ui, "Load FCS files first.");
+                return;
+            }
+            theme::caption(ui, "Type the marker measured on each channel. It is shown as  channel :: marker  on axes, in menus and on exports, for every sample, and is saved with the workspace. Compensated channels share the name.");
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                egui::Grid::new("marker_grid").num_columns(3).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
+                    ui.label(RichText::new("Channel").strong().color(theme::MUTED));
+                    ui.label(RichText::new("Marker").strong().color(theme::MUTED));
+                    ui.label("");
+                    ui.end_row();
+                    for c in &channels {
+                        ui.label(c);
+                        let typed = self.session.marker_override(c).is_some();
+                        let mut text = self.session.marker(c).unwrap_or_default();
+                        let before = text.clone();
+                        ui.add(egui::TextEdit::singleline(&mut text).desired_width(170.0).hint_text("e.g. CD45"));
+                        if text != before {
+                            self.session.set_marker(c, Some(&text));
+                        }
+                        if typed {
+                            if ui.small_button("Reset").on_hover_text("Go back to the label stored in the FCS file").clicked() {
+                                self.session.set_marker(c, None);
+                            }
+                        } else {
+                            ui.label(RichText::new(if before.is_empty() { "" } else { "from file" }).size(10.5).color(theme::MUTED));
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        });
+        self.ws.markers_open = open;
     }
 
     pub(super) fn workstation(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -162,6 +239,9 @@ impl App {
                 }
                 if ui.add(egui::Button::new("＋ FCS")).on_hover_text("Load FCS files (Ctrl+O)").clicked() {
                     self.open_fcs();
+                }
+                if ui.add(egui::Button::new("Markers")).on_hover_text("Name the marker on each channel (BV711-A :: CD45). Shown on axes, in menus and on exports.").clicked() {
+                    self.ws.markers_open = true;
                 }
                 if ui.add(egui::Button::new("◈ Groups")).on_hover_text("Make and edit sample groups; gates applied to a group are the same gate in every member").clicked() {
                     let name = self.ws.cur_group.clone().unwrap_or_else(|| crate::session::ALL_SAMPLES.to_string());
@@ -276,17 +356,26 @@ impl App {
             if *rs == si && *rn == node {
                 let edit_rect = egui::Rect::from_min_max(egui::pos2(x0 + 16.0, rect.top() + 1.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0));
                 let r = ui.put(edit_rect, egui::TextEdit::singleline(text));
-                r.request_focus();
-                if r.lost_focus() {
-                    let new = text.clone();
+                // Take the keyboard ONCE. Asking for it again every frame hides the moment it is given up, and
+                // Enter gives it up: the box then never closed and the name never changed.
+                let (enter, escape) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                let done = self.ws.rename_focused && (r.lost_focus() || !r.has_focus() || enter || escape);
+                if done {
+                    let new = text.trim().to_string();
                     let (s, n) = (*rs, *rn);
-                    let commit = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     self.ws.rename = None;
-                    if commit {
-                        if let Err(e) = self.session.rename(s, n, &new) {
-                            self.status = e;
+                    self.ws.rename_focused = false;
+                    // Enter or clicking elsewhere keeps the new name; Escape drops it
+                    if !escape && !new.is_empty() && new != name {
+                        match self.session.rename(s, n, &new) {
+                            Ok(()) => self.status = format!("Renamed '{name}' to '{new}'."),
+                            Err(e) => self.status = e,
                         }
                     }
+                } else if r.has_focus() {
+                    self.ws.rename_focused = true;
+                } else {
+                    r.request_focus();
                 }
                 return;
             }
@@ -324,7 +413,7 @@ impl App {
             if node != GateTree::ROOT {
                 if ui.button("Rename…").clicked() {
                     ui.close_menu();
-                    self.ws.rename = Some((si, node, name.clone()));
+                    self.start_rename(si, node);
                 }
                 ui.menu_button("Apply gate → group", |ui| self.apply_group_menu(ui, si, node));
             }

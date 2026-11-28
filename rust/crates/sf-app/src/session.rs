@@ -95,6 +95,8 @@ pub struct Session {
     /// Messages for the status bar / log (load problems, evaluation warnings...).
     pub log: Vec<String>,
     fmo: BTreeMap<String, Fmo>,
+    /// Marker names typed by the user, by channel (`BV711-A` -> `CD45`). An empty name hides the file's own label.
+    markers: BTreeMap<String, String>,
     /// Sample groups (besides the built-in All Samples) and the gates they own.
     pub groups: Vec<Group>,
     pub applied: Vec<Applied>,
@@ -112,7 +114,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
+        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), markers: BTreeMap::new(), groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
     }
 
     pub fn samples(&self) -> &[LoadedSample] {
@@ -720,6 +722,49 @@ impl Session {
 
     // ---- FMO reference levels --------------------------------------------------------------------
 
+    /// The marker on a channel: the name the user gave it, else the label the FCS files carry (`$PnS`).
+    /// Compensated channels share the name of the detector they come from.
+    pub fn marker(&self, channel: &str) -> Option<String> {
+        let base = channel.strip_prefix(crate::sample::COMP_PREFIX).unwrap_or(channel);
+        for key in [channel, base] {
+            if let Some(m) = self.markers.get(key) {
+                return Some(m.trim().to_string()).filter(|m| !m.is_empty());
+            }
+        }
+        for key in [channel, base] {
+            for s in &self.samples {
+                if let Some(i) = s.channels.iter().position(|c| c == key) {
+                    let l = s.labels.get(i).map(|l| l.trim()).unwrap_or("");
+                    if !l.is_empty() && !l.eq_ignore_ascii_case(key) {
+                        return Some(l.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// What the user typed for a channel, if anything (see [`Session::marker`] for what is shown).
+    pub fn marker_override(&self, channel: &str) -> Option<&str> {
+        self.markers.get(channel).map(|s| s.as_str())
+    }
+
+    /// Name a channel's marker for the whole session. `None` goes back to the label in the FCS files.
+    pub fn set_marker(&mut self, channel: &str, name: Option<&str>) {
+        match name {
+            Some(n) => self.markers.insert(channel.to_string(), n.trim().to_string()),
+            None => self.markers.remove(channel),
+        };
+    }
+
+    /// A channel as it is shown on axes and in menus: `BV711-A :: CD45`, or just the channel.
+    pub fn channel_label(&self, channel: &str) -> String {
+        match self.marker(channel) {
+            Some(m) => format!("{channel} :: {m}"),
+            None => channel.to_string(),
+        }
+    }
+
     pub fn fmo(&self, channel: &str) -> Option<&Fmo> {
         self.fmo.get(channel)
     }
@@ -796,7 +841,11 @@ impl Session {
         for (ch, f) in &self.fmo {
             fmo = fmo.with(ch, Json::obj().with("level", Json::num(f.level)).with("source", Json::Str(f.source.clone())).with("n", Json::num(f.n as f64)).with("percentile", Json::num(f.percentile)));
         }
-        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("groups", self.groups_to_json())
+        let mut markers = Json::obj();
+        for (ch, m) in &self.markers {
+            markers = markers.with(ch, Json::Str(m.clone()));
+        }
+        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("markers", markers).with("groups", self.groups_to_json())
     }
 
     /// Replace the gating trees of the currently loaded samples with those in a saved workspace (matched by
@@ -822,6 +871,14 @@ impl Session {
         }
         let (mut loaded, mut warnings) = workspace_from_json(gates, "All Events").map_err(|e| e.to_string())?;
         warnings.extend(notes);
+        self.markers.clear();
+        if let Some(Json::Obj(markers)) = doc.get("markers") {
+            for (ch, m) in markers {
+                if let Some(m) = m.as_str() {
+                    self.markers.insert(ch.clone(), m.to_string());
+                }
+            }
+        }
         self.fmo.clear();
         if let Some(Json::Obj(fmo)) = doc.get("fmo") {
             for (ch, f) in fmo {

@@ -178,6 +178,17 @@ impl Figure {
 // ---- text metrics --------------------------------------------------------------------------------------------
 
 /// What a character becomes in the PDF (WinAnsi): its byte, or a short ASCII stand-in.
+/// The plain ASCII character the PDF writer prints in place of `c`, when it replaces it with one.
+pub fn ascii_fallback(c: char) -> Option<char> {
+    if c.is_ascii() {
+        return None;
+    }
+    match win_ansi(c)[..] {
+        [b] if b.is_ascii() => Some(b as char),
+        _ => None,
+    }
+}
+
 fn win_ansi(c: char) -> Vec<u8> {
     match c {
         ' '..='~' => vec![c as u8],
