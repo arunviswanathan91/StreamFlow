@@ -2363,3 +2363,37 @@ fn cluster_separation_tells_real_groups_from_a_cloud_cut_into_pieces() {
     assert!(separation_verdict(0.05).starts_with("weak"));
     assert_eq!(separation(&cloud, d, &[None; 0], k, 600), 0.0);
 }
+
+#[test]
+fn the_analysis_log_records_every_finished_action_and_writes_a_methods_text() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, _) = ready_tab(&mut app, &ctx);
+    assert!(app.journal.is_empty(), "the start-up hint is not an action");
+    let g = app.session.commit_shape(w, &Shape::Rect { x0: 0.0, x1: 1e5, y0: 0.0, y1: 5e4 }, "Lymphocytes").unwrap();
+    app.session.set_marker("CD3-A", Some("CD3"));
+    // a progress message is not logged; the result is, once, with a time
+    app.status = "Clustering…".into();
+    settle(&mut app, &ctx);
+    assert!(app.journal.is_empty());
+    app.run_apoptosis();
+    let said = app.status.clone();
+    settle(&mut app, &ctx);
+    assert_eq!(app.journal.len(), 1, "{:?}", app.journal);
+    assert_eq!(app.journal[0].1, said);
+    assert_eq!(app.journal[0].0.len(), 8, "HH:MM:SS");
+    app.start_rename(0, g);
+    settle(&mut app, &ctx);
+    type_over(&mut app, &ctx, "Live");
+    pointer(&mut app, &ctx, vec![key(egui::Key::Enter, false, false)]);
+    settle(&mut app, &ctx);
+    assert!(app.journal.iter().any(|(_, m)| m.contains("Renamed 'Lymphocytes' to 'Live'")), "{:?}", app.journal);
+
+    let m = app.methods_text();
+    for want in ["StreamFLOW", "1 FCS file(s), 3000 events", "Compensation: none", "CD3-A :: CD3", "Live: rectangle gate on FSC-A", "vs SSC-A", "Steps performed", "Renamed"] {
+        assert!(m.contains(want), "missing {want:?} in:\n{m}");
+    }
+    // the screen itself draws
+    app.module = Module::AnalysisLog;
+    settle(&mut app, &ctx);
+}

@@ -29,6 +29,7 @@ pub use discover_view::ColorBy;
 pub use graph::Mapper;
 
 use crate::session::Session;
+use sf_gating::{GateTree, NodeId};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use sf_core::json::Json;
 
@@ -135,6 +136,10 @@ pub struct App {
     pub spec: spectral_view::State,
     pub(crate) act: activity::State,
     pub(crate) status: String,
+    /// Everything the app reported doing, in order: `(UTC time, message)`. Fed from the status line, so no action
+    /// can forget to log itself.
+    pub journal: Vec<(String, String)>,
+    journal_last: String,
     themed: bool,
     shot: Option<Shot>,
     capture: Option<Capture>,
@@ -180,6 +185,8 @@ impl App {
             spec: spectral_view::State::default(),
             act: activity::State::default(),
             status: "Open FCS files from the File menu (Ctrl+O).".into(),
+            journal: Vec::new(),
+            journal_last: "Open FCS files from the File menu (Ctrl+O).".into(),
             themed: false,
             shot: None,
             capture: None,
@@ -296,6 +303,7 @@ impl App {
             theme::apply(ctx);
             self.themed = true;
         }
+        self.record_activity();
         self.shortcuts(ctx);
         self.title_bar(ctx);
         self.status_bar(ctx);
@@ -472,24 +480,143 @@ impl App {
 
     // ---- analysis log -----------------------------------------------------------------------------
 
+    /// Keep every finished action the status line reported (progress messages ending in "…" are not actions).
+    pub(crate) fn record_activity(&mut self) {
+        if self.status == self.journal_last {
+            return;
+        }
+        self.journal_last = self.status.clone();
+        let text = self.status.trim();
+        if text.is_empty() || text.ends_with('…') {
+            return;
+        }
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) % 86_400;
+        self.journal.push((format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60), text.to_string()));
+        if self.journal.len() > 5000 {
+            self.journal.drain(..1000);
+        }
+    }
+
+    /// A methods paragraph written from what is actually in the session: files, compensation, markers, the gating
+    /// hierarchy with its axes and scales, and the analysis steps in the order they were run.
+    pub fn methods_text(&mut self) -> String {
+        let s = &self.session;
+        let n = s.samples().len();
+        let mut out = format!("Flow cytometry data were analysed with StreamFLOW {}.\n\n", env!("CARGO_PKG_VERSION"));
+        if n == 0 {
+            out += "No samples are loaded.\n";
+            return out;
+        }
+        let events: usize = s.samples().iter().map(|x| x.n_events).sum();
+        out += &format!("Data: {n} FCS file(s), {events} events in total.\n");
+        let mut comp: std::collections::BTreeMap<String, usize> = Default::default();
+        for x in s.samples() {
+            *comp.entry(x.comp.as_ref().map_or("none".to_string(), |c| c.source.clone())).or_default() += 1;
+        }
+        out += &format!("Compensation: {}.\n", comp.iter().map(|(k, v)| format!("{k} ({v} file(s))")).collect::<Vec<_>>().join("; "));
+        let marked: Vec<String> = s.sample(0).channels.iter().filter(|c| s.marker(c).is_some() && !c.starts_with(crate::sample::COMP_PREFIX)).map(|c| s.channel_label(c)).collect();
+        if !marked.is_empty() {
+            out += &format!("Markers: {}.\n", marked.join(", "));
+        }
+        // the gating hierarchy: every distinct population path, with the gate that defines it (first sample that has it)
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        for si in 0..n {
+            let t = s.tree(si);
+            let mut stack: Vec<NodeId> = t.children(GateTree::ROOT).map(|c| c.iter().rev().copied().collect()).unwrap_or_default();
+            while let Some(node) = stack.pop() {
+                if let Ok(kids) = t.children(node) {
+                    stack.extend(kids.iter().rev().copied());
+                }
+                let Ok(path) = t.path(node) else { continue };
+                if seen.contains(&path) {
+                    continue;
+                }
+                seen.push(path.clone());
+                let what = match t.kind(node) {
+                    Ok(sf_gating::NodeKind::Gate(g)) => {
+                        let kind = match &g.kind {
+                            sf_gating::GateKind::Rectangle => "rectangle",
+                            sf_gating::GateKind::Polygon => "polygon",
+                            sf_gating::GateKind::Ellipse => "ellipse",
+                            sf_gating::GateKind::Interval => "interval",
+                            sf_gating::GateKind::Quadrant(_) => "quadrant",
+                            sf_gating::GateKind::Indexed(_) => "event set (cluster, subsample or import)",
+                        };
+                        match &g.y_chan {
+                            Some(y) => format!("{kind} gate on {} ({}) vs {} ({})", s.channel_label(&g.x_chan), g.x_scale.to_text(), s.channel_label(y), g.y_scale.to_text()),
+                            None => format!("{kind} gate on {} ({})", s.channel_label(&g.x_chan), g.x_scale.to_text()),
+                        }
+                    }
+                    _ => "Boolean combination of populations".to_string(),
+                };
+                lines.push(format!("  {}{}: {what}", "  ".repeat(path.len().saturating_sub(1)), path.last().cloned().unwrap_or_default()));
+            }
+        }
+        if lines.is_empty() {
+            out += "Gating: no gates were drawn.\n";
+        } else {
+            out += &format!("Gating hierarchy ({} populations):\n{}\n", lines.len(), lines.join("\n"));
+        }
+        if !self.journal.is_empty() {
+            out += "\nSteps performed, in order (UTC):\n";
+            for (t, m) in &self.journal {
+                out += &format!("  {t}  {m}\n");
+            }
+        }
+        out
+    }
+
     fn analysis_log(&mut self, ui: &mut egui::Ui) {
         egui::Frame::none().inner_margin(16.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Analysis log");
+                if ui.button("Copy log").on_hover_text("Every step, with its time, as text").clicked() {
+                    let t: String = self.journal.iter().map(|(t, m)| format!("{t}\t{m}\n")).collect();
+                    ui.ctx().copy_text(t);
+                }
+                if ui.button("Copy methods").on_hover_text("Files, compensation, markers, gating hierarchy and the steps performed, written out for a methods section").clicked() {
+                    let t = self.methods_text();
+                    ui.ctx().copy_text(t);
+                    self.status = "Methods text copied.".into();
+                }
+                if ui.button("Save methods…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Text", &["txt"]).set_file_name("streamflow_methods.txt").save_file() {
+                        let t = self.methods_text();
+                        self.status = match std::fs::write(&p, t) {
+                            Ok(()) => format!("Saved {}", p.display()),
+                            Err(e) => format!("Could not save: {e}"),
+                        };
+                    }
+                }
                 if ui.button("Clear").clicked() {
+                    self.journal.clear();
                     self.session.log.clear();
                 }
             });
-            theme::caption(ui, "Warnings from loading, evaluation and imports. Nothing is hidden: a gate that could not be evaluated is reported here.");
+            theme::caption(ui, "Every action the app completed, newest first, and below it the warnings from loading, evaluation and imports. Nothing is hidden: a gate that could not be evaluated is reported here.");
             ui.add_space(8.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                theme::section(ui, "Steps");
+                if self.journal.is_empty() {
+                    ui.label(RichText::new("Nothing has been done yet.").color(theme::MUTED));
+                }
+                for (t, m) in self.journal.iter().rev() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(t).color(theme::MUTED).monospace());
+                        let bad = m.contains("failed") || m.contains("Could not") || m.contains("Cannot") || m.contains("Nothing was");
+                        ui.label(RichText::new(m).color(if bad { theme::WARN } else { Color32::LIGHT_GRAY }));
+                    });
+                }
+                ui.add_space(10.0);
+                theme::section(ui, "Warnings");
                 if self.session.log.is_empty() {
                     ui.label(RichText::new("Nothing to report.").color(theme::MUTED));
                 }
                 for (i, l) in self.session.log.iter().enumerate().rev() {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(format!("{:>3}", i + 1)).color(theme::MUTED).monospace());
-                        ui.label(RichText::new(l).color(if l.contains("skipped") || l.contains("not in this") { theme::WARN } else { Color32::LIGHT_GRAY }));
+                        ui.label(RichText::new(l).color(if l.contains("skipped") || l.contains("not in this") || l.contains("CHECK") { theme::WARN } else { Color32::LIGHT_GRAY }));
                     });
                 }
             });
