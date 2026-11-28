@@ -2552,3 +2552,65 @@ fn a_pooled_map_becomes_an_ordinary_plot_that_every_gate_tool_works_on() {
     assert_eq!(app.session.tree(0).children(parent2).unwrap().len(), 1, "the gate is still there");
     settle(&mut app, &ctx);
 }
+
+#[test]
+fn the_map_splits_by_group_and_by_sample_with_equal_numbers_and_exports() {
+    use crate::map_split::{split_panels, SplitBy};
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    app.set_module(Module::DimReduction);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 500;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the embedding", |a| a.disc.emb.is_some());
+    let input = app.disc.emb.as_ref().unwrap().input.clone();
+
+    // by sample: one panel each, the same number of events, every event its own sample's
+    let by_sample = split_panels(&app.session, &input, SplitBy::Sample);
+    assert_eq!(by_sample.iter().map(|p| (p.title.as_str(), p.events.len(), p.available)).collect::<Vec<_>>(), vec![("a", 500, 500), ("b", 500, 500)]);
+    assert!(by_sample[1].events.iter().all(|&i| input.rows[i].0 == 1));
+    // no groups yet: nothing to split by, and the screen says so instead of drawing an empty page
+    assert!(split_panels(&app.session, &input, SplitBy::Group).is_empty());
+    app.disc.split = SplitBy::Group;
+    settle(&mut app, &ctx);
+    assert!(app.split_map_figure(64).is_none());
+
+    // two groups of different size: both panels are thinned to the smaller, evenly
+    app.session.create_group("Control", &[0]).unwrap();
+    app.session.create_group("Both", &[0, 1]).unwrap();
+    let by_group = split_panels(&app.session, &input, SplitBy::Group);
+    assert_eq!(by_group.iter().map(|p| (p.title.as_str(), p.events.len(), p.available)).collect::<Vec<_>>(), vec![("Control", 500, 500), ("Both", 500, 1000)]);
+    let from_b = by_group[1].events.iter().filter(|&&i| input.rows[i].0 == 1).count();
+    assert!((from_b as i64 - 250).abs() <= 2, "the larger group is thinned across all of its samples: {from_b} of 500 from b");
+    // a pooled sample in no group gets its own panel
+    app.session.delete_group("Both", crate::session::GroupDelete::ToSamples).unwrap();
+    let p = split_panels(&app.session, &input, SplitBy::Group);
+    assert_eq!(p.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(), vec!["Control", "Not in a group"]);
+
+    // the screen draws the panels, coloured by density and by sample
+    for color in [discover_view::ColorBy::Density, discover_view::ColorBy::Sample] {
+        app.disc.color = color;
+        settle(&mut app, &ctx);
+    }
+    // export: a figure with one image per panel, written as PDF, SVG and PNG
+    let fig = app.split_map_figure(96).expect("a figure");
+    assert_eq!(fig.items.iter().filter(|i| matches!(i, crate::figure::Item::Image { .. })).count(), 2);
+    let svg = crate::figure::to_svg(&fig);
+    assert!(svg.contains("Control (500 events)") && svg.contains("split by group"), "panel names and what was done are on the figure");
+    let dir = std::env::temp_dir();
+    for ext in ["pdf", "svg", "png"] {
+        let path = dir.join(format!("sf_split_map_{}.{ext}", std::process::id()));
+        let msg = app.save_split_map(&path).unwrap();
+        assert!(msg.starts_with("Saved"));
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 500, "{ext}: {} bytes", bytes.len());
+        if ext == "pdf" {
+            crate::figure::validate_pdf(&bytes).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    // back to one map: the gating canvas returns
+    app.disc.split = SplitBy::Off;
+    settle(&mut app, &ctx);
+    assert!(app.disc.plot_rect.is_some());
+}

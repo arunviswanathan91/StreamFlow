@@ -78,6 +78,10 @@ pub struct State {
     range: Option<Range>,
     tex: Option<TextureHandle>,
     tex_key: u64,
+    /// The map shown as one panel per group or per sample.
+    pub split: crate::map_split::SplitBy,
+    split_tex: Vec<TextureHandle>,
+    split_key: u64,
     pub plot_rect: Option<Rect>,
     pub tool: Tool,
     pub drawing: Drawing,
@@ -117,6 +121,9 @@ impl Default for State {
             range: None,
             tex: None,
             tex_key: 0,
+            split: crate::map_split::SplitBy::Off,
+            split_tex: Vec::new(),
+            split_key: 0,
             plot_rect: None,
             tool: Tool::Pointer,
             drawing: Drawing::default(),
@@ -583,6 +590,115 @@ impl App {
         }
     }
 
+    /// The colour of every pooled event for the current "colour by", or `None` for density.
+    fn split_colours(&self, emb: &Embedding) -> Option<Vec<[u8; 3]>> {
+        (self.disc.color != ColorBy::Density).then(|| self.point_colours(emb).iter().map(|c| [c.r(), c.g(), c.b()]).collect())
+    }
+
+    /// The split map as a figure (for export and tests): `None` when there is nothing to split.
+    pub fn split_map_figure(&self, px: usize) -> Option<crate::figure::Figure> {
+        use crate::map_split::{panel_rgb, split_figure, split_panels};
+        let emb = self.disc.emb.as_ref()?;
+        let range = self.disc.range?;
+        let panels = split_panels(&self.session, &emb.input, self.disc.split);
+        if panels.is_empty() {
+            return None;
+        }
+        let cols = self.split_colours(emb);
+        let images: Vec<Vec<u8>> = panels.iter().map(|p| panel_rgb(&emb.xy, &p.events, cols.as_deref(), range, px, px)).collect();
+        let title = format!("{} · {}", emb.input.request.method.label(), self.disc.split.label().to_lowercase());
+        let note = format!("{} events in every panel (thinned evenly to the smallest), shared axes · colour: {}", panels[0].events.len(), self.color_label());
+        Some(split_figure(&title, &note, &panels, &images, px, (panels.len() as f32).sqrt().ceil() as usize))
+    }
+
+    /// Save the split map as PDF, SVG or PNG (by the extension chosen).
+    pub fn save_split_map(&self, path: &std::path::Path) -> Result<String, String> {
+        let fig = self.split_map_figure(480).ok_or("there is nothing to split yet")?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let bytes = match ext.as_str() {
+            "svg" => crate::figure::to_svg(&fig).into_bytes(),
+            "png" => crate::raster::to_png(&crate::raster::rasterize(&fig, 300.0, false)?, 300.0)?,
+            _ => crate::figure::to_pdf(&[fig], "StreamFLOW split map"),
+        };
+        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(format!("Saved {}", path.display()))
+    }
+
+    /// One panel per group or per sample, on the same axes, with the same number of events in each.
+    fn split_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, emb: &Embedding, range: Range) {
+        use crate::map_split::{panel_rgb, split_panels, SplitBy};
+        let panels = split_panels(&self.session, &emb.input, self.disc.split);
+        if panels.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(if self.disc.split == SplitBy::Group { "There are no sample groups yet." } else { "No pooled events to show." }).color(theme::MUTED).size(15.0));
+                if self.disc.split == SplitBy::Group {
+                    theme::caption(ui, "Make groups (for example Control and Treated) and put the samples in them: Workstation ▸ Populations ▸ Groups.");
+                    if ui.button("Open the group manager").clicked() {
+                        self.open_group_manager(crate::session::ALL_SAMPLES);
+                    }
+                }
+            });
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            theme::caption(ui, format!("{} events in every panel, thinned evenly to the smallest, on shared axes: a denser region in one panel is a real difference, not a bigger file. Gating is done on the single map.", panels[0].events.len()));
+            if ui.button("Export…").on_hover_text("Save this comparison as PDF, SVG or PNG").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).add_filter("SVG", &["svg"]).add_filter("PNG", &["png"]).set_file_name("split_map.pdf").save_file() {
+                    self.status = match self.save_split_map(&p) {
+                        Ok(m) => m,
+                        Err(e) => format!("Could not save: {e}"),
+                    };
+                }
+            }
+        });
+        const PX: usize = 320;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (self.disc.split, format!("{:?}", self.disc.color), emb.input.n(), self.disc.clus.as_ref().map(|c| c.n_clusters), range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits()).hash(&mut h);
+            for p in &panels {
+                (&p.title, p.events.len(), p.available).hash(&mut h);
+            }
+            if let ColorBy::Rule(_) = self.disc.color {
+                format!("{:?}", self.disc.thresholds).hash(&mut h);
+            }
+            h.finish()
+        };
+        if self.disc.split_key != key || self.disc.split_tex.len() != panels.len() {
+            let cols = self.split_colours(emb);
+            self.disc.split_tex = panels
+                .iter()
+                .enumerate()
+                .map(|(k, p)| {
+                    let rgb = panel_rgb(&emb.xy, &p.events, cols.as_deref(), range, PX, PX);
+                    ctx.load_texture(format!("split_map_{k}"), egui::ColorImage::from_rgb([PX, PX], &rgb), TextureOptions::NEAREST)
+                })
+                .collect();
+            self.disc.split_key = key;
+        }
+        let n = panels.len();
+        let per_row = ((n as f32).sqrt().ceil() as usize).max(1);
+        let side = ((ui.available_width() - 12.0 * (per_row as f32 + 1.0)) / per_row as f32).clamp(140.0, 460.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for row in 0..n.div_ceil(per_row) {
+                ui.horizontal(|ui| {
+                    for k in row * per_row..((row + 1) * per_row).min(n) {
+                        ui.vertical(|ui| {
+                            let p = &panels[k];
+                            ui.label(RichText::new(format!("{}  ·  {} of {} events", p.title, p.events.len(), p.available)).size(12.0).strong());
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
+                            ui.painter().image(self.disc.split_tex[k].id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0_f32, Color32::from_gray(150)));
+                        });
+                        ui.add_space(8.0);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+    }
+
     /// Hand the current map to the gating system and show it as an ordinary plot in the Workstation.
     pub fn disc_open_map(&mut self) {
         let Some(emb) = self.disc.emb.clone() else {
@@ -665,15 +781,21 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::same(10.0))).show_inside(ui, |ui| self.embedding_canvas(ui, ctx));
     }
 
-    fn colour_picker(&mut self, ui: &mut egui::Ui) {
+    /// What the map is coloured by, in words.
+    fn color_label(&self) -> String {
         let feats: Vec<String> = self.disc.input.as_ref().map(|i| i.request.features.clone()).unwrap_or_default();
-        let label = match self.disc.color {
+        match self.disc.color {
             ColorBy::Density => "Density".to_string(),
             ColorBy::Marker(j) => feats.get(j).map_or("Marker".into(), |f| short_name(f)),
             ColorBy::Cluster => "Cluster".into(),
             ColorBy::Sample => "Sample".into(),
             ColorBy::Rule(i) => self.disc.rules.get(i).map_or("Rule".into(), |r| format!("Rule: {}", r.name)),
-        };
+        }
+    }
+
+    fn colour_picker(&mut self, ui: &mut egui::Ui) {
+        let feats: Vec<String> = self.disc.input.as_ref().map(|i| i.request.features.clone()).unwrap_or_default();
+        let label = self.color_label();
         let mut next = self.disc.color;
         egui::ComboBox::from_id_salt("disc_color").width(240.0).selected_text(label).show_ui(ui, |ui| {
             ui.selectable_value(&mut next, ColorBy::Density, "Density");
@@ -733,6 +855,11 @@ impl App {
                 }
             }
             theme::caption(ui, "Draw a region to turn the events inside it into a population.");
+            egui::ComboBox::from_id_salt("map_split").width(130.0).selected_text(self.disc.split.label()).show_ui(ui, |ui| {
+                for s in crate::map_split::SplitBy::ALL {
+                    ui.selectable_value(&mut self.disc.split, s, s.label());
+                }
+            });
             if self.disc.emb.is_some() && ui.button("Gate this map in the Workstation ▸").on_hover_text("Adds the map to every pooled sample as the channels Map-1 / Map-2 and opens it as an ordinary plot: all gate tools, move and resize, rename, undo, groups, compare and export work on it.").clicked() {
                 self.disc_open_map();
             }
@@ -762,6 +889,10 @@ impl App {
             self.disc.range = Some(Range { x0: x0 - px, x1: x1 + px, y0: y0 - py, y1: y1 + py });
         }
         let range = self.disc.range.unwrap();
+        if self.disc.split != crate::map_split::SplitBy::Off {
+            self.split_view(ui, ctx, &emb, range);
+            return;
+        }
         let avail = ui.available_rect_before_wrap();
         let plot = Rect::from_min_max(Pos2::new(avail.left() + 8.0, avail.top() + 8.0), Pos2::new(avail.right() - 8.0, avail.bottom() - 8.0));
         if plot.width() < 100.0 || plot.height() < 100.0 {

@@ -18,6 +18,7 @@ pub mod jobs;
 pub mod layout;
 pub mod layout_doc;
 pub mod layout_render;
+pub mod map_split;
 pub mod office;
 pub mod sample;
 pub mod session;
