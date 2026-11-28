@@ -77,8 +77,8 @@ if (-not (Test-Path $pyExe)) {
 # CPython's certifi does not carry, so pip dies with CERTIFICATE_VERIFY_FAILED.
 #
 # The trust bundle is built HERE, at run time: pip's own certifi roots plus this machine's Windows
-# root stores. It used to be a file exported once by hand, and
-# it went stale every time the AV rotated its root - pip then failed in a way that looked like a
+# root stores. It used to be a file exported once by hand, and it went stale every time the AV
+# rotated its root - pip then failed in a way that looked like a
 # network outage (2026-08-26, and again 2026-11-23). Nothing to regenerate any more.
 # certifi is included because Windows fills its root store lazily: on a fresh machine (a CI
 # runner) the store alone may not yet hold the root pypi.org chains to.

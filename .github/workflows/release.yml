@@ -143,11 +143,13 @@ jobs:
           Copy-Item rust/target/release/streamflow.exe (Join-Path out $name)
           $mb = [math]::Round((Get-Item (Join-Path out $name)).Length / 1MB, 1)
           Write-Host "$name ($mb MB)"
+          Copy-Item NOTICE (Join-Path out "NOTICE.txt")
+          Copy-Item THIRD-PARTY-NOTICES.txt out
 
       - uses: actions/upload-artifact@v4
         with:
           name: StreamFLOW-${{ needs.version.outputs.version }}-win-x64
-          path: out/*.exe
+          path: out/*
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------------------------
@@ -180,6 +182,7 @@ jobs:
           |---|---|
           | \`StreamFLOW-${VERSION}-win-x64.exe\` | **StreamFLOW for Windows 10/11 (64-bit).** One file, no installation: download and double-click. Nothing else needs to be installed. |
           | \`SHA256SUMS.txt\` | Checksum of the file. |
+          | \`NOTICE.txt\`, \`THIRD-PARTY-NOTICES.txt\` | Licence notices for the third-party code in the executable. |
 
           **First run:** the file is not code-signed, so Windows SmartScreen may show
           "Windows protected your PC". Choose **More info**, then **Run anyway**.

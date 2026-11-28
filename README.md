@@ -194,4 +194,5 @@ consensus clustering **Monti et al.** (2003). FlowJo and FCS Express set the bar
 
 StreamFLOW is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
-Third-party dependencies remain under their own licenses; see the acknowledgements above.
+Third-party dependencies remain under their own licenses; see [NOTICE](NOTICE),
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) and the acknowledgements above.
