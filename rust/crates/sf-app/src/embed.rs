@@ -406,6 +406,54 @@ pub fn cluster(input: &EmbedInput, req: &ClusterRequest) -> Result<ClusterResult
     Ok(ClusterResult { labels, n_clusters: k, counts, medians, requested: req.method, actual: req.method, model, separation })
 }
 
+// ---- clusters between groups ------------------------------------------------------------------------
+
+/// One cluster's share of each sample's pooled events, by group, with a test between the groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupRow {
+    pub cluster: usize,
+    /// For each group: the percentage in every one of its pooled samples.
+    pub percents: Vec<Vec<f64>>,
+    /// Two-sided p (Mann-Whitney for two groups, Kruskal-Wallis for more), and the same multiplied by the number
+    /// of clusters tested (Bonferroni, capped at 1). `None` when a group has fewer than two samples.
+    pub p: Option<f64>,
+    pub p_adjusted: Option<f64>,
+}
+
+/// Compare how common each cluster is between the sample groups. A sample's value is the percentage of ITS pooled
+/// events that fell in the cluster, so every sample counts once whatever its size. Groups without a pooled sample
+/// are left out. Returns the group names and one row per cluster.
+pub fn clusters_by_group(session: &Session, input: &EmbedInput, res: &ClusterResult) -> (Vec<String>, Vec<GroupRow>) {
+    let k = res.n_clusters;
+    // per sample: pooled events, and how many in each cluster
+    let mut total: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut inside: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    for (i, &(s, _)) in input.rows.iter().enumerate() {
+        *total.entry(s).or_default() += 1.0;
+        if let Some(c) = res.labels[i] {
+            inside.entry(s).or_insert_with(|| vec![0.0; k])[c] += 1.0;
+        }
+    }
+    let groups: Vec<(String, Vec<usize>)> = session.groups.iter().map(|g| (g.name.clone(), session.member_indices(&g.name).into_iter().filter(|s| total.contains_key(s)).collect::<Vec<_>>())).filter(|(_, m)| !m.is_empty()).collect();
+    let names: Vec<String> = groups.iter().map(|g| g.0.clone()).collect();
+    let testable = groups.len() >= 2 && groups.iter().all(|g| g.1.len() >= 2);
+    let rows = (0..k)
+        .map(|c| {
+            let percents: Vec<Vec<f64>> = groups.iter().map(|(_, m)| m.iter().map(|s| 100.0 * inside.get(s).map_or(0.0, |v| v[c]) / total[s]).collect()).collect();
+            let p = if !testable {
+                None
+            } else if groups.len() == 2 {
+                sf_core::htest::mann_whitney_u(&percents[0], &percents[1]).ok().map(|t| t.p)
+            } else {
+                let refs: Vec<&[f64]> = percents.iter().map(|v| v.as_slice()).collect();
+                sf_core::htest::kruskal_wallis(&refs).ok().map(|t| t.p)
+            };
+            GroupRow { cluster: c, percents, p, p_adjusted: p.map(|p| (p * k as f64).min(1.0)) }
+        })
+        .collect();
+    (names, rows)
+}
+
 // ---- naming and rules -------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

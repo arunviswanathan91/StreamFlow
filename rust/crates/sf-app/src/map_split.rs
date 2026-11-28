@@ -99,6 +99,58 @@ pub fn panel_rgb(xy: &[f64], events: &[usize], colours: Option<&[[u8; 3]]>, rang
     rgb
 }
 
+/// Where panel A has more events than panel B (red) or fewer (blue), cell by cell, on white where they are
+/// alike. Both panels hold the same number of events, so the difference is one of distribution. Counts are taken
+/// on a grid of 4-pixel cells and smoothed over the neighbouring cells, so single events do not speckle it.
+pub fn difference_rgb(xy: &[f64], a: &[usize], b: &[usize], range: Range, w: usize, h: usize) -> Vec<u8> {
+    let (gw, gh) = ((w / 4).max(1), (h / 4).max(1));
+    let count = |ev: &[usize]| -> Vec<f64> {
+        let mut g = vec![0.0f64; gw * gh];
+        for &i in ev {
+            let (x, y) = (xy[2 * i], xy[2 * i + 1]);
+            if !(x.is_finite() && y.is_finite()) || x < range.x0 || x > range.x1 || y < range.y0 || y > range.y1 {
+                continue;
+            }
+            let cx = ((((x - range.x0) / (range.x1 - range.x0)) * gw as f64) as usize).min(gw - 1);
+            let cy = gh - 1 - ((((y - range.y0) / (range.y1 - range.y0)) * gh as f64) as usize).min(gh - 1);
+            g[cy * gw + cx] += 1.0;
+        }
+        // 3 x 3 binomial smoothing (centre 4, sides 2, corners 1, over 16). Cells beyond the edge count as empty:
+        // averaging over only the cells that exist would make the border brighter than the peak next to it.
+        (0..gw * gh)
+            .map(|k| {
+                let (cx, cy) = (k % gw, k / gw);
+                let mut s = 0.0;
+                for yy in cy.saturating_sub(1)..=(cy + 1).min(gh - 1) {
+                    for xx in cx.saturating_sub(1)..=(cx + 1).min(gw - 1) {
+                        let wgt = if xx == cx && yy == cy { 4.0 } else if xx == cx || yy == cy { 2.0 } else { 1.0 };
+                        s += wgt * g[yy * gw + xx];
+                    }
+                }
+                s / 16.0
+            })
+            .collect()
+    };
+    let (ga, gb) = (count(a), count(b));
+    let diff: Vec<f64> = ga.iter().zip(&gb).map(|(p, q)| p - q).collect();
+    let top = diff.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let mut rgb = vec![255u8; w * h * 3];
+    if top <= 0.0 {
+        return rgb;
+    }
+    for py in 0..h {
+        for px in 0..w {
+            let v = diff[(py * gh / h).min(gh - 1) * gw + (px * gw / w).min(gw - 1)] / top;
+            let fade = (255.0 * (1.0 - v.abs())).round() as u8;
+            let k = (py * w + px) * 3;
+            // red where A has more, blue where B has more
+            let c = if v >= 0.0 { [255, fade, fade] } else { [fade, fade, 255] };
+            rgb[k..k + 3].copy_from_slice(&c);
+        }
+    }
+    rgb
+}
+
 /// The comparison as a figure for PDF / SVG / PNG: a title, then the panels in rows of `cols`, each with its name
 /// and event count. `images[k]` is panel `k` as `px x px` RGB.
 pub fn split_figure(title: &str, note: &str, panels: &[MapPanel], images: &[Vec<u8>], px: usize, cols: usize) -> Figure {
@@ -111,7 +163,7 @@ pub fn split_figure(title: &str, note: &str, panels: &[MapPanel], images: &[Vec<
     fig.push(Item::Text(Text::new(gap, 33.0, note, 7.5).align(Align::Left, VAlign::Middle).color([110, 110, 110, 255])));
     for (k, (p, img)) in panels.iter().zip(images).enumerate() {
         let (x, y) = (gap + (k % cols) as f32 * (side + gap), head + (k / cols) as f32 * (side + label + gap));
-        fig.push(Item::Text(Text::new(x, y + label / 2.0, format!("{} ({} events)", p.title, p.events.len()), 8.0).align(Align::Left, VAlign::Middle).color(ink)));
+        fig.push(Item::Text(Text::new(x, y + label / 2.0, if p.events.is_empty() { p.title.clone() } else { format!("{} ({} events)", p.title, p.events.len()) }, 8.0).align(Align::Left, VAlign::Middle).color(ink)));
         fig.push(Item::Image { x, y: y + label, w: side, h: side, px_w: px as u32, px_h: px as u32, rgb: img.clone() });
         fig.push(Item::Rect { x, y: y + label, w: side, h: side, fill: None, stroke: Some(Stroke::new([150, 150, 150, 255], 0.6)) });
     }

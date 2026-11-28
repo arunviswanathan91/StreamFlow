@@ -2594,8 +2594,9 @@ fn the_map_splits_by_group_and_by_sample_with_equal_numbers_and_exports() {
     }
     // export: a figure with one image per panel, written as PDF, SVG and PNG
     let fig = app.split_map_figure(96).expect("a figure");
-    assert_eq!(fig.items.iter().filter(|i| matches!(i, crate::figure::Item::Image { .. })).count(), 2);
+    assert_eq!(fig.items.iter().filter(|i| matches!(i, crate::figure::Item::Image { .. })).count(), 3, "two panels and their difference");
     let svg = crate::figure::to_svg(&fig);
+    assert!(svg.contains("Control minus Not in a group"), "the difference panel says what is subtracted from what");
     assert!(svg.contains("Control (500 events)") && svg.contains("split by group"), "panel names and what was done are on the figure");
     let dir = std::env::temp_dir();
     for ext in ["pdf", "svg", "png"] {
@@ -2808,4 +2809,79 @@ fn embedding_inside_a_map_population_keeps_the_old_maps_gates_as_fixed_event_set
     // opening the same map again changes nothing and freezes nothing
     app.disc_open_map();
     assert!(!app.status.contains("kept as fixed sets"), "{}", app.status);
+}
+
+#[test]
+fn cluster_frequencies_are_compared_between_groups_per_sample_and_the_map_difference_shows_where() {
+    use crate::map_split::{difference_rgb, split_panels, SplitBy};
+    let ctx = egui::Context::default();
+    // four samples of two cell types (all markers high / all low); the "treated" pair has many more of the high type
+    let mut app = App::new();
+    for (k, (name, high_pct)) in [("c1.fcs", 20usize), ("c2.fcs", 25), ("t1.fcs", 60), ("t2.fcs", 65)].iter().enumerate() {
+        let mut rng = Rng::new(70 + k as u64);
+        let mut ev = Vec::new();
+        for i in 0..1000 {
+            let centre = if i % 100 < *high_pct { 5.0 } else { 0.0 };
+            for _ in 0..4 {
+                let (u1, u2) = (rng.next_f64().max(1e-300), rng.next_f64());
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                ev.push(((centre + 0.5 * z) * 150.0 * 1.2 + 40.0) as f32);
+            }
+        }
+        app.session.add_sample(LoadedSample::synthetic(name, &["CD3-A", "CD4-A", "CD8-A", "FoxP3-A"], vec![1e5; 4], ev));
+    }
+    app.set_module(Module::Clustering);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 1000;
+    app.disc.cluster_method = embed::ClusterMethod::KMeans;
+    app.disc.k = 2;
+    app.disc_run_clustering();
+    wait_for(&mut app, &ctx, "the clustering", |a| a.disc.clus.is_some());
+    let (input, res) = (app.disc.input.clone().unwrap(), app.disc.clus.clone().unwrap());
+    assert!(res.separation > 0.5, "two real groups: {}", res.separation);
+
+    // without groups there is nothing to compare, and the window says so
+    assert!(embed::clusters_by_group(&app.session, &input, &res).0.is_empty());
+    app.disc.by_group_open = true;
+    settle(&mut app, &ctx);
+
+    app.session.create_group("Control", &[0, 1]).unwrap();
+    app.session.create_group("Treated", &[2, 3]).unwrap();
+    let (groups, rows) = embed::clusters_by_group(&app.session, &input, &res);
+    assert_eq!(groups, vec!["Control", "Treated"]);
+    assert_eq!(rows.len(), 2);
+    // the cluster of the "high" cells: 20 % and 25 % of the control samples, 60 % and 65 % of the treated ones
+    let high = rows.iter().find(|r| r.percents[1][0] > 50.0).expect("one cluster is the high cells");
+    let close = |got: &[f64], want: [f64; 2]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1.0);
+    assert!(close(&high.percents[0], [20.0, 25.0]) && close(&high.percents[1], [60.0, 65.0]), "{:?}", high.percents);
+    // every sample counts once: with two against two the smallest possible two-sided p is 1/3, and it is reported as that
+    assert!((high.p.unwrap() - 1.0 / 3.0).abs() < 1e-9, "{:?}", high.p);
+    assert!((high.p_adjusted.unwrap() - 2.0 / 3.0).abs() < 1e-9, "multiplied by the two clusters tested");
+    // the two clusters' shares add up to everything in each sample
+    for g in 0..2 {
+        for s in 0..2 {
+            assert!((rows[0].percents[g][s] + rows[1].percents[g][s] - 100.0).abs() < 1e-9);
+        }
+    }
+    let text = app.clusters_by_group_text().unwrap();
+    assert!(text.lines().count() == 3 && text.contains("Control mean %") && text.contains("0.33333"), "{text}");
+    settle(&mut app, &ctx);
+    // a group with a single sample cannot be tested, and no p is invented
+    app.session.create_group("Solo", &[0]).unwrap();
+    let (g3, r3) = embed::clusters_by_group(&app.session, &input, &res);
+    assert_eq!(g3.len(), 3);
+    assert!(r3.iter().all(|r| r.p.is_none() && r.p_adjusted.is_none()));
+
+    // the difference of two panels: blue where the first has fewer events, red where it has more, white where alike
+    let xy: Vec<f64> = input.rows.iter().enumerate().flat_map(|(i, _)| if res.labels[i] == Some(high.cluster) { [8.0, 8.0] } else { [2.0, 2.0] }).collect();
+    let panels = split_panels(&app.session, &input, SplitBy::Group);
+    let (ctl, trt) = (panels.iter().position(|p| p.title == "Control").unwrap(), panels.iter().position(|p| p.title == "Treated").unwrap());
+    let range = crate::density::Range { x0: 0.0, x1: 10.0, y0: 0.0, y1: 10.0 };
+    let img = difference_rgb(&xy, &panels[ctl].events, &panels[trt].events, range, 40, 40);
+    let at = |x: usize, y: usize| [img[(y * 40 + x) * 3], img[(y * 40 + x) * 3 + 1], img[(y * 40 + x) * 3 + 2]];
+    let (high_px, low_px) = (at(32, 7), at(8, 31)); // (8, 8) and (2, 2) in data space; row 0 is the top
+    assert!(high_px[2] == 255 && high_px[0] < 120, "Control has FEWER high cells than Treated: blue, got {high_px:?}");
+    assert!(low_px[0] == 255 && low_px[2] < 120, "and more low cells: red, got {low_px:?}");
+    assert_eq!(at(20, 20), [255, 255, 255], "nothing where neither has events");
+    assert!(difference_rgb(&xy, &panels[ctl].events, &panels[ctl].events, range, 40, 40).iter().all(|&b| b == 255), "a panel minus itself is blank");
 }

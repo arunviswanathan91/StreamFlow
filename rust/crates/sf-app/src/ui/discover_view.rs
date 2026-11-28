@@ -82,6 +82,10 @@ pub struct State {
     pub split: crate::map_split::SplitBy,
     split_tex: Vec<TextureHandle>,
     split_key: u64,
+    /// The two panels of the split view whose difference is drawn (A minus B).
+    pub diff: (usize, usize),
+    /// The table of cluster frequencies by group is open.
+    pub by_group_open: bool,
     pub plot_rect: Option<Rect>,
     pub tool: Tool,
     pub drawing: Drawing,
@@ -124,6 +128,8 @@ impl Default for State {
             split: crate::map_split::SplitBy::Off,
             split_tex: Vec::new(),
             split_key: 0,
+            diff: (0, 1),
+            by_group_open: false,
             plot_rect: None,
             tool: Tool::Pointer,
             drawing: Drawing::default(),
@@ -495,6 +501,9 @@ impl App {
                 }
             });
             let can_full = self.disc.clus.as_ref().unwrap().model.is_some();
+            if ui.button("Compare clusters between groups…").on_hover_text("How common each cluster is in every sample, by sample group, with a test between the groups").clicked() {
+                self.disc.by_group_open = true;
+            }
             if ui.add(egui::Button::new("Approve selected → populations (pooled events)").min_size(egui::vec2(260.0, 26.0))).clicked() {
                 self.disc_approve_clusters(Scope::Embedded);
             }
@@ -595,6 +604,86 @@ impl App {
         (self.disc.color != ColorBy::Density).then(|| self.point_colours(emb).iter().map(|c| [c.r(), c.g(), c.b()]).collect())
     }
 
+    /// The cluster-by-group table as tab-separated text (what "Copy" puts on the clipboard).
+    pub fn clusters_by_group_text(&self) -> Option<String> {
+        let (input, res) = (self.disc.input.as_ref()?, self.disc.clus.as_ref()?);
+        let (groups, rows) = embed::clusters_by_group(&self.session, input, res);
+        let mut t = format!("cluster\t{}\tp\tp x clusters\n", groups.iter().map(|g| format!("{g} mean %\t{g} SD\t{g} n")).collect::<Vec<_>>().join("\t"));
+        for r in &rows {
+            let name = self.disc.names.get(r.cluster).cloned().unwrap_or_else(|| format!("Cluster {}", r.cluster + 1));
+            let cells: Vec<String> = r.percents.iter().map(|v| format!("{:.3}\t{:.3}\t{}", stats::mean(v), if v.len() > 1 { stats::sd(v) } else { 0.0 }, v.len())).collect();
+            t += &format!("{name}\t{}\t{}\t{}\n", cells.join("\t"), r.p.map_or(String::new(), |p| format!("{p:.5}")), r.p_adjusted.map_or(String::new(), |p| format!("{p:.5}")));
+        }
+        Some(t)
+    }
+
+    /// Window: each cluster's share of every sample, by group, with a test.
+    pub(super) fn clusters_by_group_window(&mut self, ctx: &egui::Context) {
+        if !self.disc.by_group_open {
+            return;
+        }
+        let (Some(input), Some(res)) = (self.disc.input.clone(), self.disc.clus.clone()) else {
+            self.disc.by_group_open = false;
+            return;
+        };
+        let (groups, rows) = embed::clusters_by_group(&self.session, &input, &res);
+        let mut open = true;
+        let mut copy = false;
+        egui::Window::new("Clusters between groups").open(&mut open).collapsible(false).resizable(true).default_width(620.0).show(ctx, |ui| {
+            if groups.len() < 2 {
+                ui.label(RichText::new("This needs at least two sample groups that contain pooled samples.").color(theme::WARN));
+                theme::caption(ui, "Make groups (for example Control and Treated) in Workstation ▸ Populations ▸ Groups.");
+                if ui.button("Open the group manager").clicked() {
+                    self.open_group_manager(crate::session::ALL_SAMPLES);
+                }
+                return;
+            }
+            theme::caption(ui, "Each sample's value is the percentage of its own pooled events in the cluster, so every sample counts once. Mean ± SD per group; n = samples.");
+            let tested = rows.iter().any(|r| r.p.is_some());
+            if !tested {
+                ui.label(RichText::new("No test is given: every group needs at least two samples.").color(theme::WARN));
+            }
+            egui::ScrollArea::both().max_height(420.0).show(ui, |ui| {
+                egui::Grid::new("clus_by_group").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
+                    ui.label(RichText::new("Cluster").size(11.0).color(theme::MUTED));
+                    for g in &groups {
+                        ui.label(RichText::new(format!("{g} %")).size(11.0).color(theme::MUTED));
+                    }
+                    ui.label(RichText::new("p").size(11.0).color(theme::MUTED));
+                    ui.label(RichText::new("p × clusters").size(11.0).color(theme::MUTED));
+                    ui.end_row();
+                    for r in &rows {
+                        ui.label(self.disc.names.get(r.cluster).cloned().unwrap_or_else(|| format!("Cluster {}", r.cluster + 1)));
+                        for v in &r.percents {
+                            ui.label(RichText::new(format!("{:.1} ± {:.1}  (n {})", stats::mean(v), if v.len() > 1 { stats::sd(v) } else { 0.0 }, v.len())).monospace());
+                        }
+                        let fmt = |p: Option<f64>| p.map_or("—".to_string(), |p| if p < 0.001 { "< 0.001".into() } else { format!("{p:.3}") });
+                        ui.label(RichText::new(fmt(r.p)).monospace());
+                        ui.label(RichText::new(fmt(r.p_adjusted)).monospace().color(if r.p_adjusted.map_or(false, |p| p < 0.05) { theme::GOOD } else { theme::TEXT }));
+                        ui.end_row();
+                    }
+                });
+            });
+            theme::caption(ui, format!("p: two-sided {} on the per-sample percentages. p × clusters: the same multiplied by the {} clusters tested (Bonferroni), which is the one to read when looking across the whole table. With few samples per group even a real difference cannot reach a small p.", if groups.len() == 2 { "Mann-Whitney" } else { "Kruskal-Wallis" }, rows.len()));
+            if ui.button("Copy table").clicked() {
+                copy = true;
+            }
+        });
+        if copy {
+            if let Some(t) = self.clusters_by_group_text() {
+                ctx.copy_text(t);
+                self.status = "Cluster-by-group table copied.".into();
+            }
+        }
+        self.disc.by_group_open = open;
+    }
+
+    /// The two different panels to subtract, if the split has at least two.
+    fn diff_pair(&self, n: usize) -> Option<(usize, usize)> {
+        let (a, b) = self.disc.diff;
+        (n >= 2 && a < n && b < n && a != b).then_some((a, b))
+    }
+
     /// The split map as a figure (for export and tests): `None` when there is nothing to split.
     pub fn split_map_figure(&self, px: usize) -> Option<crate::figure::Figure> {
         use crate::map_split::{panel_rgb, split_figure, split_panels};
@@ -605,7 +694,12 @@ impl App {
             return None;
         }
         let cols = self.split_colours(emb);
-        let images: Vec<Vec<u8>> = panels.iter().map(|p| panel_rgb(&emb.xy, &p.events, cols.as_deref(), range, px, px)).collect();
+        let mut panels = panels;
+        let mut images: Vec<Vec<u8>> = panels.iter().map(|p| panel_rgb(&emb.xy, &p.events, cols.as_deref(), range, px, px)).collect();
+        if let Some((a, b)) = self.diff_pair(panels.len()) {
+            images.push(crate::map_split::difference_rgb(&emb.xy, &panels[a].events, &panels[b].events, range, px, px));
+            panels.push(crate::map_split::MapPanel { title: format!("{} minus {} (red: more in {}, blue: more in {})", panels[a].title, panels[b].title, panels[a].title, panels[b].title), events: vec![], available: 0 });
+        }
         let title = format!("{} · {}", emb.input.request.method.label(), self.disc.split.label().to_lowercase());
         let note = format!("{} events in every panel (thinned evenly to the smallest), shared axes · colour: {}", panels[0].events.len(), self.color_label());
         Some(split_figure(&title, &note, &panels, &images, px, (panels.len() as f32).sqrt().ceil() as usize))
@@ -656,7 +750,7 @@ impl App {
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (self.disc.split, format!("{:?}", self.disc.color), emb.input.n(), self.disc.clus.as_ref().map(|c| c.n_clusters), range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits()).hash(&mut h);
+            (self.disc.split, self.disc.diff, format!("{:?}", self.disc.color), emb.input.n(), self.disc.clus.as_ref().map(|c| c.n_clusters), range.x0.to_bits(), range.x1.to_bits(), range.y0.to_bits(), range.y1.to_bits()).hash(&mut h);
             for p in &panels {
                 (&p.title, p.events.len(), p.available).hash(&mut h);
             }
@@ -665,7 +759,33 @@ impl App {
             }
             h.finish()
         };
-        if self.disc.split_key != key || self.disc.split_tex.len() != panels.len() {
+        // which two panels are subtracted
+        if panels.len() >= 2 {
+            if self.disc.diff.0 >= panels.len() || self.disc.diff.1 >= panels.len() || self.disc.diff.0 == self.disc.diff.1 {
+                self.disc.diff = (0, 1);
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Difference").size(11.0).strong().color(theme::MUTED));
+                for (which, id) in [(0usize, "diff_a"), (1, "diff_b")] {
+                    let cur = if which == 0 { self.disc.diff.0 } else { self.disc.diff.1 };
+                    let mut next = cur;
+                    egui::ComboBox::from_id_salt(id).width(150.0).selected_text(panels[cur].title.clone()).show_ui(ui, |ui| {
+                        for (k, p) in panels.iter().enumerate() {
+                            ui.selectable_value(&mut next, k, p.title.as_str());
+                        }
+                    });
+                    if which == 0 {
+                        self.disc.diff.0 = next;
+                        ui.label("minus");
+                    } else {
+                        self.disc.diff.1 = next;
+                    }
+                }
+            });
+        }
+        let pair = self.diff_pair(panels.len());
+        let mut panels = panels;
+        if self.disc.split_key != key || self.disc.split_tex.len() != panels.len() + usize::from(pair.is_some()) {
             let cols = self.split_colours(emb);
             self.disc.split_tex = panels
                 .iter()
@@ -675,7 +795,14 @@ impl App {
                     ctx.load_texture(format!("split_map_{k}"), egui::ColorImage::from_rgb([PX, PX], &rgb), TextureOptions::NEAREST)
                 })
                 .collect();
+            if let Some((a, b)) = pair {
+                let rgb = crate::map_split::difference_rgb(&emb.xy, &panels[a].events, &panels[b].events, range, PX, PX);
+                self.disc.split_tex.push(ctx.load_texture("split_map_diff", egui::ColorImage::from_rgb([PX, PX], &rgb), TextureOptions::LINEAR));
+            }
             self.disc.split_key = key;
+        }
+        if let Some((a, b)) = pair {
+            panels.push(crate::map_split::MapPanel { title: format!("{} minus {}  ·  red: more in {}, blue: more in {}", panels[a].title, panels[b].title, panels[a].title, panels[b].title), events: vec![], available: 0 });
         }
         let n = panels.len();
         let per_row = ((n as f32).sqrt().ceil() as usize).max(1);
@@ -686,7 +813,7 @@ impl App {
                     for k in row * per_row..((row + 1) * per_row).min(n) {
                         ui.vertical(|ui| {
                             let p = &panels[k];
-                            ui.label(RichText::new(format!("{}  ·  {} of {} events", p.title, p.events.len(), p.available)).size(12.0).strong());
+                            ui.label(RichText::new(if p.events.is_empty() { p.title.clone() } else { format!("{}  ·  {} of {} events", p.title, p.events.len(), p.available) }).size(12.0).strong());
                             let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
                             ui.painter().image(self.disc.split_tex[k].id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                             ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0_f32, Color32::from_gray(150)));
@@ -765,6 +892,7 @@ impl App {
             return;
         }
         self.disc_sync();
+        self.clusters_by_group_window(ctx);
         if self.disc.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -1073,6 +1201,7 @@ impl App {
             return;
         }
         self.disc_sync();
+        self.clusters_by_group_window(ctx);
         if self.disc.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
