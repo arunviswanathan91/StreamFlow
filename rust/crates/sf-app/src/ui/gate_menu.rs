@@ -40,6 +40,8 @@ pub struct Dialogs {
     pub subsample: Option<(usize, NodeId, usize)>,
     pub keywords: Option<usize>,
     pub history: Option<(usize, NodeId)>,
+    /// "What is this population?": (sample, node, the comparison, the suggested name).
+    pub describe: Option<(usize, NodeId, crate::describe::Description, String)>,
     /// A group-owned gate whose deletion is being decided.
     pub group_delete: Option<(usize, NodeId)>,
     pub mgr: GroupMgr,
@@ -385,6 +387,83 @@ impl App {
 
     // ---- the population tree's menu -----------------------------------------------------------------
 
+    /// A marker as it is written in a population name: its marker name if it has one, else the short channel name.
+    fn marker_word(&self, channel: &str) -> String {
+        self.session.marker(channel).unwrap_or_else(|| crate::session::short_name(channel))
+    }
+
+    /// Compare a population with the rest of its parent on the fluorescence markers and open the result.
+    pub fn describe_population(&mut self, si: usize, node: NodeId) {
+        let channels = super::discover_view::default_features(self.session.sample(si));
+        match crate::describe::describe(&mut self.session, si, node, &channels, 150.0) {
+            Ok(d) => {
+                let name = crate::describe::suggest_name(&d, &|c| self.marker_word(c));
+                let clear = d.markers.iter().filter(|m| !m.call().is_empty()).count();
+                self.status = format!("'{}': {clear} marker(s) clearly set it apart from the rest of its parent{}.", self.session.tree(si).name(node).unwrap_or("population"), if name.is_empty() { String::new() } else { format!(" ({name})") });
+                self.dlg.describe = Some((si, node, d, name));
+            }
+            Err(e) => self.status = format!("Cannot describe this population: {e}"),
+        }
+    }
+
+    fn describe_window(&mut self, ctx: &egui::Context) {
+        let Some((si, node, d, suggested)) = self.dlg.describe.clone() else { return };
+        let Ok(name) = self.session.tree(si).name(node).map(|n| n.to_string()) else {
+            self.dlg.describe = None;
+            return;
+        };
+        let parent = self.session.tree(si).parent(node).ok().flatten().and_then(|p| self.session.tree(si).name(p).ok().map(|n| n.to_string())).unwrap_or_default();
+        let (mut open, mut rename) = (true, false);
+        egui::Window::new(format!("What is '{name}'?")).id(egui::Id::new("describe_pop")).open(&mut open).collapsible(false).resizable(true).default_width(520.0).show(ctx, |ui| {
+            theme::caption(ui, format!("{} events compared with the other {} events of '{parent}', in {}. \"Higher in\" is the chance that an event of this population is higher on the marker than one outside it: 50 % means no difference.", d.n_in, d.n_out, self.session.samples()[si].name));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                egui::Grid::new("describe_grid").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
+                    for h in ["Marker", "", "Median inside", "Median outside", "Higher in"] {
+                        ui.label(RichText::new(h).size(11.0).color(theme::MUTED));
+                    }
+                    ui.end_row();
+                    for m in &d.markers {
+                        let call = m.call();
+                        ui.label(self.session.channel_label(&m.channel));
+                        ui.label(RichText::new(call).strong().color(if call == "+" { theme::GOOD } else { theme::WARN }));
+                        ui.label(RichText::new(format!("{:.0}", m.inside)).monospace());
+                        ui.label(RichText::new(format!("{:.0}", m.outside)).monospace());
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(120.0, 12.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 2.0, theme::PANEL_2);
+                        let mid = r.center().x;
+                        let x = r.left() + m.auc as f32 * r.width();
+                        ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(mid.min(x), r.top()), egui::pos2(mid.max(x), r.bottom())), 2.0, if call.is_empty() { theme::MUTED } else if call == "+" { theme::GOOD } else { theme::WARN });
+                        ui.painter().text(egui::pos2(r.right() + 6.0, r.center().y), egui::Align2::LEFT_CENTER, format!("{:.0} %", 100.0 * m.auc), egui::FontId::proportional(11.0), theme::TEXT);
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            if suggested.is_empty() {
+                ui.label(RichText::new("No marker clearly sets this population apart from the rest of its parent. It may be a region of a continuous cloud and not a distinct population.").color(theme::WARN));
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Suggested name:");
+                    ui.label(RichText::new(&suggested).strong());
+                    if ui.add_enabled(suggested != name, egui::Button::new("Rename to this")).clicked() {
+                        rename = true;
+                    }
+                });
+                theme::caption(ui, "A + or − is given only where at least 85 % of comparisons agree. It describes this sample; check it in the others before relying on it.");
+            }
+        });
+        if rename {
+            self.status = match self.session.rename(si, node, &suggested) {
+                Ok(()) => format!("Renamed '{name}' to '{suggested}'."),
+                Err(e) => e,
+            };
+        }
+        if !open {
+            self.dlg.describe = None;
+        }
+    }
+
     /// Extra entries of a population's tree menu, after its open / rename entries.
     pub(super) fn tree_menu_items(&mut self, ui: &mut egui::Ui, si: usize, node: NodeId) {
         ui.separator();
@@ -393,6 +472,10 @@ impl App {
             let n = self.session.samples().len();
             self.stats.selected = (0..n).map(|i| i == si).collect();
             self.goto_module(Module::Statistics, si, node);
+        }
+        if ui.add_enabled(node != GateTree::ROOT, egui::Button::new("What is this population?")).on_hover_text("The markers that set it apart from the rest of its parent, and a name suggested from them").clicked() {
+            ui.close_menu();
+            self.describe_population(si, node);
         }
         if ui.button("Cell cycle analysis…").clicked() {
             ui.close_menu();
@@ -778,6 +861,7 @@ impl App {
         }
         self.group_manager(ctx);
         self.markers_window(ctx);
+        self.describe_window(ctx);
     }
 
     fn group_manager(&mut self, ctx: &egui::Context) {

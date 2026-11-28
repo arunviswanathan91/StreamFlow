@@ -7,6 +7,7 @@ pub mod comp_wizard;
 pub mod qc_clean;
 pub mod cross_sample;
 pub mod density;
+pub mod describe;
 pub mod drawing;
 pub mod embed;
 pub mod figure;

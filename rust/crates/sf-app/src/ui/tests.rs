@@ -2614,3 +2614,37 @@ fn the_map_splits_by_group_and_by_sample_with_equal_numbers_and_exports() {
     settle(&mut app, &ctx);
     assert!(app.disc.plot_rect.is_some());
 }
+
+#[test]
+fn what_is_this_population_names_it_from_the_markers_that_set_it_apart() {
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    // marker_app: events i % 4 == 0 are CD3+ CD4+, == 2 are CD3+ CD4+ FoxP3+, == 1 CD3+ CD8+, == 3 negative for all
+    app.session.set_marker("FoxP3-A", Some("FoxP3"));
+    let rows: Vec<u32> = (0..1500u32).filter(|i| i % 4 == 2).collect();
+    let treg = app.session.add_index_populations(0, GateTree::ROOT, vec![("Region 1".to_string(), rows)]).unwrap()[0];
+    app.describe_population(0, treg);
+    let (_, _, d, name) = app.dlg.describe.clone().expect("the comparison opened");
+    assert_eq!((d.n_in, d.n_out), (375, 1125));
+    let call = |ch: &str| d.markers.iter().find(|m| m.channel == ch).unwrap().call();
+    assert_eq!((call("FoxP3-A"), call("CD4-A"), call("CD8-A")), ("+", "", ""), "FoxP3 is what only this population has; CD4 is shared with another, CD8 is low in most of the rest too");
+    assert_eq!(d.markers[0].channel, "FoxP3-A", "the most distinguishing marker is listed first");
+    assert!(d.markers[0].auc > 0.99);
+    assert_eq!(name, "FoxP3+", "named with the marker name the user gave the channel");
+    settle(&mut app, &ctx);
+    // the suggested name can be taken as it is
+    app.session.rename(0, treg, &name).unwrap();
+    assert!(app.session.tree(0).find(&["FoxP3+"]).is_some());
+
+    // a random slice of the events is not a population: nothing sets it apart, and it is said so
+    let slice: Vec<u32> = (0..1500u32).filter(|i| i % 7 == 0).collect();
+    let nothing = app.session.add_index_populations(0, GateTree::ROOT, vec![("Slice".to_string(), slice)]).unwrap()[0];
+    app.describe_population(0, nothing);
+    let (_, _, d2, name2) = app.dlg.describe.clone().unwrap();
+    assert!(name2.is_empty() && d2.markers.iter().all(|m| m.call().is_empty() && (m.auc - 0.5).abs() < 0.1), "{d2:?}");
+    settle(&mut app, &ctx);
+    // All Events has nothing to be compared with
+    app.dlg.describe = None;
+    app.describe_population(0, GateTree::ROOT);
+    assert!(app.dlg.describe.is_none() && app.status.contains("Cannot describe"), "{}", app.status);
+}
