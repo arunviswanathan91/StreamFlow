@@ -132,6 +132,10 @@ pub fn build_input(session: &mut Session, req: &EmbedRequest) -> Result<EmbedInp
             if let Some(m) = crate::qc_clean::summary(&steps) {
                 notes.push(format!("{name}: {m}"));
             }
+            let heavy = crate::qc_clean::heavy_steps(&steps, session.sample(si).n_events);
+            if !heavy.is_empty() {
+                notes.push(format!("{name}: CHECK THIS: {} removed more than half of the file; untick that clean-up step if it is wrong for this sample", heavy.join(" and ")));
+            }
         }
         if eligible.is_empty() {
             notes.push(format!("{name}: the population is empty, skipped"));
@@ -221,6 +225,53 @@ pub struct ClusterResult {
     /// What actually ran. There is no silent fallback, so this always equals `requested`.
     pub actual: ClusterMethod,
     pub model: Option<ClusterModel>,
+    /// How separate the clusters are in the space they were found in: the mean silhouette of an even subsample
+    /// (-1..1). Near 0 the events form one continuous cloud and the "clusters" are only a way of cutting it up.
+    pub separation: f64,
+}
+
+/// Mean silhouette of an even subsample of at most `max` clustered events (`x` is `n x d`).
+pub fn separation(x: &[f64], d: usize, labels: &[Option<usize>], k: usize, max: usize) -> f64 {
+    let idx: Vec<usize> = (0..labels.len()).filter(|&i| labels[i].is_some()).collect();
+    if idx.len() < 3 || k < 2 {
+        return 0.0;
+    }
+    let step = (idx.len() / max.max(1)).max(1);
+    let pick: Vec<usize> = idx.into_iter().step_by(step).collect();
+    let dist = |a: usize, b: usize| (0..d).map(|j| (x[a * d + j] - x[b * d + j]).powi(2)).sum::<f64>().sqrt();
+    let (mut total, mut used) = (0.0, 0usize);
+    for &i in &pick {
+        let own = labels[i].unwrap();
+        let (mut sum, mut cnt) = (vec![0.0f64; k], vec![0usize; k]);
+        for &j in &pick {
+            if j != i {
+                let l = labels[j].unwrap();
+                sum[l] += dist(i, j);
+                cnt[l] += 1;
+            }
+        }
+        if cnt[own] == 0 {
+            continue; // alone in its cluster within the subsample: no silhouette
+        }
+        let a = sum[own] / cnt[own] as f64;
+        let b = (0..k).filter(|&c| c != own && cnt[c] > 0).map(|c| sum[c] / cnt[c] as f64).fold(f64::INFINITY, f64::min);
+        if b.is_finite() && a.max(b) > 0.0 {
+            total += (b - a) / a.max(b);
+            used += 1;
+        }
+    }
+    if used == 0 { 0.0 } else { total / used as f64 }
+}
+
+/// What a separation value means, in words.
+pub fn separation_verdict(s: f64) -> &'static str {
+    if s < 0.15 {
+        "weak: the events form one continuous cloud, and any method asked for k clusters will still cut it into k pieces"
+    } else if s < 0.35 {
+        "moderate: some real structure, with overlapping clusters"
+    } else {
+        "clear: the clusters are distinct groups"
+    }
 }
 
 pub fn cluster(input: &EmbedInput, req: &ClusterRequest) -> Result<ClusterResult, String> {
@@ -251,7 +302,8 @@ pub fn cluster(input: &EmbedInput, req: &ClusterRequest) -> Result<ClusterResult
     let (okf, okl): (Vec<usize>, Vec<usize>) = labels.iter().enumerate().filter_map(|(i, l)| l.map(|l| (i, l))).unzip();
     let flat: Vec<f64> = okf.iter().flat_map(|&i| input.feats[i * d..(i + 1) * d].to_vec()).collect();
     let medians = discovery::cluster_medians(&flat, okf.len(), d, &okl, k);
-    Ok(ClusterResult { labels, n_clusters: k, counts, medians, requested: req.method, actual: req.method, model })
+    let separation = separation(&x, d, &labels, k, 1500);
+    Ok(ClusterResult { labels, n_clusters: k, counts, medians, requested: req.method, actual: req.method, model, separation })
 }
 
 // ---- naming and rules -------------------------------------------------------------------------------

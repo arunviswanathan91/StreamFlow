@@ -2291,3 +2291,75 @@ fn a_thirty_colour_matrix_fits_the_window_and_small_cells_stay_readable() {
         assert!(used.y > 30.0, "{k} detectors drew something ({used:?})");
     }
 }
+
+#[test]
+fn a_quadrant_crosshair_is_dragged_as_one_gate_and_one_undo_step() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_sample();
+    let (w, plot) = ready_tab(&mut app, &ctx);
+    let range = app.ws.graphs[&w].range.unwrap();
+    let map = Mapper { rect: plot, range };
+    let c0 = ((range.x0 + range.x1) / 2.0, (range.y0 + range.y1) / 2.0);
+    let ids = app.session.commit_quadrants(w, c0.0, c0.1).unwrap();
+    settle(&mut app, &ctx);
+    let before: Vec<usize> = ids.iter().map(|&n| app.session.count(0, n)).collect();
+    let total: usize = before.iter().sum();
+    assert_eq!(app.session.quadrant_set(0, ids[2]).len(), 4, "the four sectors are recognised as one gate");
+
+    // grab the centre and drag right and up: both lines follow, all four populations change, the total does not
+    let from = map.to_screen(c0);
+    let to = Pos2::new(from.x + 0.15 * plot.width(), from.y - 0.10 * plot.height());
+    drag(&mut app, &ctx, from, to);
+    let g: Vec<Gate> = ids.iter().map(|&n| gate_of(&app, n)).collect();
+    assert!(g.iter().all(|q| q.xs[0] == g[0].xs[0] && q.ys[0] == g[0].ys[0]), "the sectors still share one crosshair");
+    assert!(g[0].xs[0] > c0.0 && g[0].ys[0] > c0.1, "moved right and up: {:?}", (g[0].xs[0], g[0].ys[0]));
+    let after: Vec<usize> = ids.iter().map(|&n| app.session.count(0, n)).collect();
+    assert_ne!(after, before);
+    assert_eq!(after.iter().sum::<usize>(), total, "still a partition of the parent");
+    assert!(app.status.contains("Moved the quadrant"), "{}", app.status);
+
+    // a point on the vertical line, away from the centre, moves only that line
+    let c1 = (g[0].xs[0], g[0].ys[0]);
+    let on_line = Pos2::new(map.to_screen(c1).x, plot.top() + 0.1 * plot.height());
+    drag(&mut app, &ctx, on_line, Pos2::new(on_line.x - 0.05 * plot.width(), on_line.y + 30.0));
+    let g2 = gate_of(&app, ids[0]);
+    assert!(g2.xs[0] < c1.0 && g2.ys[0] == c1.1, "only x changed: {:?} -> {:?}", c1, (g2.xs[0], g2.ys[0]));
+
+    // each drag is one undo step for the whole gate
+    assert!(app.session.undo(0));
+    assert_eq!((gate_of(&app, ids[3]).xs[0], gate_of(&app, ids[3]).ys[0]), c1);
+    assert!(app.session.undo(0));
+    assert!(ids.iter().all(|&n| (gate_of(&app, n).xs[0], gate_of(&app, n).ys[0]) == c0));
+}
+
+#[test]
+fn cluster_separation_tells_real_groups_from_a_cloud_cut_into_pieces() {
+    use crate::embed::{separation, separation_verdict};
+    let mut rng = Rng::new(21);
+    let mut normal = move || {
+        let (u1, u2) = (rng.next_f64().max(1e-300), rng.next_f64());
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    };
+    let (n, d, k) = (1200usize, 4usize, 4usize);
+    // four well-separated groups, labelled by group
+    let mut x = Vec::new();
+    let mut lab = Vec::new();
+    for i in 0..n {
+        let g = i % k;
+        for j in 0..d {
+            x.push(if j == g { 6.0 } else { 0.0 } + 0.5 * normal());
+        }
+        lab.push(Some(g));
+    }
+    let good = separation(&x, d, &lab, k, 600);
+    assert!(good > 0.6, "{good}");
+    assert!(separation_verdict(good).starts_with("clear"));
+    // one structureless cloud, cut into four by k-means: the cut is real, the groups are not
+    let cloud: Vec<f64> = (0..n * d).map(|_| normal()).collect();
+    let km = sf_core::kmeans::kmeans(&cloud, n, d, k, 3, 50, 1).unwrap();
+    let cut: Vec<Option<usize>> = km.labels.iter().map(|&l| Some(l)).collect();
+    let weak = separation(&cloud, d, &cut, k, 600);
+    assert!(weak < 0.2, "{weak}");
+    assert!(separation_verdict(0.05).starts_with("weak"));
+    assert_eq!(separation(&cloud, d, &[None; 0], k, 600), 0.0);
+}

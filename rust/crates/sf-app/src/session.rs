@@ -677,6 +677,49 @@ impl Session {
         Ok(ids)
     }
 
+    /// The populations made together with `node` by one quadrant gate (itself included): the quadrant sectors under
+    /// the same parent that share its axes, scales and crosshair.
+    pub fn quadrant_set(&self, sample: usize, node: NodeId) -> Vec<NodeId> {
+        let t = &self.states[sample].tree;
+        let Some(g) = self.gate_of(sample, node).filter(|g| matches!(g.kind, GateKind::Quadrant(_)) && g.xs.len() == 1) else { return vec![] };
+        let Some(parent) = t.parent(node).ok().flatten() else { return vec![] };
+        t.children(parent)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&k| matches!(t.kind(k), Ok(NodeKind::Gate(h)) if matches!(h.kind, GateKind::Quadrant(_)) && h.xs.len() == 1 && h.x_chan == g.x_chan && h.y_chan == g.y_chan && h.x_scale == g.x_scale && h.y_scale == g.y_scale && h.xs[0] == g.xs[0] && h.ys[0] == g.ys[0]))
+            .collect()
+    }
+
+    /// Move a quadrant gate's crosshair to `(cx, cy)` (display space). The four populations it made move together,
+    /// as ONE undoable step, and keep their names and everything gated below them. Returns how many moved.
+    pub fn move_quadrants(&mut self, sample: usize, node: NodeId, cx: f64, cy: f64) -> Result<usize, String> {
+        if !(cx.is_finite() && cy.is_finite()) {
+            return Err("The crosshair must stay on the plot".into());
+        }
+        let set = self.quadrant_set(sample, node);
+        if set.is_empty() {
+            return Err("That population is not part of a quadrant gate".into());
+        }
+        self.snapshot(sample);
+        for &k in &set {
+            let Some(mut g) = self.gate_of(sample, k) else { continue };
+            g.xs[0] = cx;
+            g.ys[0] = cy;
+            if let Err(e) = self.states[sample].tree.set_gate(k, g) {
+                // all or none: put the tree back
+                self.undo(sample);
+                self.states[sample].redo.clear();
+                return Err(e.to_string());
+            }
+        }
+        self.touch(sample);
+        for &k in &set {
+            self.propagate_if_synced(sample, k);
+        }
+        Ok(set.len())
+    }
+
     // ---- compensation ---------------------------------------------------------------------------
 
     /// Apply a spillover matrix to one sample. Gates and windows that use `Comp-` channels follow.

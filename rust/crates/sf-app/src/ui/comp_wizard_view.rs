@@ -1176,7 +1176,10 @@ pub(super) fn matrix_table(ui: &mut egui::Ui, id: &str, det: &[String], m: &[f64
     let header_h = if turned { longest + 10.0 } else { lab + 10.0 };
     let gap = if cw < 30.0 { 0.5 } else { 1.5 };
     let size = Vec2::new(label_w + k as f32 * cw, header_h + k as f32 * ch);
-    egui::ScrollArea::both().id_salt(id).auto_shrink([false, true]).max_height(avail_h).show(ui, |ui| {
+    // A matrix of ordinary size is always shown whole, even at the bottom of a page that itself scrolls (there the
+    // room left is a sliver, and the matrix used to show one row at a time). Only a very tall one scrolls inside.
+    let max_h = avail_h.max(size.y.min(620.0) + 14.0);
+    egui::ScrollArea::both().id_salt(id).auto_shrink([false, true]).max_height(max_h).show(ui, |ui| {
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
         let p = ui.painter_at(rect);
         let origin = rect.min + Vec2::new(label_w, header_h);

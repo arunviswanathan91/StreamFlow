@@ -5,7 +5,7 @@
 //! FSC-A/FSC-H singlet gate), written from their published descriptions. They are meant to keep a map or clustering
 //! on biology instead of acquisition artefacts; they are not a substitute for looking at the data.
 
-use crate::comp_wizard::{auto_cut, clean_mask, CleanMode, SplitMethod};
+use crate::comp_wizard::{auto_cut, SplitMethod};
 use crate::sample::LoadedSample;
 use sf_core::stats;
 
@@ -21,7 +21,7 @@ pub struct DeadSpec {
 pub struct CleanSpec {
     /// Events pinned at the top of a channel's range (saturated) or at zero on a scatter channel.
     pub margins: bool,
-    /// Keep the dominant FSC/SSC population.
+    /// Drop the separate low-FSC population below the cells, when there is one (see [`debris_cut`]).
     pub debris: bool,
     /// FSC-A against FSC-H (or width): drop events whose area is too large for their height.
     pub doublets: bool,
@@ -74,8 +74,20 @@ pub fn keep_mask(s: &LoadedSample, spec: &CleanSpec) -> (Vec<bool>, Vec<(&'stati
         apply("margin / saturated events", drop, &mut keep, &mut steps);
     }
     if spec.debris {
-        let m = clean_mask(s, CleanMode::Dominant(0.08));
-        apply("debris (scatter)", m.iter().map(|&k| !k).collect(), &mut keep, &mut steps);
+        // Debris is what sits BELOW the cells on forward scatter. (This used to keep only the single densest
+        // FSC/SSC cluster, which throws away every other cell type, and the cells themselves whenever debris is
+        // the densest spot: one real file lost 92 % of its events that way.)
+        let mut drop = vec![false; n];
+        if let Some(c) = find("FSC-A").or_else(|| find("FSC-H")) {
+            let v = col(c);
+            let kept: Vec<f64> = (0..n).filter(|&i| keep[i]).map(|i| v[i]).collect();
+            if let Some(cut) = debris_cut(&kept) {
+                for i in 0..n {
+                    drop[i] = v[i] < cut;
+                }
+            }
+        }
+        apply("debris (low FSC)", drop, &mut keep, &mut steps);
     }
     if spec.doublets {
         let mut drop = vec![false; n];
@@ -140,10 +152,47 @@ pub fn keep_mask(s: &LoadedSample, spec: &CleanSpec) -> (Vec<bool>, Vec<(&'stati
     (keep, steps)
 }
 
+/// The forward-scatter value below which events are debris: the valley between a separate low-FSC population and
+/// the cells above it. `None` when the sample has no such separate population, so nothing is removed on a guess.
+pub fn debris_cut(fsc: &[f64]) -> Option<f64> {
+    let v: Vec<f64> = fsc.iter().copied().filter(|x| x.is_finite() && *x > 0.0).collect();
+    if v.len() < 500 {
+        return None;
+    }
+    let hi = stats::percentile(&v, 99.5);
+    if !(hi > 0.0) {
+        return None;
+    }
+    const B: usize = 128;
+    let mut h = vec![0.0f64; B];
+    for x in &v {
+        h[((x / hi) * B as f64).floor().clamp(0.0, B as f64 - 1.0) as usize] += 1.0;
+    }
+    // light smoothing so counting noise does not make peaks
+    let s: Vec<f64> = (0..B).map(|i| (i.saturating_sub(1)..=(i + 1).min(B - 1)).map(|k| h[k]).sum::<f64>() / 3.0).collect();
+    let top = s.iter().cloned().fold(0.0, f64::max);
+    let peaks: Vec<usize> = (0..B).filter(|&i| s[i] >= 0.02 * top && (i == 0 || s[i] >= s[i - 1]) && (i == B - 1 || s[i] > s[i + 1])).collect();
+    // debris is the lowest population, in the bottom third of the scale; the cells are the tallest peak above it
+    let low = *peaks.first().filter(|&&p| p < B / 3)?;
+    let cells = peaks.iter().copied().filter(|&p| p > low + 3).max_by(|a, b| s[*a].total_cmp(&s[*b]))?;
+    let valley = (low..=cells).min_by(|a, b| s[*a].total_cmp(&s[*b]))?;
+    // a real gap between the two, not a shoulder
+    if s[valley] > 0.6 * s[low].min(s[cells]) {
+        return None;
+    }
+    Some((valley as f64 + 0.5) / B as f64 * hi)
+}
+
 /// "1,204 events removed (debris 800, doublets 404)" for the log; `None` when nothing was removed.
+/// A step that removed more than half of what it was given is flagged, because that is rarely right.
 pub fn summary(steps: &[(&'static str, usize)]) -> Option<String> {
     let total: usize = steps.iter().map(|s| s.1).sum();
     (total > 0).then(|| format!("{total} event(s) removed ({})", steps.iter().filter(|s| s.1 > 0).map(|s| format!("{} {}", s.0, s.1)).collect::<Vec<_>>().join(", ")))
+}
+
+/// Names of the steps that removed more than half of the `n_events` of a sample.
+pub fn heavy_steps(steps: &[(&'static str, usize)], n_events: usize) -> Vec<&'static str> {
+    steps.iter().filter(|s| n_events > 0 && s.1 * 2 > n_events).map(|s| s.0).collect()
 }
 
 #[cfg(test)]
@@ -249,5 +298,55 @@ mod tests {
         let (k1, _) = keep_mask(&bare, &CleanSpec { margins: true, debris: true, doublets: true, flow_rate: true, dead: Some(DeadSpec { channel: "none".into(), threshold: None }) });
         assert!(k1.iter().all(|&k| k));
         assert!(summary(&[("x", 0)]).is_none());
+    }
+
+    /// FSC-A, SSC-A, marker: `debris_frac` of the events are debris, the rest are two cell types of different size.
+    fn scatter_sample(debris_frac: f64) -> (LoadedSample, Vec<u8>) {
+        let mut rng = Rng::new(5);
+        let n = 30_000;
+        let (mut ev, mut kind) = (Vec::new(), vec![0u8; n]);
+        for i in 0..n {
+            let u = rng.next_f64();
+            let (fsc, ssc) = if u < debris_frac {
+                kind[i] = 1;
+                (8_000.0 + 2_500.0 * normal(&mut rng), 3_000.0 + 1_000.0 * normal(&mut rng))
+            } else if u < debris_frac + (1.0 - debris_frac) * 0.7 {
+                (90_000.0 + 9_000.0 * normal(&mut rng), 30_000.0 + 5_000.0 * normal(&mut rng)) // lymphocytes
+            } else {
+                kind[i] = 2;
+                (140_000.0 + 12_000.0 * normal(&mut rng), 90_000.0 + 12_000.0 * normal(&mut rng)) // larger, more granular cells
+            };
+            ev.extend_from_slice(&[fsc.max(1.0) as f32, ssc.max(1.0) as f32, 500.0]);
+        }
+        (LoadedSample::synthetic("s.fcs", &["FSC-A", "SSC-A", "CD3-A"], vec![262_144.0; 3], ev), kind)
+    }
+
+    #[test]
+    fn debris_is_removed_even_when_it_is_the_densest_population_and_other_cell_types_are_kept() {
+        for frac in [0.05, 0.4, 0.75] {
+            let (s, kind) = scatter_sample(frac);
+            let (keep, steps) = keep_mask(&s, &CleanSpec { debris: true, ..Default::default() });
+            let frac_kept = |k: u8| (0..kind.len()).filter(|&i| kind[i] == k && keep[i]).count() as f64 / kind.iter().filter(|&&x| x == k).count().max(1) as f64;
+            assert!(frac_kept(1) < 0.05, "debris {frac}: {:.3} of the debris kept ({steps:?})", frac_kept(1));
+            assert!(frac_kept(0) > 0.98, "debris {frac}: {:.3} of the lymphocytes kept", frac_kept(0));
+            assert!(frac_kept(2) > 0.98, "debris {frac}: the second, larger cell type is not thrown away ({:.3} kept)", frac_kept(2));
+        }
+        // 75 % removed is correct there, and is flagged for the user to look at
+        let (s, _) = scatter_sample(0.75);
+        let (_, steps) = keep_mask(&s, &CleanSpec { debris: true, ..Default::default() });
+        assert_eq!(heavy_steps(&steps, s.n_events), vec!["debris (low FSC)"]);
+    }
+
+    #[test]
+    fn a_sample_without_a_separate_debris_population_loses_nothing() {
+        let (s, _) = scatter_sample(0.0);
+        let (keep, steps) = keep_mask(&s, &CleanSpec { debris: true, ..Default::default() });
+        assert!(keep.iter().all(|&k| k), "{steps:?}");
+        assert!(heavy_steps(&steps, s.n_events).is_empty());
+        // one broad population with a low shoulder is not cut either
+        let mut rng = Rng::new(9);
+        let one: Vec<f64> = (0..20_000).map(|_| 60_000.0 + 25_000.0 * normal(&mut rng)).filter(|v| *v > 0.0).collect();
+        assert_eq!(debris_cut(&one), None);
+        assert_eq!(debris_cut(&[1.0; 10]), None, "too few events to judge");
     }
 }

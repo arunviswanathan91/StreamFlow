@@ -61,6 +61,9 @@ pub struct State {
     pub clean: crate::qc_clean::CleanSpec,
     pub cluster_method: ClusterMethod,
     pub k: usize,
+    /// Give every marker the same weight (z-score) before clustering. Off = cluster on the transformed values,
+    /// the same distances the map is drawn from.
+    pub zscore: bool,
     pub name_method: NameMethod,
     pub thresholds: BTreeMap<String, f64>,
     pub rules: Vec<RuleUi>,
@@ -99,6 +102,7 @@ impl Default for State {
             clean: Default::default(),
             cluster_method: ClusterMethod::FlowSom,
             k: 8,
+            zscore: false,
             name_method: NameMethod::ZScore,
             thresholds: BTreeMap::new(),
             rules: vec![],
@@ -187,7 +191,7 @@ impl App {
                 self.disc.cluster_job = None;
                 match r {
                     Ok(c) => {
-                        self.status = format!("{} found {} clusters.", c.actual.label(), c.n_clusters);
+                        self.status = format!("{} made {} clusters. Separation {:.2} ({}).", c.actual.label(), c.n_clusters, c.separation, embed::separation_verdict(c.separation));
                         self.disc.picked = vec![false; c.n_clusters];
                         self.disc.clus = Some(c);
                         self.disc_rename();
@@ -277,7 +281,7 @@ impl App {
             return;
         }
         let input = self.disc.input.clone().unwrap();
-        let req = ClusterRequest { method: self.disc.cluster_method, k: self.disc.k, scale: Scale::ZScore, seed: self.disc.seed };
+        let req = ClusterRequest { method: self.disc.cluster_method, k: self.disc.k, scale: if self.disc.zscore { Scale::ZScore } else { Scale::None }, seed: self.disc.seed };
         let label = req.method.label().to_string();
         self.disc.cluster_job = Some(jobs::spawn(label, move || embed::cluster(&input, &req)));
         self.status = "Clustering…".into();
@@ -338,7 +342,7 @@ impl App {
         {
             let c = &mut self.disc.clean;
             ui.checkbox(&mut c.margins, "Margin / saturated events").on_hover_text("Events pinned at the top of a channel's range, or at zero on scatter");
-            ui.checkbox(&mut c.debris, "Debris (keep the main FSC/SSC population)");
+            ui.checkbox(&mut c.debris, "Debris (low-FSC events below the cells)").on_hover_text("Removes the separate low forward-scatter population, if the sample has one. Every cell type above it is kept.");
             ui.checkbox(&mut c.doublets, "Doublets (FSC-A vs FSC-H)").on_hover_text("Drops events whose area is too large for their height");
             ui.checkbox(&mut c.flow_rate, "Flow-rate anomalies (Time)").on_hover_text("Removes time slices whose event rate is far from the median: clogs, bubbles, restarts");
             let mut dead_on = c.dead.is_some();
@@ -433,6 +437,7 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.disc.k).range(2..=100));
             }
         });
+        ui.checkbox(&mut self.disc.zscore, "Equal weight per marker (z-score)").on_hover_text("Off (recommended): cluster on the transformed marker values, the same distances the map uses. On: every marker is rescaled to the same spread first, which also magnifies markers that are only noise.");
         let has_input = self.disc.input.is_some();
         if ui.add_enabled(!self.disc.is_busy(), egui::Button::new(if has_input { "Cluster the pooled events" } else { "Pool + cluster" }).min_size(egui::vec2(240.0, 28.0))).clicked() {
             self.disc_run_clustering();
@@ -452,6 +457,9 @@ impl App {
             let total: usize = counts.iter().sum::<usize>().max(1);
             let actual = self.disc.clus.as_ref().unwrap().actual;
             theme::caption(ui, format!("{} · named by marker medians · unclustered events are not listed", actual.label()));
+            let sep = self.disc.clus.as_ref().unwrap().separation;
+            ui.label(RichText::new(format!("Separation {sep:.2} — {}", embed::separation_verdict(sep))).size(11.0).color(if sep < 0.15 { theme::WARN } else if sep < 0.35 { theme::TEXT } else { theme::GOOD }))
+                .on_hover_text("Mean silhouette of a subsample, in the space the clusters were found in. k-means and FlowSOM always return the number of clusters asked for, whether or not the data has that many groups; this says how real they are. Colour the map by Sample to see whether a cluster is just one tube.");
             egui::ScrollArea::vertical().id_salt("clus_list").max_height(230.0).show(ui, |ui| {
                 for c in 0..n_clusters {
                     ui.horizontal(|ui| {

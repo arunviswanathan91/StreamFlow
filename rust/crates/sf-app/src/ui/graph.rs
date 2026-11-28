@@ -73,6 +73,8 @@ pub struct GraphUi {
     pub edit: Option<EditDrag>,
     /// Dragging an FMO line: `true` = the X channel's line.
     pub fmo_drag: Option<bool>,
+    /// Dragging a quadrant gate's crosshair (or one of its two lines).
+    pub quad_drag: Option<QuadDrag>,
     /// The compare strip under the plot is open.
     pub strip_open: bool,
     pub strip: HashMap<usize, (u64, StripThumb)>,
@@ -99,6 +101,17 @@ pub enum StripThumb {
     Hist(Vec<f32>),
 }
 
+/// One in-progress move of a quadrant crosshair: all four populations follow when the button is released.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadDrag {
+    pub node: NodeId,
+    /// The crosshair before the drag, and where it would be now.
+    pub orig: (f64, f64),
+    pub now: (f64, f64),
+    /// Which of the two coordinates this drag changes (a line moves one, the centre both).
+    pub moves: (bool, bool),
+}
+
 /// One in-progress move / resize of a gate.
 pub struct EditDrag {
     pub node: NodeId,
@@ -111,7 +124,7 @@ pub struct EditDrag {
 
 impl GraphUi {
     pub fn new() -> GraphUi {
-        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), menu: None, curve: None, label_rects: Vec::new(), last_2d: None }
+        GraphUi { tex: None, key: 0, range: None, shown: 0, refit: true, plot_rect: None, last_click: None, style: GateStyle::default(), pts: None, summary: None, edit: None, fmo_drag: None, quad_drag: None, strip_open: false, strip: HashMap::new(), strip_rects: Vec::new(), canvas_rect: None, plot: PlotStyle::default(), menu: None, curve: None, label_rects: Vec::new(), last_2d: None }
     }
 }
 
@@ -838,7 +851,7 @@ impl App {
                 }
             }
         }
-        if w.tool == Tool::Pointer && resp.dragged() && self.ws.graphs[&id].edit.is_none() && self.ws.graphs[&id].fmo_drag.is_none() {
+        if w.tool == Tool::Pointer && resp.dragged() && self.ws.graphs[&id].edit.is_none() && self.ws.graphs[&id].fmo_drag.is_none() && self.ws.graphs[&id].quad_drag.is_none() {
             let d = resp.drag_delta();
             let (dx, dy) = ((d.x / plot.width()) as f64 * (range.x1 - range.x0), (d.y / plot.height()) as f64 * (range.y1 - range.y0));
             if let Some(r) = self.ws.graphs.get_mut(&id).unwrap().range.as_mut() {
@@ -1362,6 +1375,43 @@ impl App {
             }
             return;
         }
+        // a quadrant's crosshair: grab the centre to move both lines, or one line to move just that one
+        if resp.drag_started() {
+            let origin = ctx.input(|i| i.pointer.press_origin()).filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
+            if let Some((node, orig, moves)) = origin.and_then(|o| self.quadrant_hit(w, o, tol)) {
+                self.session.selected = Some((w.sample, node));
+                self.ws.graphs.get_mut(&id).unwrap().quad_drag = Some(QuadDrag { node, orig, now: orig, moves });
+            }
+        }
+        if let Some(q) = self.ws.graphs.get(&id).and_then(|g| g.quad_drag) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.ws.graphs.get_mut(&id).unwrap().quad_drag = None;
+                self.status = "Edit cancelled.".into();
+                return;
+            }
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let cur = map.to_data(Pos2::new(p.x.clamp(plot.left(), plot.right()), p.y.clamp(plot.top(), plot.bottom())));
+                    let now = (if q.moves.0 { cur.0 } else { q.orig.0 }, if q.moves.1 { cur.1 } else { q.orig.1 });
+                    self.ws.graphs.get_mut(&id).unwrap().quad_drag = Some(QuadDrag { now, ..q });
+                }
+                ctx.request_repaint();
+            }
+            if resp.drag_stopped() {
+                self.ws.graphs.get_mut(&id).unwrap().quad_drag = None;
+                if q.now != q.orig {
+                    self.status = match self.session.move_quadrants(w.sample, q.node, q.now.0, q.now.1) {
+                        Ok(n) => format!("Moved the quadrant gate ({n} populations). Ctrl+Z to undo."),
+                        Err(e) => format!("Could not move the quadrant: {e}"),
+                    };
+                    if let Some(g) = self.ws.graphs.get_mut(&id) {
+                        g.key = 0;
+                        g.summary = None;
+                    }
+                }
+            }
+            return;
+        }
         if resp.drag_started() {
             let origin = ctx.input(|i| i.pointer.press_origin()).filter(|p| plot.contains(*p)).map(|p| map.to_data(p));
             if let Some(o) = origin {
@@ -1379,6 +1429,14 @@ impl App {
                     }
                 }
                 let at = map.to_data(pos);
+                if let Some((_, _, moves)) = self.quadrant_hit(w, at, tol) {
+                    ctx.set_cursor_icon(match moves {
+                        (true, true) => egui::CursorIcon::Move,
+                        (true, false) => egui::CursorIcon::ResizeHorizontal,
+                        _ => egui::CursorIcon::ResizeVertical,
+                    });
+                    return;
+                }
                 let selected = self.session.selected.filter(|(s, _)| *s == w.sample).map(|(_, n)| n);
                 let icon = selected.and_then(|n| match self.session.tree(w.sample).kind(n) {
                     Ok(NodeKind::Gate(g)) if gate_on_axes(g, w) && self.session.tree(w.sample).parent(n).ok().flatten() == Some(w.node) => gate_edit::hit(g, at, tol, y_mid),
@@ -1427,6 +1485,22 @@ impl App {
                 None => self.status = "That would leave the gate with no size, so it was not changed.".into(),
             }
         }
+    }
+
+    /// A quadrant crosshair under `at`: the population to move, its centre, and which coordinates a drag from here
+    /// changes (the centre moves both lines, a point on one line moves that line only).
+    pub fn quadrant_hit(&self, w: &GraphWindow, at: (f64, f64), tol: (f64, f64)) -> Option<(NodeId, (f64, f64), (bool, bool))> {
+        if w.kind == PlotKind::Histogram {
+            return None;
+        }
+        let kids = self.session.tree(w.sample).children(w.node).ok()?;
+        kids.iter().rev().find_map(|&k| match self.session.tree(w.sample).kind(k) {
+            Ok(NodeKind::Gate(g)) if matches!(g.kind, GateKind::Quadrant(_)) && g.xs.len() == 1 && gate_on_axes(g, w) => {
+                let (nx, ny) = (((at.0 - g.xs[0]) / tol.0).abs() <= 1.0, ((at.1 - g.ys[0]) / tol.1).abs() <= 1.0);
+                (nx || ny).then_some((k, (g.xs[0], g.ys[0]), (nx, ny)))
+            }
+            _ => None,
+        })
     }
 
     /// Pick what a press at `at` grabs: handles of the selected gate, then handles of the others, then bodies.
@@ -1566,6 +1640,13 @@ impl App {
             // while it is being dragged, show where it would land
             if let Some(p) = self.ws.graphs.get(&id).and_then(|g| g.edit.as_ref()).filter(|e| e.node == k).and_then(|e| e.preview.clone()) {
                 gate = p;
+            }
+            // a quadrant being dragged: all of its sectors are drawn where the crosshair would land
+            if let Some(q) = self.ws.graphs.get(&id).and_then(|g| g.quad_drag) {
+                if matches!(gate.kind, GateKind::Quadrant(_)) && gate.xs.len() == 1 && (gate.xs[0], gate.ys[0]) == q.orig {
+                    gate.xs[0] = q.now.0;
+                    gate.ys[0] = q.now.1;
+                }
             }
             let selected = self.session.selected == Some((w.sample, k));
             let owner = self.session.gate_owner(w.sample, k);
