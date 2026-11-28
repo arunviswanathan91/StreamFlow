@@ -42,11 +42,21 @@ pub struct Dialogs {
     pub history: Option<(usize, NodeId)>,
     /// "What is this population?": (sample, node, the comparison, the suggested name).
     pub describe: Option<(usize, NodeId, crate::describe::Description, String)>,
+    /// "Carry to all events": the population, what was learned from, the suggested gating path, the last result.
+    pub carry: Option<CarryDlg>,
     /// A group-owned gate whose deletion is being decided.
     pub group_delete: Option<(usize, NodeId)>,
     pub mgr: GroupMgr,
     /// How many times a plot menu has been laid out (so tests can tell a menu opened).
     pub plot_menus_shown: u32,
+}
+
+#[derive(Clone)]
+pub struct CarryDlg {
+    pub sample: usize,
+    pub training: crate::carry::Training,
+    pub path: Vec<crate::carry::PathStep>,
+    pub result: Option<String>,
 }
 
 pub const STAT_CHOICES: [Metric; 13] = Metric::COMMON;
@@ -387,6 +397,109 @@ impl App {
 
     // ---- the population tree's menu -----------------------------------------------------------------
 
+    /// Learn what a map population looks like on the map's markers and open the two ways of carrying it over.
+    pub fn carry_open(&mut self, si: usize, node: NodeId) {
+        let features = if self.session.map_features.len() >= 2 { self.session.map_features.clone() } else { super::discover_view::default_features(self.session.sample(si)) };
+        let cofactor = self.session.map_cofactor;
+        match crate::carry::training(&mut self.session, si, node, &features, cofactor, 30_000) {
+            Ok(training) => {
+                let path = crate::carry::suggest_path(&training, 4);
+                self.status = format!("Learned '{}' from {} pooled events inside and {} outside, in {} sample(s).", training.name(), training.n_in, training.n_out, training.samples);
+                self.dlg.carry = Some(CarryDlg { sample: si, training, path, result: None });
+            }
+            Err(e) => self.status = format!("Cannot carry this population over: {e}"),
+        }
+    }
+
+    /// Put every event of every sample inside or outside the population with a classifier.
+    pub fn carry_with_classifier(&mut self) {
+        let Some(dlg) = self.dlg.carry.clone() else { return };
+        let msg = match crate::carry::carry_classifier(&mut self.session, &dlg.training, 42) {
+            Ok(c) => {
+                let total: usize = c.per_sample.iter().map(|p| p.1).sum();
+                let weak = c.quality.recall < 0.8 || c.quality.precision < 0.8;
+                format!("'{}' added to {} sample(s), {total} events in all. On pooled events held back from training the classifier {}{}.", c.name, c.per_sample.len(), c.quality.words(), if weak { " — that is weak: the population is not well defined by these markers, so treat the result with care" } else { "" })
+            }
+            Err(e) => format!("Could not carry the population over: {e}"),
+        };
+        self.status = msg.clone();
+        if let Some(d) = self.dlg.carry.as_mut() {
+            d.result = Some(msg);
+        }
+    }
+
+    /// Draw the suggested gating path as ordinary nested gates on every sample.
+    pub fn carry_with_gates(&mut self) {
+        let Some(dlg) = self.dlg.carry.clone() else { return };
+        let labels: std::collections::HashMap<String, String> = dlg.path.iter().map(|s| (s.channel.clone(), self.marker_word(&s.channel))).collect();
+        let msg = match crate::carry::make_path_gates(&mut self.session, dlg.sample, &dlg.training, &dlg.path, &|c| labels.get(c).cloned().unwrap_or_else(|| c.to_string())) {
+            Ok(last) => {
+                let q = dlg.path.last().map(|s| s.quality.words()).unwrap_or_default();
+                let n = self.session.count(dlg.sample, last);
+                format!("Drew {} nested gate(s) on every sample, ending in '{} (gated)' ({n} events in this sample). On the pooled events the path {q}. They are ordinary gates: adjust them on the plot.", dlg.path.len(), dlg.training.name())
+            }
+            Err(e) => format!("Could not draw the gating path: {e}"),
+        };
+        self.status = msg.clone();
+        if let Some(d) = self.dlg.carry.as_mut() {
+            d.result = Some(msg);
+        }
+    }
+
+    fn carry_window(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.dlg.carry.clone() else { return };
+        let (mut open, mut classify, mut gates) = (true, false, false);
+        let tr = &dlg.training;
+        egui::Window::new(format!("Carry '{}' to all events", tr.name())).id(egui::Id::new("carry_pop")).open(&mut open).collapsible(false).resizable(true).default_width(560.0).show(ctx, |ui| {
+            theme::caption(ui, format!("A population gated on the map holds only the pooled events. It was learned here from {} pooled events inside it and {} outside, in {} sample(s), on: {}.", tr.n_in, tr.n_out, tr.samples, tr.features.iter().map(|f| self.marker_word(f)).collect::<Vec<_>>().join(", ")));
+            ui.add_space(6.0);
+            theme::section(ui, "1 · Classifier");
+            theme::caption(ui, "A random forest on those markers puts every event of every sample inside or outside. Closest to the map, but a black box: the result is a list of events, not a gate you can redraw. It is tested on a fifth of the pooled events held back from training.");
+            if ui.button(format!("Add '{} (all events)' to every sample", tr.name())).clicked() {
+                classify = true;
+            }
+            ui.add_space(8.0);
+            theme::section(ui, "2 · Gating path");
+            theme::caption(ui, "A few one-marker cuts in sequence that best reproduce the population. Coarser than the classifier, but ordinary gates: readable, adjustable on the plot, and something a methods section can state.");
+            if dlg.path.is_empty() {
+                ui.label(RichText::new("No single-marker cut reproduces this population any better than taking everything. Use the classifier, or check with “What is this population?” whether it is a distinct population at all.").color(theme::WARN));
+            } else {
+                egui::Grid::new("carry_path").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
+                    for h in ["Step", "Cut", "At (raw units)", "Finds", "Purity"] {
+                        ui.label(RichText::new(h).size(11.0).color(theme::MUTED));
+                    }
+                    ui.end_row();
+                    for (k, s) in dlg.path.iter().enumerate() {
+                        ui.label(format!("{}", k + 1));
+                        ui.label(RichText::new(format!("{}{}", self.marker_word(&s.channel), if s.above { "+" } else { "-" })).strong());
+                        ui.label(RichText::new(format!("{} {:.0}", if s.above { "≥" } else { "<" }, s.threshold)).monospace());
+                        ui.label(RichText::new(format!("{:.0} %", 100.0 * s.quality.recall)).monospace());
+                        ui.label(RichText::new(format!("{:.0} %", 100.0 * s.quality.precision)).monospace());
+                        ui.end_row();
+                    }
+                });
+                theme::caption(ui, "Finds = share of the population still inside after this step. Purity = share of the selected events that are the population. Both on the pooled events.");
+                if ui.button("Draw these gates on every sample").clicked() {
+                    gates = true;
+                }
+            }
+            if let Some(r) = &dlg.result {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new(r).color(if r.contains("weak") || r.starts_with("Could not") { theme::WARN } else { theme::GOOD }));
+            }
+        });
+        if classify {
+            self.run_busy("Classifying every event…", |app| app.carry_with_classifier());
+        }
+        if gates {
+            self.carry_with_gates();
+        }
+        if !open {
+            self.dlg.carry = None;
+        }
+    }
+
     /// A marker as it is written in a population name: its marker name if it has one, else the short channel name.
     fn marker_word(&self, channel: &str) -> String {
         self.session.marker(channel).unwrap_or_else(|| crate::session::short_name(channel))
@@ -476,6 +589,11 @@ impl App {
         if ui.add_enabled(node != GateTree::ROOT, egui::Button::new("What is this population?")).on_hover_text("The markers that set it apart from the rest of its parent, and a name suggested from them").clicked() {
             ui.close_menu();
             self.describe_population(si, node);
+        }
+        let on_map = self.session.tree(si).path(node).map_or(false, |p| p.iter().position(|x| x == crate::embed::MAP_POPULATION).map_or(false, |i| i + 1 < p.len()));
+        if ui.add_enabled(on_map, egui::Button::new("Carry to all events…")).on_hover_text("A population gated on the map holds only the pooled events. This reaches every event of every sample: with a classifier, or with a short gating path you can read and redraw.").clicked() {
+            ui.close_menu();
+            self.carry_open(si, node);
         }
         if ui.button("Cell cycle analysis…").clicked() {
             ui.close_menu();
@@ -862,6 +980,7 @@ impl App {
         self.group_manager(ctx);
         self.markers_window(ctx);
         self.describe_window(ctx);
+        self.carry_window(ctx);
     }
 
     fn group_manager(&mut self, ctx: &egui::Context) {

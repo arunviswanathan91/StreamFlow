@@ -2690,3 +2690,70 @@ fn a_map_and_the_gates_drawn_on_it_survive_saving_and_reopening_the_workspace() 
     let w3 = third.session.apply_workspace_json(&sf_core::json::Json::parse(&bad).unwrap()).unwrap();
     assert!(w3.iter().any(|w| w.contains("saved map does not fit")), "{w3:?}");
 }
+
+#[test]
+fn a_map_population_is_carried_to_every_event_by_a_classifier_and_by_a_readable_gating_path() {
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    app.set_module(Module::DimReduction);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 500;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the embedding", |a| a.disc.emb.is_some());
+    app.disc_open_map();
+    assert_eq!(app.session.map_features.len(), 4, "the map remembers its markers");
+    // a population "found on the map": the pooled Treg events (every 4th event from 2 is CD3+ CD4+ FoxP3+)
+    let input = app.disc.emb.as_ref().unwrap().input.clone();
+    let mut node0 = 0;
+    for i in 0..2 {
+        let map = app.session.tree(i).find(&[embed::MAP_POPULATION]).unwrap();
+        let rows: Vec<u32> = input.rows.iter().filter(|r| r.0 == i && r.1 % 4 == 2).map(|r| r.1).collect();
+        assert!(rows.len() > 80 && rows.len() < 170, "about a quarter of the 500 pooled events: {}", rows.len());
+        let n = app.session.add_index_populations(i, map, vec![("Treg".to_string(), rows)]).unwrap()[0];
+        if i == 0 {
+            node0 = n;
+        }
+    }
+    // only a population under the map can be carried over
+    app.carry_open(0, GateTree::ROOT);
+    assert!(app.dlg.carry.is_none() && app.status.contains("gated on the map"), "{}", app.status);
+
+    app.carry_open(0, node0);
+    let dlg = app.dlg.carry.clone().expect("learned");
+    assert_eq!(dlg.training.samples, 2, "both samples' pooled events are used");
+    assert_eq!(dlg.training.n_in + dlg.training.n_out, 1000);
+    settle(&mut app, &ctx);
+
+    // the gating path is short, readable, and starts with the marker only this population has
+    assert!(!dlg.path.is_empty() && dlg.path.len() <= 4);
+    assert_eq!((dlg.path[0].channel.as_str(), dlg.path[0].above), ("FoxP3-A", true), "{:?}", dlg.path);
+    let last = dlg.path.last().unwrap().quality;
+    assert!(last.recall > 0.95 && last.precision > 0.95, "{last:?}");
+    assert!(dlg.path[0].threshold > 100.0 && dlg.path[0].threshold < 900.0, "between the negative (~40) and positive (~940) FoxP3 levels: {}", dlg.path[0].threshold);
+
+    // classifier: every event of both files is placed; checked against the truth of ALL events, pooled or not
+    app.carry_with_classifier();
+    assert!(app.status.contains("'Treg (all events)' added to 2 sample(s)") && !app.status.contains("weak"), "{}", app.status);
+    for i in 0..2 {
+        let n = app.session.tree(i).find(&["Treg (all events)"]).expect("next to the map events, under All Events");
+        let rows = app.session.evaluation(i).unwrap().masks.get(n).and_then(|m| m.as_ref()).unwrap().indices();
+        let right = rows.iter().filter(|&&r| r % 4 == 2).count();
+        assert!(right >= 365 && rows.len() - right <= 10, "sample {i}: {right} of the 375 Treg found, {} wrong", rows.len() - right);
+    }
+
+    // gating path: ordinary nested gates on every sample, ending in "Treg (gated)"
+    app.carry_with_gates();
+    assert!(app.status.starts_with("Drew"), "{}", app.status);
+    for i in 0..2 {
+        let t = app.session.tree(i);
+        let leaf = (0..2000).filter(|&k| t.is_alive(k)).find(|&k| t.name(k).ok() == Some("Treg (gated)")).expect("the last gate of the path");
+        let g = app.session.gate_of(i, leaf).unwrap();
+        assert!(matches!(g.kind, GateKind::Interval), "an ordinary gate");
+        assert_eq!(t.path(leaf).unwrap()[0], if dlg.path.len() > 1 { "FoxP3+" } else { "Treg (gated)" }, "the path hangs under All Events");
+        let c = app.session.count(i, leaf);
+        assert!((c as i64 - 375).abs() <= 20, "sample {i}: {c} events, 375 are Treg");
+    }
+    // the methods text states the map's markers, and the window draws with its result
+    settle(&mut app, &ctx);
+    assert!(app.dlg.carry.as_ref().unwrap().result.as_ref().unwrap().starts_with("Drew"));
+}

@@ -224,6 +224,11 @@ pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached,
         return Err("none of the pooled samples is loaded any more".into());
     }
     let r = &input.request;
+    session.map_features = r.features.clone();
+    session.map_cofactor = match r.transform {
+        FeatureTransform::None => 0.0,
+        FeatureTransform::Arcsinh(c) => c,
+    };
     session.map_info = Some(format!(
         "{} of {n} events pooled from {done} sample(s) ({} per sample{}), on {} ({}), seed {}",
         r.method.label(),

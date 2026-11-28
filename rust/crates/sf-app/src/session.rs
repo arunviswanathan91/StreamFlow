@@ -99,6 +99,9 @@ pub struct Session {
     markers: BTreeMap<String, String>,
     /// How the pooled map attached to the samples (`Map-1` / `Map-2`) was made, in words, for the methods text.
     pub map_info: Option<String>,
+    /// The markers the map was made from and their arcsinh cofactor (0 = none): what a map population is learned on.
+    pub map_features: Vec<String>,
+    pub map_cofactor: f64,
     /// Sample groups (besides the built-in All Samples) and the gates they own.
     pub groups: Vec<Group>,
     pub applied: Vec<Applied>,
@@ -116,7 +119,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), markers: BTreeMap::new(), map_info: None, groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
+        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), markers: BTreeMap::new(), map_info: None, map_features: vec![], map_cofactor: 150.0, groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
     }
 
     pub fn samples(&self) -> &[LoadedSample] {
@@ -937,7 +940,7 @@ impl Session {
         for (ch, m) in &self.markers {
             markers = markers.with(ch, Json::Str(m.clone()));
         }
-        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("markers", markers).with("maps", maps).with("map_info", self.map_info.clone().map_or(Json::Null, Json::Str)).with("groups", self.groups_to_json())
+        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("markers", markers).with("maps", maps).with("map_info", self.map_info.clone().map_or(Json::Null, Json::Str)).with("map_features", Json::Arr(self.map_features.iter().map(|f| Json::Str(f.clone())).collect())).with("map_cofactor", Json::num(self.map_cofactor)).with("groups", self.groups_to_json())
     }
 
     /// Replace the gating trees of the currently loaded samples with those in a saved workspace (matched by
@@ -963,6 +966,8 @@ impl Session {
         }
         // the pooled map goes back on first, so the gates drawn on Map-1 / Map-2 find their channels
         self.map_info = doc.get("map_info").and_then(Json::as_str).map(str::to_string);
+        self.map_features = doc.get("map_features").and_then(Json::as_arr).map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        self.map_cofactor = doc.get("map_cofactor").and_then(Json::as_f64).unwrap_or(150.0);
         for i in 0..self.samples.len() {
             self.samples[i].clear_map();
         }

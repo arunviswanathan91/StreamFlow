@@ -2,6 +2,7 @@
 //! plus the egui front end in `ui`.
 
 pub mod axis;
+pub mod carry;
 pub mod comp_auto;
 pub mod comp_wizard;
 pub mod qc_clean;
