@@ -65,6 +65,10 @@ pub struct WizState {
     /// The control whose scatter gate is shown.
     pub sel: Option<usize>,
     pub maximized: bool,
+    /// Results page: the per-control table is shown (it can be folded away to give the matrix the room).
+    pub table_open: bool,
+    /// Results page: the matrix sits to the right of the table when the window is wide enough.
+    pub table_side: bool,
     resize: bool,
     after_calc: bool,
     cache: HashMap<usize, Cached>,
@@ -100,7 +104,7 @@ pub enum Page {
 
 impl Default for WizState {
     fn default() -> Self {
-        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary, strength: 1.0, page: Page::Setup, sel: None, maximized: false, resize: false, after_calc: false, cache: HashMap::new(), ba: BaState::default() }
+        WizState { open: false, rows: vec![], opt: Options::default(), clean_on: true, clean_frac: 0.12, unstained: None, result: None, inspect: None, show: Tab::Summary, strength: 1.0, page: Page::Setup, sel: None, maximized: false, table_open: true, table_side: true, resize: false, after_calc: false, cache: HashMap::new(), ba: BaState::default() }
     }
 }
 
@@ -634,9 +638,41 @@ impl App {
                 ui.add_space(4.0);
                 match wiz.show {
                     Tab::Summary => {
-                        result_summary(ui, r, &self.session);
-                        ui.add_space(6.0);
-                        matrix_table(ui, "wiz_matrix", &r.matrix.detectors, &r.matrix.spill, 1.0, [60, 150, 90], "The spillover matrix: row = the stained control's detector, column = the detector that sees its light (1 on the diagonal).");
+                        const HELP: &str = "The spillover matrix: row = the stained control's detector, column = the detector that sees its light (1 on the diagonal).";
+                        ui.horizontal_wrapped(|ui| {
+                            result_headline(ui, r);
+                            ui.separator();
+                            if ui.selectable_label(wiz.table_open, if wiz.table_open { "▾ Controls table" } else { "▸ Controls table" }).on_hover_text("Show or hide the per-control table. Hidden, the matrix gets the whole page.").clicked() {
+                                wiz.table_open = !wiz.table_open;
+                            }
+                            if wiz.table_open {
+                                ui.checkbox(&mut wiz.table_side, "Matrix beside the table").on_hover_text("Off: the matrix goes under the table. On: it sits to the right when the window is wide enough.");
+                            }
+                        });
+                        for n in &r.notes {
+                            theme::caption(ui, n.clone());
+                        }
+                        ui.add_space(4.0);
+                        let wide = ui.available_width() >= 1000.0;
+                        if !wiz.table_open {
+                            matrix_table(ui, "wiz_matrix", &r.matrix.detectors, &r.matrix.spill, 1.0, [60, 150, 90], HELP);
+                        } else if wiz.table_side && wide {
+                            // the table keeps a fixed share on the left and scrolls on its own; the matrix has the rest
+                            let (h, table_w) = (ui.available_height().max(240.0), (ui.available_width() * 0.42).clamp(420.0, 640.0));
+                            ui.horizontal_top(|ui| {
+                                ui.allocate_ui_with_layout(Vec2::new(table_w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    egui::ScrollArea::both().id_salt("wiz_sum_scroll").auto_shrink([false, false]).max_height(h).show(ui, |ui| controls_table(ui, r, &self.session));
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| matrix_table(ui, "wiz_matrix", &r.matrix.detectors, &r.matrix.spill, 1.0, [60, 150, 90], HELP));
+                            });
+                        } else {
+                            // stacked: the table never takes more than a third of the page, so the matrix stays in view
+                            let cap = (ui.available_height() * 0.34).max(110.0);
+                            egui::ScrollArea::both().id_salt("wiz_sum_scroll").auto_shrink([false, true]).max_height(cap).show(ui, |ui| controls_table(ui, r, &self.session));
+                            ui.add_space(6.0);
+                            matrix_table(ui, "wiz_matrix", &r.matrix.detectors, &r.matrix.spill, 1.0, [60, 150, 90], HELP);
+                        }
                     }
                     Tab::Before => {
                         let sel_det = wiz.sel.and_then(|i| wiz.rows.get(i)).and_then(|r| r.detector.clone());
@@ -1047,17 +1083,20 @@ pub(super) fn scatter_editor(ui: &mut egui::Ui, pts: &[(f32, f32, bool)], range:
     p.text(Pos2::new(plot.center().x, rect.bottom() - 2.0), Align2::CENTER_BOTTOM, format!("{xl}  \u{2194}   {yl} \u{2195}"), FontId::proportional(9.5), Color32::from_gray(80));
 }
 
-fn result_summary(ui: &mut egui::Ui, r: &WizardResult, session: &crate::session::Session) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!("{} controls", r.reports.len()));
+/// The one-line verdict on a calculated matrix.
+fn result_headline(ui: &mut egui::Ui, r: &WizardResult) {
+    ui.label(format!("{} controls", r.reports.len()));
+    ui.label("·");
+    let c = r.condition;
+    ui.label(RichText::new(format!("condition {}", if c.is_finite() { format!("{c:.1}") } else { "∞".into() })).color(if !c.is_finite() || c > 30.0 { theme::GATE_RED } else if c > 10.0 { theme::WARN } else { theme::GOOD }));
+    if r.rounds > 0 {
         ui.label("·");
-        let c = r.condition;
-        ui.label(RichText::new(format!("condition {}", if c.is_finite() { format!("{c:.1}") } else { "∞".into() })).color(if !c.is_finite() || c > 30.0 { theme::GATE_RED } else if c > 10.0 { theme::WARN } else { theme::GOOD }));
-        if r.rounds > 0 {
-            ui.label("·");
-            ui.label(format!("refined in {} round(s), largest leftover slope {:.4}", r.rounds, r.residual_slope));
-        }
-    });
+        ui.label(format!("refined in {} round(s), largest leftover slope {:.4}", r.rounds, r.residual_slope));
+    }
+}
+
+/// One row per control: what was kept, where it was split, how well it separates.
+fn controls_table(ui: &mut egui::Ui, r: &WizardResult, session: &crate::session::Session) {
     egui::Grid::new("wiz_sum").spacing([14.0, 3.0]).striped(true).show(ui, |ui| {
         for h in ["Control", "Detector", "Events kept", "Negative", "Positive", "Stain index", "Warnings"] {
             ui.label(RichText::new(h).size(11.0).color(theme::MUTED));
@@ -1075,33 +1114,106 @@ fn result_summary(ui: &mut egui::Ui, r: &WizardResult, session: &crate::session:
             ui.end_row();
         }
     });
-    for n in &r.notes {
-        theme::caption(ui, n.clone());
+}
+
+/// How a matrix of `k` detectors is laid out in the room there is: `(cell width, cell height, value font size)`.
+/// Cells shrink as detectors are added, so a 30-colour panel still fits a normal window; `zoom` is the user's
+/// own factor on top.
+pub(super) fn matrix_cell(k: usize, avail_w: f32, label_w: f32, zoom: f32) -> (f32, f32, f32) {
+    let fit = (avail_w - label_w - 16.0) / k.max(1) as f32;
+    let w = (fit.clamp(26.0, 72.0) * zoom).clamp(16.0, 160.0);
+    let h = (w * 0.5).clamp(15.0, 40.0);
+    (w, h, (h * 0.52).clamp(8.0, 15.0))
+}
+
+/// The text of one cell: two decimals, without the leading zero once the cell is too narrow for it.
+pub(super) fn matrix_value(v: f64, cell_w: f32) -> String {
+    if v == 0.0 || cell_w < 22.0 {
+        return String::new(); // too small to read: the colour and the hover text carry it
+    }
+    let t = format!("{v:.2}");
+    if cell_w >= 36.0 {
+        t
+    } else if t == "1.00" {
+        "1".into()
+    } else {
+        t.replacen("0.", ".", 1)
     }
 }
 
-/// A heat-map table. The cells grow with the room there is, so the figure is as large as the window allows.
+/// A heat-map table drawn to fit: compact cells, column names turned on their side when they would not fit above
+/// a cell, the row and column under the pointer picked out, and the exact value on hover. − / ＋ resize the cells.
 pub(super) fn matrix_table(ui: &mut egui::Ui, id: &str, det: &[String], m: &[f64], scale: f64, col: [u8; 3], help: &str) {
-    theme::caption(ui, help);
-    let k = det.len().max(1);
-    let cell_w = ((ui.available_width() - 70.0) / k as f32 - 3.0).clamp(46.0, 120.0);
-    let cell_h = (cell_w * 0.5).clamp(20.0, 44.0);
-    let font = (cell_h * 0.5).clamp(10.5, 16.0);
-    egui::ScrollArea::both().id_salt(id).auto_shrink([false, true]).max_height(ui.available_height().max(240.0)).show(ui, |ui| {
-        egui::Grid::new(id).spacing([3.0, 3.0]).min_col_width(cell_w).show(ui, |ui| {
-            ui.label("");
-            for d in det {
-                ui.label(RichText::new(d.trim_end_matches("-A")).size(font - 1.0).color(theme::MUTED));
-            }
-            ui.end_row();
-            for i in 0..det.len() {
-                ui.label(RichText::new(det[i].trim_end_matches("-A")).size(font - 1.0).color(theme::MUTED));
-                for j in 0..det.len() {
-                    let v = m[i * det.len() + j];
-                    egui::Frame::none().fill(heat(v, scale, col)).rounding(3.0).show(ui, |ui| ui.add_sized([cell_w, cell_h], egui::Label::new(RichText::new(if v == 0.0 { "".to_string() } else { format!("{v:.2}") }).monospace().size(font))));
-                }
-                ui.end_row();
-            }
+    let k = det.len();
+    if k == 0 || m.len() < k * k {
+        return;
+    }
+    let zoom_id = egui::Id::new((id, "zoom"));
+    let mut zoom: f32 = ui.data(|d| d.get_temp(zoom_id)).unwrap_or(1.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.small_button("−").on_hover_text("Smaller cells").clicked() {
+            zoom = (zoom / 1.2).max(0.4);
+        }
+        if ui.small_button("＋").on_hover_text("Larger cells").clicked() {
+            zoom = (zoom * 1.2).min(3.0);
+        }
+        if ui.small_button("Fit").on_hover_text("Cell size chosen for the window").clicked() {
+            zoom = 1.0;
+        }
+        theme::caption(ui, help);
+    });
+    ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
+    let names: Vec<&str> = det.iter().map(|d| d.trim_end_matches("-A")).collect();
+    let width_of = |ui: &egui::Ui, text: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(text.to_string(), FontId::proportional(size), Color32::WHITE).size().x);
+    let (avail_w, avail_h) = (ui.available_width(), ui.available_height().max(200.0));
+    // the row names decide the left margin; size them first with a provisional cell
+    let (_, _, font0) = matrix_cell(k, avail_w, 120.0, zoom);
+    let lab = font0.clamp(9.5, 12.5);
+    let longest = names.iter().map(|n| width_of(ui, n, lab)).fold(0.0_f32, f32::max).min(170.0);
+    let label_w = longest + 12.0;
+    let (cw, ch, font) = matrix_cell(k, avail_w, label_w, zoom);
+    let turned = longest + 6.0 > cw; // names do not fit above a cell: write them bottom-to-top
+    let header_h = if turned { longest + 10.0 } else { lab + 10.0 };
+    let gap = if cw < 30.0 { 0.5 } else { 1.5 };
+    let size = Vec2::new(label_w + k as f32 * cw, header_h + k as f32 * ch);
+    egui::ScrollArea::both().id_salt(id).auto_shrink([false, true]).max_height(avail_h).show(ui, |ui| {
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let p = ui.painter_at(rect);
+        let origin = rect.min + Vec2::new(label_w, header_h);
+        let hover = resp.hover_pos().and_then(|q| {
+            let (c, r) = (((q.x - origin.x) / cw).floor(), ((q.y - origin.y) / ch).floor());
+            (c >= 0.0 && r >= 0.0 && (c as usize) < k && (r as usize) < k).then_some((r as usize, c as usize))
         });
+        for (j, name) in names.iter().enumerate() {
+            let color = if hover.map(|h| h.1) == Some(j) { theme::TEXT } else { theme::MUTED };
+            let cx = origin.x + (j as f32 + 0.5) * cw;
+            if turned {
+                let galley = p.layout_no_wrap(name.to_string(), FontId::proportional(lab), color);
+                let pos = egui::pos2(cx - galley.size().y / 2.0, origin.y - 5.0);
+                p.add(egui::epaint::TextShape::new(pos, galley, color).with_angle(-std::f32::consts::FRAC_PI_2));
+            } else {
+                p.text(egui::pos2(cx, origin.y - 5.0), egui::Align2::CENTER_BOTTOM, name, FontId::proportional(lab), color);
+            }
+        }
+        for i in 0..k {
+            let cy = origin.y + (i as f32 + 0.5) * ch;
+            let color = if hover.map(|h| h.0) == Some(i) { theme::TEXT } else { theme::MUTED };
+            p.text(egui::pos2(origin.x - 6.0, cy), egui::Align2::RIGHT_CENTER, names[i], FontId::proportional(lab), color);
+            for j in 0..k {
+                let v = m[i * k + j];
+                let cell = Rect::from_min_size(origin + Vec2::new(j as f32 * cw, i as f32 * ch), Vec2::new(cw, ch)).shrink(gap);
+                p.rect_filled(cell, 2.0, heat(v, scale, col));
+                let text = matrix_value(v, cw);
+                if !text.is_empty() {
+                    p.text(cell.center(), egui::Align2::CENTER_CENTER, text, FontId::monospace(font), theme::TEXT);
+                }
+                if hover == Some((i, j)) {
+                    p.rect_stroke(cell, 2.0, Stroke::new(1.5_f32, theme::ACCENT));
+                }
+            }
+        }
+        if let Some((i, j)) = hover {
+            resp.on_hover_text_at_pointer(format!("{}  →  {}:  {:.4}", names[i], names[j], m[i * k + j]));
+        }
     });
 }

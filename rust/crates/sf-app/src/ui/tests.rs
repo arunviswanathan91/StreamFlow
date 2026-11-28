@@ -2254,3 +2254,40 @@ fn characters_the_export_font_lacks_are_replaced_like_the_pdf_does() {
     assert_eq!(crate::figure::ascii_fallback('A'), None);
     assert_eq!(crate::figure::ascii_fallback('é'), None, "a character WinAnsi has is kept");
 }
+
+#[test]
+fn a_thirty_colour_matrix_fits_the_window_and_small_cells_stay_readable() {
+    use super::comp_wizard_view::{matrix_cell, matrix_table, matrix_value};
+    // 6 colours: comfortable but capped (cells used to grow to 120 x 44 and push the table off the page)
+    let (w6, h6, _) = matrix_cell(6, 1400.0, 120.0, 1.0);
+    assert!(w6 <= 72.0 && h6 <= 40.0, "{w6} x {h6}");
+    // 30 colours in a 1400-wide page: every column is in view without scrolling, and the text is still legible
+    let (w30, h30, f30) = matrix_cell(30, 1400.0, 120.0, 1.0);
+    assert!(120.0 + 30.0 * w30 <= 1400.0, "30 columns of {w30} fit");
+    assert!(w30 >= 36.0 && f30 >= 8.0 && 30.0 * h30 <= 700.0, "{w30} x {h30}, font {f30}");
+    // the user's own factor shrinks or grows them
+    assert!(matrix_cell(30, 1400.0, 120.0, 0.5).0 < w30 && matrix_cell(30, 1400.0, 120.0, 2.0).0 > w30);
+    // values lose the leading zero before they would overflow a narrow cell, and vanish only when unreadable
+    assert_eq!(matrix_value(0.19, 60.0), "0.19");
+    assert_eq!(matrix_value(0.19, 30.0), ".19");
+    assert_eq!(matrix_value(1.0, 30.0), "1");
+    assert_eq!(matrix_value(0.0, 60.0), "");
+    assert_eq!(matrix_value(0.31, 18.0), "");
+
+    // drawn for real, small and large: the whole matrix is laid out without a panic and takes the room computed
+    let ctx = egui::Context::default();
+    for k in [1usize, 6, 30] {
+        let det: Vec<String> = (0..k).map(|i| format!("Alexa Fluor {}-A", 400 + 10 * i)).collect();
+        let m: Vec<f64> = (0..k * k).map(|i| if i / k == i % k { 1.0 } else { 0.01 * ((i % 7) as f64) }).collect();
+        let input = egui::RawInput { screen_rect: Some(screen()), ..Default::default() };
+        let mut used = egui::Vec2::ZERO;
+        let _ = ctx.run(input, |c| {
+            egui::CentralPanel::default().show(c, |ui| {
+                let before = ui.cursor().min;
+                matrix_table(ui, "t_matrix", &det, &m, 1.0, [60, 150, 90], "help");
+                used = ui.cursor().min - before;
+            });
+        });
+        assert!(used.y > 30.0, "{k} detectors drew something ({used:?})");
+    }
+}
