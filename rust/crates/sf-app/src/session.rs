@@ -767,6 +767,41 @@ impl Session {
         Ok(())
     }
 
+    /// Turn every geometric gate drawn on channels starting with `prefix` into the fixed set of events it holds
+    /// now (one undoable step per sample; names, children and places in the tree are kept). Used before a map's
+    /// coordinates are replaced: a rectangle drawn on the old map would otherwise silently select other cells on
+    /// the new one. Group ownership of such gates ends, since their shape no longer means anything.
+    pub fn freeze_gates_on(&mut self, sample: usize, prefix: &str) -> Result<usize, String> {
+        let on_map = |g: &sf_gating::Gate| !matches!(g.kind, GateKind::Indexed(_)) && (g.x_chan.starts_with(prefix) || g.y_chan.as_deref().map_or(false, |y| y.starts_with(prefix)));
+        let mut nodes: Vec<NodeId> = Vec::new();
+        {
+            let t = &self.states[sample].tree;
+            let mut stack = vec![GateTree::ROOT];
+            while let Some(n) = stack.pop() {
+                if let Ok(kids) = t.children(n) {
+                    stack.extend(kids.iter().copied());
+                }
+                if matches!(t.kind(n), Ok(NodeKind::Gate(g)) if on_map(g)) {
+                    nodes.push(n);
+                }
+            }
+        }
+        if nodes.is_empty() {
+            return Ok(0);
+        }
+        let frozen: Vec<(NodeId, Vec<u32>)> = {
+            let ev = self.evaluation(sample)?;
+            nodes.iter().map(|&n| (n, ev.masks.get(n).and_then(|m| m.as_ref()).map(|m| m.indices().into_iter().map(|r| r as u32).collect()).unwrap_or_default())).collect()
+        };
+        self.snapshot(sample);
+        for (n, rows) in frozen {
+            self.states[sample].tree.reset_gate(n, sf_gating::Gate::indexed(rows)).map_err(|e| e.to_string())?;
+        }
+        self.applied.retain(|a| !on_map(&a.gate));
+        self.touch(sample);
+        Ok(nodes.len())
+    }
+
     /// Attach a pooled map's coordinates to a sample as `Map-1` / `Map-2` (see [`LoadedSample::set_map`]).
     pub fn set_map(&mut self, sample: usize, x: Vec<f32>, y: Vec<f32>, range: f64) -> Result<(), String> {
         self.samples[sample].set_map(x, y, range)?;

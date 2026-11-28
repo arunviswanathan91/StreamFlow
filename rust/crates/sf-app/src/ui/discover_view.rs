@@ -728,7 +728,7 @@ impl App {
                     g.refit = true;
                 }
                 self.module = super::Module::Workstation;
-                self.status = format!("The map is now a plot: {} events of {} sample(s) under '{}', on the channels Map-1 / Map-2. Gates drawn here are ordinary gates and go to every sample of the draw target.", done.events, done.samples, embed::MAP_POPULATION);
+                self.status = format!("The map is now a plot: {} events of {} sample(s) under '{}', on the channels Map-1 / Map-2. Gates drawn here are ordinary gates and go to every sample of the draw target.{}", done.events, done.samples, embed::MAP_POPULATION, if done.frozen > 0 { format!(" {} gate(s) drawn on the earlier map were kept as fixed sets of events, because positions on a new map mean something else.", done.frozen) } else { String::new() });
             }
             Err(e) => self.status = e,
         }

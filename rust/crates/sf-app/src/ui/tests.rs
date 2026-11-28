@@ -2757,3 +2757,55 @@ fn a_map_population_is_carried_to_every_event_by_a_classifier_and_by_a_readable_
     settle(&mut app, &ctx);
     assert!(app.dlg.carry.as_ref().unwrap().result.as_ref().unwrap().starts_with("Drew"));
 }
+
+#[test]
+fn embedding_inside_a_map_population_keeps_the_old_maps_gates_as_fixed_event_sets() {
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    app.set_module(Module::DimReduction);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 600;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the embedding", |a| a.disc.emb.is_some());
+    app.disc_open_map();
+    let Tab::Graph(w) = app.ws.tab else { panic!() };
+    settle(&mut app, &ctx);
+    let r = app.ws.graphs[&w].range.unwrap();
+    let left = app.session.commit_shape(w, &Shape::Rect { x0: r.x0, x1: (r.x0 + r.x1) / 2.0, y0: r.y0, y1: r.y1 }, "Left half").unwrap();
+    let rows_of = |app: &mut App, i: usize| -> Vec<usize> {
+        let n = app.session.tree(i).find(&[embed::MAP_POPULATION, "Left half"]).unwrap();
+        app.session.evaluation(i).unwrap().masks.get(n).and_then(|m| m.as_ref()).unwrap().indices()
+    };
+    let before: Vec<Vec<usize>> = (0..2).map(|i| rows_of(&mut app, i)).collect();
+    assert!(before[0].len() > 100 && before[1].len() > 100, "{} / {}", before[0].len(), before[1].len());
+    assert!(matches!(gate_of(&app, left).kind, GateKind::Rectangle));
+
+    // "Embed again inside this population": Dim. Reduction is restricted to it, on the samples that have it
+    app.embed_inside(0, left);
+    assert_eq!(app.module, Module::DimReduction);
+    assert_eq!(app.disc.restrict, vec![embed::MAP_POPULATION.to_string(), "Left half".to_string()]);
+    assert_eq!(app.disc.sel, vec![true, true]);
+    app.disc.per_sample = 100;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the inner embedding", |a| a.disc.emb.as_ref().map_or(false, |e| e.input.n() == 200));
+    app.disc_open_map();
+    assert!(app.status.contains("2 gate(s) drawn on the earlier map were kept as fixed sets of events"), "{}", app.status);
+
+    // the old gate holds exactly the events it held, although Map-1 / Map-2 now mean the new map
+    for i in 0..2 {
+        assert_eq!(rows_of(&mut app, i), before[i], "sample {i}");
+        let n = app.session.tree(i).find(&[embed::MAP_POPULATION, "Left half"]).unwrap();
+        assert!(matches!(app.session.gate_of(i, n).unwrap().kind, GateKind::Indexed(_)), "no longer a shape on the map");
+        // the new map lives inside it
+        let inner = app.session.tree(i).find(&[embed::MAP_POPULATION, "Left half", embed::MAP_POPULATION]).expect("the new map's events");
+        assert_eq!(app.session.count(i, inner), 100);
+        let s = app.session.sample(i);
+        let (c, d) = (s.channel_index("Map-1").unwrap(), s.channels.len());
+        assert_eq!((0..s.n_events).filter(|&r| s.events[r * d + c].is_finite()).count(), 100, "only the new map's events have a position");
+    }
+    // one undo step per sample brings the shape back
+    assert!(app.session.can_undo(0));
+    // opening the same map again changes nothing and freezes nothing
+    app.disc_open_map();
+    assert!(!app.status.contains("kept as fixed sets"), "{}", app.status);
+}

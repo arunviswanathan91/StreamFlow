@@ -397,6 +397,22 @@ impl App {
 
     // ---- the population tree's menu -----------------------------------------------------------------
 
+    /// Set Dim. Reduction up to map the inside of a population: restricted to it, on the samples that have it.
+    pub fn embed_inside(&mut self, si: usize, node: NodeId) {
+        let Ok(path) = self.session.tree(si).path(node) else { return };
+        if path.is_empty() {
+            return;
+        }
+        let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let n = self.session.samples().len();
+        self.disc.sel = (0..n).map(|i| self.session.tree(i).find(&refs).is_some()).collect();
+        let have = self.disc.sel.iter().filter(|&&s| s).count();
+        let smallest = (0..n).filter(|&i| self.disc.sel[i]).filter_map(|i| self.session.tree(i).find(&refs).map(|k| self.session.count(i, k))).min().unwrap_or(0);
+        self.disc.restrict = path.clone();
+        self.module = Module::DimReduction;
+        self.status = format!("Dim. Reduction is set to map the inside of '{}' in the {have} sample(s) that have it (the smallest has {smallest} events there). Choose the markers and press Run embedding.", path.join(" ▸ "));
+    }
+
     /// Learn what a map population looks like on the map's markers and open the two ways of carrying it over.
     pub fn carry_open(&mut self, si: usize, node: NodeId) {
         let features = if self.session.map_features.len() >= 2 { self.session.map_features.clone() } else { super::discover_view::default_features(self.session.sample(si)) };
@@ -594,6 +610,10 @@ impl App {
         if ui.add_enabled(on_map, egui::Button::new("Carry to all events…")).on_hover_text("A population gated on the map holds only the pooled events. This reaches every event of every sample: with a classifier, or with a short gating path you can read and redraw.").clicked() {
             ui.close_menu();
             self.carry_open(si, node);
+        }
+        if ui.add_enabled(node != GateTree::ROOT, egui::Button::new("Embed again inside this population…")).on_hover_text("Open Dim. Reduction restricted to this population, to look for structure inside it. Gates on the current map are kept as fixed sets of events when the new map replaces it.").clicked() {
+            ui.close_menu();
+            self.embed_inside(si, node);
         }
         if ui.button("Cell cycle analysis…").clicked() {
             ui.close_menu();

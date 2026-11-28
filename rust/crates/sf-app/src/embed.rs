@@ -186,6 +186,8 @@ pub struct MapAttached {
     pub events: usize,
     /// `(sample, population)` of the first sample's map events, to open a plot on.
     pub first: Option<(usize, NodeId)>,
+    /// Gates drawn on an EARLIER map that were turned into fixed event sets because the positions changed.
+    pub frozen: usize,
 }
 
 /// Make a pooled map part of the gating system: every pooled sample gets the channels `Map-1` / `Map-2` (its
@@ -200,7 +202,8 @@ pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached,
         return Err("the map does not match its events".into());
     }
     let range = emb.xy.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
-    let (mut done, mut first) = (0, None);
+    // the new positions of every pooled sample
+    let mut plan: Vec<(usize, NodeId, Vec<(usize, u32)>, Vec<f32>, Vec<f32>)> = Vec::new();
     for &si in &input.request.samples {
         let rows: Vec<(usize, u32)> = input.rows.iter().enumerate().filter(|(_, r)| r.0 == si).map(|(i, r)| (i, r.1)).collect();
         if rows.is_empty() {
@@ -213,6 +216,33 @@ pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached,
             x[r as usize] = emb.xy[2 * i] as f32;
             y[r as usize] = emb.xy[2 * i + 1] as f32;
         }
+        plan.push((si, parent, rows, x, y));
+    }
+    // Is this the map the samples already carry? If any position differs (another seed, other markers, a map of
+    // another population), gates drawn on the old map must not move onto the new one: freeze them first.
+    let same = |s: &crate::sample::LoadedSample, x: &[f32], y: &[f32]| match (s.channel_index("Map-1"), s.channel_index("Map-2")) {
+        (Some(cx), Some(cy)) => {
+            let d = s.channels.len();
+            (0..s.n_events).all(|r| s.events[r * d + cx].to_bits() == x[r].to_bits() && s.events[r * d + cy].to_bits() == y[r].to_bits())
+        }
+        _ => true, // no map yet: nothing to protect
+    };
+    let unchanged = plan.iter().all(|(si, _, _, x, y)| same(session.sample(*si), x, y)) && (0..session.samples().len()).all(|s| !session.sample(s).has_map() || plan.iter().any(|p| p.0 == s));
+    let mut frozen = 0;
+    if !unchanged {
+        for s in 0..session.samples().len() {
+            if session.sample(s).has_map() {
+                frozen += session.freeze_gates_on(s, crate::sample::MAP_PREFIX)?;
+                if !plan.iter().any(|p| p.0 == s) {
+                    session.clear_map(s); // this sample is not part of the new map
+                }
+            }
+        }
+    }
+    let (mut done, mut first) = (0, None);
+    for (si, _, rows, x, y) in plan {
+        // the population may have moved in the tree arena while gates were frozen: look it up again
+        let Some(parent) = restrict_node(session, si, &input.request.restrict) else { continue };
         session.set_map(si, x, y, range)?;
         let node = session.set_index_population(si, parent, MAP_POPULATION, rows.iter().map(|r| r.1).collect())?;
         if first.is_none() {
@@ -241,7 +271,7 @@ pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached,
         },
         r.seed
     ));
-    Ok(MapAttached { samples: done, events: n, first })
+    Ok(MapAttached { samples: done, events: n, first, frozen })
 }
 
 // ---- clustering -------------------------------------------------------------------------------------
