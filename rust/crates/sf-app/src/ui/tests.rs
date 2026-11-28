@@ -2397,3 +2397,88 @@ fn the_analysis_log_records_every_finished_action_and_writes_a_methods_text() {
     app.module = Module::AnalysisLog;
     settle(&mut app, &ctx);
 }
+
+#[test]
+fn analysis_results_become_ordinary_gates_on_every_sample_with_a_live_table() {
+    use super::analysis_view::Kind;
+    let ctx = egui::Context::default();
+    let mut app = two_sample_app();
+    let n = app.session.samples().len();
+    assert!(n >= 2);
+    app.ana.sample = 0;
+    app.ana.annexin_channel = "CD3-A".into();
+    app.ana.pi_channel = "CD4-A".into();
+    app.run_apoptosis();
+    assert!(app.ana.apop.is_some(), "{}", app.status);
+    assert!(app.ana_gate_table(Kind::Apoptosis).iter().all(|(_, r)| r.iter().all(|v| v.is_none())), "no gates yet");
+
+    // one press: a quadrant gate named for the four states, in EVERY sample
+    let msg = app.ana_make_gates(Kind::Apoptosis).unwrap();
+    assert!(msg.starts_with("Made 4 gate(s)"), "{msg}");
+    for i in 0..n {
+        for name in ["Live", "Early apoptotic", "Late apoptotic", "Necrotic"] {
+            assert!(app.session.tree(i).find(&[name]).is_some(), "sample {i} has {name}");
+        }
+    }
+    let table = app.ana_gate_table(Kind::Apoptosis);
+    for (i, row) in &table {
+        let sum: f64 = row.iter().map(|v| v.unwrap()).sum();
+        assert!((sum - 100.0).abs() < 1e-6, "sample {i}: the four states partition the population ({sum})");
+    }
+    // the gate's own counts in the analysed sample agree with the analysis
+    let q = app.ana.apop.as_ref().unwrap().1.quadrants;
+    let row0 = &table[0].1;
+    for (got, want) in row0.iter().zip([q.live, q.early, q.late, q.necrotic]) {
+        assert!((got.unwrap() - want).abs() < 0.5, "{got:?} vs {want}");
+    }
+
+    // it is an ordinary gate: moving the crosshair in one sample moves it in all (synchronised) and the table follows
+    app.session.all_synced = true;
+    let live = app.session.tree(0).find(&["Live"]).unwrap();
+    let g = match app.session.tree(0).kind(live).unwrap() {
+        NodeKind::Gate(g) => g.clone(),
+        k => panic!("{k:?}"),
+    };
+    app.session.move_quadrants(0, live, g.xs[0] + 1.0, g.ys[0] + 1.0).unwrap();
+    let moved = app.ana_gate_table(Kind::Apoptosis);
+    assert!(moved[0].1[0].unwrap() > table[0].1[0].unwrap(), "more events are below both lines now");
+    let other = app.session.gate_of(1, app.session.tree(1).find(&["Live"]).unwrap()).unwrap();
+    assert_eq!((other.xs[0], other.ys[0]), (g.xs[0] + 1.0, g.ys[0] + 1.0), "the other sample's crosshair followed");
+    assert!(moved[1].1[0].unwrap() >= table[1].1[0].unwrap());
+
+    // running again updates the same gates instead of stacking new ones
+    let msg = app.ana_make_gates(Kind::Apoptosis).unwrap();
+    assert!(msg.starts_with("Updated 4 gate(s)"), "{msg}");
+    assert_eq!(app.session.tree(0).children(GateTree::ROOT).unwrap().len(), 4);
+    assert!((app.ana_gate_table(Kind::Apoptosis)[0].1[0].unwrap() - table[0].1[0].unwrap()).abs() < 1e-9, "back at the analysis' thresholds");
+
+    // the row's Open shows that sample on the gate's axes in the Workstation, and the screen draws
+    app.ana_open_gates(Kind::Apoptosis, 1).unwrap();
+    let w = app.session.windows.iter().find(|w| w.sample == 1).unwrap();
+    assert_eq!((w.x_chan.as_str(), w.y_chan.as_str()), ("CD3-A", "CD4-A"));
+    app.module = Module::Apoptosis;
+    settle(&mut app, &ctx);
+
+    // cell cycle: three interval gates at the fitted boundaries, on a histogram of the DNA channel
+    let mut rng = Rng::new(4);
+    let mut normal = move || {
+        let (u1, u2) = (rng.next_f64().max(1e-300), rng.next_f64());
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    };
+    let dna: Vec<f64> = (0..20_000).map(|i| match i % 20 { 0..=11 => 50_000.0 + 2_500.0 * normal(), 12..=14 => 50_000.0 + 50_000.0 * (i % 97) as f64 / 97.0, _ => 100_000.0 + 5_000.0 * normal() }).collect();
+    let fit = sf_core::analysis::cell_cycle(&dna, sf_core::analysis::CycleModel::DeanJettFox, &Default::default()).unwrap();
+    app.ana.cycle_channel = "FSC-A".into();
+    app.ana.cycle = Some(("t".into(), fit));
+    let msg = app.ana_make_gates(Kind::Cycle).unwrap();
+    assert!(msg.starts_with("Made 3 gate(s)"), "{msg}");
+    for i in 0..n {
+        assert!(["G0/G1", "S", "G2/M"].iter().all(|name| app.session.tree(i).find(&[name]).is_some()), "sample {i}");
+    }
+    let b = app.ana.cycle.as_ref().unwrap().1.boundaries;
+    let s_gate = app.session.gate_of(0, app.session.tree(0).find(&["S"]).unwrap()).unwrap();
+    assert!(matches!(s_gate.kind, GateKind::Interval) && s_gate.xs == vec![b[1], b[2]]);
+    assert!(app.ana_make_gates(Kind::Cycle).unwrap().starts_with("Updated 3"));
+    assert!(app.ana_make_gates(Kind::Prolif).is_err());
+    app.module = Module::CellCycle;
+    settle(&mut app, &ctx);
+}

@@ -187,6 +187,207 @@ impl App {
         }
     }
 
+    /// The population the analysis runs on, in sample `si` (`None` when that sample has no such population).
+    fn ana_node(&self, si: usize) -> Option<sf_gating::NodeId> {
+        if self.ana.restrict.is_empty() {
+            return Some(GateTree::ROOT);
+        }
+        let refs: Vec<&str> = self.ana.restrict.iter().map(|s| s.as_str()).collect();
+        self.session.tree(si).find(&refs)
+    }
+
+    /// The names of the gates an analysis makes, in the order they are shown.
+    pub fn ana_gate_names(kind: Kind) -> &'static [&'static str] {
+        match kind {
+            Kind::Apoptosis => &["Live", "Early apoptotic", "Late apoptotic", "Necrotic"],
+            Kind::Cycle => &["G0/G1", "S", "G2/M"],
+            Kind::Prolif => &[],
+        }
+    }
+
+    /// Turn the last result into ORDINARY gates under the analysed population and give them to All Samples: a
+    /// quadrant gate at the two thresholds (apoptosis) or three interval gates at the phase boundaries (cell
+    /// cycle). From then on they are gates like any other: dragged on the plot, compared across samples, counted
+    /// in Statistics, exported. Running again moves the existing gates instead of adding new ones.
+    pub fn ana_make_gates(&mut self, kind: Kind) -> Result<String, String> {
+        use crate::density::PlotKind;
+        use crate::drawing::{Shape as Drawn, Tool};
+        use sf_core::scale::ScaleSpec;
+        let si = self.ana.sample;
+        let node = self.ana_node(si).ok_or("the chosen population does not exist in this sample")?;
+        let id = self.session.open_population(si, node)?;
+        let existing = |app: &Self, name: &str| app.session.tree(si).children(node).ok().and_then(|c| c.iter().copied().find(|&k| app.session.tree(si).name(k).ok() == Some(name)));
+        let mut made: Vec<sf_gating::NodeId> = Vec::new();
+        let updated;
+        match kind {
+            Kind::Apoptosis => {
+                let (ta, tp) = self.ana.apop.as_ref().map(|(_, r, _)| (r.annexin_threshold, r.pi_threshold)).ok_or("Run the analysis first")?;
+                let scale = if self.ana.cofactor > 0.0 { ScaleSpec::Arcsinh { cofactor: self.ana.cofactor } } else { ScaleSpec::Identity };
+                let t = scale.build()?;
+                let (cx, cy) = (t.forward(ta), t.forward(tp));
+                let (xc, yc) = (self.ana.annexin_channel.clone(), self.ana.pi_channel.clone());
+                {
+                    let w = self.session.window_mut(id).ok_or("no window")?;
+                    (w.x_chan, w.y_chan, w.x_scale, w.y_scale, w.kind, w.tool) = (xc, yc, scale.clone(), scale, PlotKind::Pseudocolor, Tool::Pointer);
+                    w.drawing.cancel();
+                }
+                match existing(self, "Live") {
+                    Some(live) if !self.session.quadrant_set(si, live).is_empty() => {
+                        self.session.move_quadrants(si, live, cx, cy)?;
+                        made = self.session.quadrant_set(si, live);
+                        updated = true;
+                    }
+                    Some(_) => return Err("A population called 'Live' already exists here and is not a quadrant gate; rename or delete it first".into()),
+                    None => {
+                        // the quadrant tool's order: x+y+, x-y+, x-y-, x+y-
+                        let ids = self.session.commit_quadrants(id, cx, cy)?;
+                        for (n, name) in ids.iter().zip(["Late apoptotic", "Necrotic", "Live", "Early apoptotic"]) {
+                            self.session.rename(si, *n, name)?;
+                        }
+                        made = ids;
+                        updated = false;
+                    }
+                }
+            }
+            Kind::Cycle => {
+                let b = self.ana.cycle.as_ref().map(|(_, r)| r.boundaries).ok_or("Run the analysis first")?;
+                let ch = self.ana.cycle_channel.clone();
+                {
+                    let w = self.session.window_mut(id).ok_or("no window")?;
+                    (w.x_chan, w.x_scale, w.kind, w.tool) = (ch.clone(), ScaleSpec::Identity, PlotKind::Histogram, Tool::Pointer);
+                    w.drawing.cancel();
+                }
+                let mut any_old = false;
+                for (name, lo, hi) in [("G0/G1", b[0], b[1]), ("S", b[1], b[2]), ("G2/M", b[2], b[3])] {
+                    if !(hi > lo) {
+                        return Err(format!("the fit gave no room for {name}; the phase boundaries are {b:?}"));
+                    }
+                    match existing(self, name) {
+                        Some(k) => {
+                            let mut g = self.session.gate_of(si, k).filter(|g| matches!(g.kind, sf_gating::GateKind::Interval) && g.x_chan == ch).ok_or_else(|| format!("A population called '{name}' already exists here and is not an interval on {ch}; rename or delete it first"))?;
+                            g.xs = vec![lo, hi];
+                            self.session.edit_gate(si, k, g)?;
+                            made.push(k);
+                            any_old = true;
+                        }
+                        None => made.push(self.session.commit_shape(id, &Drawn::Interval { x0: lo, x1: hi }, name)?),
+                    }
+                }
+                updated = any_old;
+            }
+            Kind::Prolif => return Err("Generation gates are not made yet".into()),
+        }
+        // every sample gets the same gates (a sample without the parent population is named in the Analysis Log)
+        for &n in &made {
+            let _ = self.session.apply_to_group(si, n, crate::session::ALL_SAMPLES);
+        }
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.refit = true;
+        }
+        let n = self.session.samples().len();
+        Ok(format!("{} {} gate(s) on {n} sample(s): {}. They are ordinary gates now: drag them on the plot (Workstation), or compare the samples in the table.", if updated { "Updated" } else { "Made" }, made.len(), Self::ana_gate_names(kind).join(", ")))
+    }
+
+    /// Percent of the analysed population inside each of the analysis' gates, for every sample (`None` where a
+    /// sample lacks the population or the gate).
+    pub fn ana_gate_table(&mut self, kind: Kind) -> Vec<(usize, Vec<Option<f64>>)> {
+        let names = Self::ana_gate_names(kind);
+        (0..self.session.samples().len())
+            .map(|i| {
+                let Some(parent) = self.ana_node(i) else { return (i, vec![None; names.len()]) };
+                let total = self.session.count(i, parent).max(1) as f64;
+                let row = names
+                    .iter()
+                    .map(|name| {
+                        let k = self.session.tree(i).children(parent).ok()?.iter().copied().find(|&k| self.session.tree(i).name(k).ok() == Some(*name))?;
+                        Some(100.0 * self.session.count(i, k) as f64 / total)
+                    })
+                    .collect();
+                (i, row)
+            })
+            .collect()
+    }
+
+    /// Under a result: make the gates, and the table of every sample read from those gates.
+    fn ana_gates_ui(&mut self, ui: &mut egui::Ui, kind: Kind) {
+        ui.add_space(10.0);
+        ui.separator();
+        theme::section(ui, "Gates on all samples");
+        theme::caption(ui, match kind {
+            Kind::Apoptosis => "Puts a quadrant gate at the two thresholds on every sample. It is an ordinary gate: open a sample and drag the crosshair, and the numbers below follow.",
+            _ => "Puts three interval gates at the phase boundaries on every sample. They are ordinary gates: open a sample and drag their edges, and the numbers below follow. A gate counts the events between its edges; the fitted percentages above also split the overlap between phases, so the two can differ.",
+        });
+        let table = self.ana_gate_table(kind);
+        let have = table.iter().any(|(_, r)| r.iter().any(|v| v.is_some()));
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(RichText::new(if have { "Update the gates from this result" } else { "Make gates on all samples" }).strong()).fill(theme::ACCENT_DIM)).clicked() {
+                self.status = match self.ana_make_gates(kind) {
+                    Ok(m) => m,
+                    Err(e) => format!("Could not make the gates: {e}"),
+                };
+            }
+            ui.checkbox(&mut self.session.all_synced, "Moving a gate moves it in every sample").on_hover_text("The All Samples group's synchronisation. Off: a gate you move changes in that sample only and is marked edited.");
+        });
+        if !have {
+            return;
+        }
+        let names = Self::ana_gate_names(kind);
+        let mut open: Option<usize> = None;
+        egui::Grid::new(("ana_gate_table", kind as u8)).striped(true).spacing([16.0, 3.0]).show(ui, |ui| {
+            ui.label(RichText::new("Sample").size(11.0).color(theme::MUTED));
+            for n in names {
+                ui.label(RichText::new(format!("{n} %")).size(11.0).color(theme::MUTED));
+            }
+            ui.label("");
+            ui.end_row();
+            for (i, row) in &table {
+                ui.label(self.session.samples()[*i].name.trim_end_matches(".fcs"));
+                for v in row {
+                    ui.label(RichText::new(v.map_or("—".to_string(), |v| format!("{v:.1}"))).monospace());
+                }
+                if ui.small_button("Open").on_hover_text("Show this sample's plot with the gates, in the Workstation").clicked() {
+                    open = Some(*i);
+                }
+                ui.end_row();
+            }
+        });
+        if ui.button("Copy table").clicked() {
+            let mut t = format!("sample\t{}\n", names.join(" %\t") + " %");
+            for (i, row) in &table {
+                t += &format!("{}\t{}\n", self.session.samples()[*i].name, row.iter().map(|v| v.map_or(String::new(), |v| format!("{v:.2}"))).collect::<Vec<_>>().join("\t"));
+            }
+            ui.ctx().copy_text(t);
+        }
+        if let Some(i) = open {
+            self.status = match self.ana_open_gates(kind, i) {
+                Ok(()) => format!("{}: drag the gates on the plot; the analysis table follows.", self.session.samples()[i].name),
+                Err(e) => e,
+            };
+        }
+    }
+
+    /// Show sample `i` in the Workstation on the axes the analysis' gates were made on.
+    pub fn ana_open_gates(&mut self, kind: Kind, i: usize) -> Result<(), String> {
+        let parent = self.ana_node(i).ok_or("this sample does not have that population")?;
+        let first = Self::ana_gate_names(kind).first().copied().unwrap_or("");
+        let gate = self.session.tree(i).children(parent).ok().and_then(|c| c.iter().copied().find(|&k| self.session.tree(i).name(k).ok() == Some(first))).and_then(|k| self.session.gate_of(i, k)).ok_or("this sample does not have the gates yet")?;
+        let id = self.open_tab(i, parent)?;
+        if let Some(w) = self.session.window_mut(id) {
+            w.x_chan = gate.x_chan.clone();
+            w.x_scale = gate.x_scale.clone();
+            match &gate.y_chan {
+                Some(y) => (w.y_chan, w.y_scale, w.kind) = (y.clone(), gate.y_scale.clone(), crate::density::PlotKind::Pseudocolor),
+                None => w.kind = crate::density::PlotKind::Histogram,
+            }
+            w.tool = crate::drawing::Tool::Pointer;
+        }
+        if let Some(g) = self.ws.graphs.get_mut(&id) {
+            g.refit = true;
+        }
+        self.module = super::Module::Workstation;
+        Ok(())
+    }
+
     /// Left panel shared by the three screens: sample, population, channels, options, run button.
     fn ana_panel(&mut self, ui: &mut egui::Ui, kind: Kind) {
         let n = self.session.samples().len();
@@ -324,6 +525,7 @@ impl App {
                 let t = format!("sample\t{label}\nG0/G1 %\t{:.2}\nS %\t{:.2}\nG2/M %\t{:.2}\nCV G0/G1 %\t{:.2}\nCV G2/M %\t{:.2}\nR2\t{:.4}\nevents\t{}\n", r.g1_pct, r.s_pct, r.g2_pct, r.cv_g1, r.cv_g2, r.r2, r.n);
                 ui.ctx().copy_text(t);
             }
+            app.ana_gates_ui(ui, Kind::Cycle);
         });
     }
 
@@ -433,6 +635,7 @@ impl App {
                 let t = format!("sample\t{label}\nlive %\t{:.2}\nearly apoptotic %\t{:.2}\nlate apoptotic %\t{:.2}\nnecrotic %\t{:.2}\nannexin threshold\t{:.4}\nviability threshold\t{:.4}\nevents\t{}\n", q.live, q.early, q.late, q.necrotic, r.annexin_threshold, r.pi_threshold, r.n);
                 ui.ctx().copy_text(t);
             }
+            app.ana_gates_ui(ui, Kind::Apoptosis);
         });
     }
 }
