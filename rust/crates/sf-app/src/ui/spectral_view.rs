@@ -77,7 +77,7 @@ impl App {
         let mut lines = Vec::new();
         let mut done = Vec::new();
         for &i in samples {
-            match unmix_sample(&mut self.session, i, &model, method, self.spec.use_af && model.af_library.is_some()) {
+            match unmix_sample(&mut self.session, i, &model, method, self.spec.use_af && model.af_possible()) {
                 Ok(r) => {
                     done.push(i);
                     lines.push(format!("{}: {} events, median residual {:.1}{}", r.sample, r.n_events, r.median_residual, if r.used_af { ", per-cell autofluorescence" } else { "" }))
@@ -199,8 +199,12 @@ impl App {
                         Method::Wls => "Down-weights bright detectors, whose noise is larger (the usual choice).",
                         Method::Nnls => "Weighted, and no fluorochrome can come out below zero. Slower on large files.",
                     });
-                    let has_lib = self.spec.model.as_ref().map_or(false, |m| m.af_library.is_some());
-                    ui.add_enabled(has_lib, egui::Checkbox::new(&mut self.spec.use_af, "Per-cell autofluorescence"));
+                    theme::caption(ui, "The method changes the unmixed values of the samples (see Last unmixing and the Unmix- channels), not the signature charts on the right: those describe the controls.");
+                    let (has_lib, af_ok, f, d) = self.spec.model.as_ref().map_or((false, false, 0, 0), |m| (m.af_library.is_some(), m.af_possible(), m.f(), m.d()));
+                    ui.add_enabled(af_ok, egui::Checkbox::new(&mut self.spec.use_af, "Per-cell autofluorescence"));
+                    if has_lib && !af_ok {
+                        ui.label(RichText::new(format!("Not available here: autofluorescence is one more unknown per cell, and {f} fluorochromes already use all {d} detectors. The unstained tube is still subtracted from every signature.")).size(11.0).color(theme::WARN));
+                    }
                     ui.horizontal(|ui| {
                         if ui.small_button("All").clicked() {
                             self.spec.unmix_sel.iter_mut().for_each(|s| *s = true);

@@ -87,6 +87,12 @@ impl SpectralModel {
     pub fn f(&self) -> usize {
         self.fluors.len()
     }
+    /// Whether per-cell autofluorescence can be solved: it is one more unknown per event, so there must be more
+    /// detectors than fluorochromes. With as many fluorochromes as detectors the system has no unique answer.
+    pub fn af_possible(&self) -> bool {
+        self.af_library.is_some() && self.f() < self.d()
+    }
+
     pub fn d(&self) -> usize {
         self.detectors.len()
     }
@@ -174,6 +180,12 @@ pub fn unmix_sample(session: &mut Session, sample: usize, model: &SpectralModel,
         let range = model.detectors.iter().map(|x| s.range_of(x)).fold(0.0, f64::max);
         (ev, s.n_events, s.name.clone(), range)
     };
+    if f > d {
+        return Err(format!("{f} fluorochromes cannot be separated with {d} detectors: remove {} control(s) or add detectors", f - d));
+    }
+    if use_af && model.af_library.is_some() && !model.af_possible() {
+        return Err(format!("per-cell autofluorescence is one more unknown per event, and {f} fluorochromes already use all {d} detectors; turn it off (the unstained tube is still subtracted from every signature)"));
+    }
     let af = if use_af { model.af_library.as_ref() } else { None };
     let (ab, width, resid): (Vec<f64>, usize, Vec<f64>) = match af {
         Some((lib, counts)) => {
@@ -291,6 +303,58 @@ mod tests {
         let (lib, counts) = m.af_library.as_ref().unwrap();
         assert_eq!(lib.len(), 2 * D);
         assert_eq!(counts.iter().sum::<usize>(), 3000);
+    }
+
+    #[test]
+    fn as_many_fluorochromes_as_detectors_unmixes_without_per_cell_autofluorescence_and_says_why() {
+        // a conventional cytometer: 4 fluorochromes on exactly 4 detectors
+        const D4: usize = 4;
+        let det: Vec<String> = (0..D4).map(|j| format!("D{j}-A")).collect();
+        let refs_n: Vec<&str> = det.iter().map(|s| s.as_str()).collect();
+        let spec4 = |a: usize, j: usize| if a == j { 1.0 } else { 0.12 / (1.0 + (a as f64 - j as f64).abs()) };
+        let mk = |name: &str, seed: u64, ab: &dyn Fn(usize) -> [f64; 4]| {
+            let mut rng = Rng::new(seed);
+            let n = 3000;
+            let mut ev = Vec::with_capacity(n * D4);
+            for k in 0..n {
+                let a = ab(k);
+                for j in 0..D4 {
+                    let v: f64 = (0..4).map(|f| a[f] * spec4(f, j)).sum::<f64>() + 40.0 + 20.0 * (rng.next_f64() - 0.5);
+                    ev.push(v as f32);
+                }
+            }
+            LoadedSample::synthetic(name, &refs_n, vec![262_144.0; D4], ev)
+        };
+        let mut s = Session::new();
+        let mut refs = Vec::new();
+        for (f, nm) in ["A", "B", "C", "E"].iter().enumerate() {
+            let i = s.add_sample(mk(&format!("{nm} alone.fcs"), 10 + f as u64, &move |k| {
+                let mut a = [0.0; 4];
+                if k % 2 == 0 {
+                    a[f] = 5000.0;
+                }
+                a
+            }));
+            refs.push(Reference { sample: i, label: nm.to_string() });
+        }
+        let un = s.add_sample(mk("unstained.fcs", 50, &|_| [0.0; 4]));
+        let mixed = s.add_sample(mk("mix.fcs", 60, &|k| [if k % 4 == 0 { 3000.0 } else { 0.0 }, 0.0, if k % 4 == 1 { 2000.0 } else { 0.0 }, 0.0]));
+        let m = build_model(&s, &refs, Some(un), &det, 2, 1).unwrap();
+        assert_eq!((m.f(), m.d()), (4, 4));
+        assert!(!m.af_possible(), "one more unknown than there are detectors");
+        // asked for anyway: a clear reason, not a singular-matrix message
+        let e = unmix_sample(&mut s, mixed, &m, Method::Wls, true).unwrap_err();
+        assert!(e.contains("per-cell autofluorescence") && e.contains("4 detectors"), "{e}");
+        // every method works without it and recovers what was put in
+        for method in [Method::Wls, Method::Ols, Method::Nnls] {
+            let r = unmix_sample(&mut s, mixed, &m, method, false).unwrap();
+            assert!(!r.used_af);
+            let smp = s.sample(mixed);
+            let (c, d) = (smp.channel_index("Unmix-A").unwrap(), smp.channels.len());
+            let a: Vec<f64> = (0..smp.n_events).filter(|k| k % 4 == 0).map(|r| smp.events[r * d + c] as f64).collect();
+            let med = stats::median(&a);
+            assert!((med - 3000.0).abs() < 150.0, "{method:?}: median of A where 3000 was put in = {med}");
+        }
     }
 
     #[test]
