@@ -223,6 +223,19 @@ pub fn attach_map(session: &mut Session, emb: &Embedding) -> Result<MapAttached,
     if done == 0 {
         return Err("none of the pooled samples is loaded any more".into());
     }
+    let r = &input.request;
+    session.map_info = Some(format!(
+        "{} of {n} events pooled from {done} sample(s) ({} per sample{}), on {} ({}), seed {}",
+        r.method.label(),
+        r.per_sample,
+        if r.restrict.is_empty() { String::new() } else { format!(", within {}", r.restrict.join(" > ")) },
+        r.features.join(", "),
+        match r.transform {
+            FeatureTransform::None => "no transform".to_string(),
+            FeatureTransform::Arcsinh(c) => format!("arcsinh, cofactor {c}"),
+        },
+        r.seed
+    ));
     Ok(MapAttached { samples: done, events: n, first })
 }
 

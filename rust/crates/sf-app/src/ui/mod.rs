@@ -518,6 +518,9 @@ impl App {
         if !marked.is_empty() {
             out += &format!("Markers: {}.\n", marked.join(", "));
         }
+        if let Some(m) = &s.map_info {
+            out += &format!("Map (channels Map-1 / Map-2, population '{}'): {m}.\n", crate::embed::MAP_POPULATION);
+        }
         // the gating hierarchy: every distinct population path, with the gate that defines it (first sample that has it)
         let mut seen: Vec<Vec<String>> = Vec::new();
         let mut lines: Vec<String> = Vec::new();

@@ -97,6 +97,8 @@ pub struct Session {
     fmo: BTreeMap<String, Fmo>,
     /// Marker names typed by the user, by channel (`BV711-A` -> `CD45`). An empty name hides the file's own label.
     markers: BTreeMap<String, String>,
+    /// How the pooled map attached to the samples (`Map-1` / `Map-2`) was made, in words, for the methods text.
+    pub map_info: Option<String>,
     /// Sample groups (besides the built-in All Samples) and the gates they own.
     pub groups: Vec<Group>,
     pub applied: Vec<Applied>,
@@ -114,7 +116,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), markers: BTreeMap::new(), groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
+        Session { samples: vec![], states: vec![], windows: vec![], next_window: 1, selected: None, log: vec![], fmo: BTreeMap::new(), markers: BTreeMap::new(), map_info: None, groups: vec![], applied: vec![], draw_target: DrawTarget::default(), all_synced: false }
     }
 
     pub fn samples(&self) -> &[LoadedSample] {
@@ -922,11 +924,20 @@ impl Session {
         for (ch, f) in &self.fmo {
             fmo = fmo.with(ch, Json::obj().with("level", Json::num(f.level)).with("source", Json::Str(f.source.clone())).with("n", Json::num(f.n as f64)).with("percentile", Json::num(f.percentile)));
         }
+        // the pooled map: each sample's pooled events and their positions, so map gates reopen exactly
+        let mut maps = Json::obj();
+        for s in &self.samples {
+            let (Some(cx), Some(cy)) = (s.channel_index("Map-1"), s.channel_index("Map-2")) else { continue };
+            let d = s.channels.len();
+            let rows: Vec<usize> = (0..s.n_events).filter(|&r| s.events[r * d + cx].is_finite() && s.events[r * d + cy].is_finite()).collect();
+            let col = |c: usize| Json::Arr(rows.iter().map(|&r| Json::num(s.events[r * d + c] as f64)).collect());
+            maps = maps.with(&s.name, Json::obj().with("rows", Json::Arr(rows.iter().map(|&r| Json::num(r as f64)).collect())).with("x", col(cx)).with("y", col(cy)).with("range", Json::num(s.ranges[cx])));
+        }
         let mut markers = Json::obj();
         for (ch, m) in &self.markers {
             markers = markers.with(ch, Json::Str(m.clone()));
         }
-        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("markers", markers).with("groups", self.groups_to_json())
+        Json::obj().with("format", Json::Str("streamflow-rust-1".into())).with("samples", Json::Arr(samples)).with("gates", workspace_to_json(&gates)).with("compensation", comp).with("fmo", fmo).with("markers", markers).with("maps", maps).with("map_info", self.map_info.clone().map_or(Json::Null, Json::Str)).with("groups", self.groups_to_json())
     }
 
     /// Replace the gating trees of the currently loaded samples with those in a saved workspace (matched by
@@ -947,6 +958,32 @@ impl Session {
                         }
                     }
                     _ => notes.push(format!("{name}: the saved compensation matrix is malformed and was ignored")),
+                }
+            }
+        }
+        // the pooled map goes back on first, so the gates drawn on Map-1 / Map-2 find their channels
+        self.map_info = doc.get("map_info").and_then(Json::as_str).map(str::to_string);
+        for i in 0..self.samples.len() {
+            self.samples[i].clear_map();
+        }
+        if let Some(Json::Obj(maps)) = doc.get("maps") {
+            for (name, m) in maps {
+                let Some(i) = self.samples.iter().position(|s| &s.name == name) else { continue };
+                let nums = |k: &str| -> Vec<f64> { m.get(k).and_then(Json::as_arr).map(|a| a.iter().filter_map(Json::as_f64).collect()).unwrap_or_default() };
+                let (rows, x, y) = (nums("rows"), nums("x"), nums("y"));
+                let ne = self.samples[i].n_events;
+                if rows.len() != x.len() || rows.len() != y.len() || rows.iter().any(|&r| r < 0.0 || r as usize >= ne) {
+                    notes.push(format!("{name}: the saved map does not fit this file and was ignored; gates on Map-1 / Map-2 will be empty"));
+                    continue;
+                }
+                let (mut cx, mut cy) = (vec![f32::NAN; ne], vec![f32::NAN; ne]);
+                for (k, &r) in rows.iter().enumerate() {
+                    cx[r as usize] = x[k] as f32;
+                    cy[r as usize] = y[k] as f32;
+                }
+                let range = m.get("range").and_then(Json::as_f64).unwrap_or(1.0);
+                if let Err(e) = self.set_map(i, cx, cy, range) {
+                    notes.push(format!("{name}: could not restore the saved map: {e}"));
                 }
             }
         }

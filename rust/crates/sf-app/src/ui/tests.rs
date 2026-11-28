@@ -2648,3 +2648,45 @@ fn what_is_this_population_names_it_from_the_markers_that_set_it_apart() {
     app.describe_population(0, GateTree::ROOT);
     assert!(app.dlg.describe.is_none() && app.status.contains("Cannot describe"), "{}", app.status);
 }
+
+#[test]
+fn a_map_and_the_gates_drawn_on_it_survive_saving_and_reopening_the_workspace() {
+    let ctx = egui::Context::default();
+    let mut app = marker_app();
+    app.set_module(Module::DimReduction);
+    settle(&mut app, &ctx);
+    app.disc.per_sample = 400;
+    app.disc_run_embedding();
+    wait_for(&mut app, &ctx, "the embedding", |a| a.disc.emb.is_some());
+    app.disc_open_map();
+    let Tab::Graph(w) = app.ws.tab else { panic!() };
+    settle(&mut app, &ctx);
+    let r = app.ws.graphs[&w].range.unwrap();
+    let gate = app.session.commit_shape(w, &Shape::Rect { x0: r.x0, x1: (r.x0 + r.x1) / 2.0, y0: r.y0, y1: r.y1 }, "Left half").unwrap();
+    let counts: Vec<usize> = (0..2).map(|i| app.session.tree(i).find(&[embed::MAP_POPULATION, "Left half"]).map_or(0, |n| app.session.count(i, n))).collect();
+    assert!(counts[0] > 0 && counts[0] == app.session.count(0, gate) && counts[1] > 0, "{counts:?}");
+    assert!(app.session.map_info.as_ref().unwrap().contains("800 events pooled from 2 sample(s)"), "{:?}", app.session.map_info);
+
+    // the saved text round-trips through the file format, into a session that only has the FCS files
+    let text = app.session.to_workspace_json().write();
+    let doc = sf_core::json::Json::parse(&text).unwrap();
+    let mut other = marker_app();
+    assert!(!other.session.sample(0).has_map());
+    let warnings = other.session.apply_workspace_json(&doc).unwrap();
+    assert!(warnings.iter().all(|w| !w.contains("map")), "{warnings:?}");
+    for i in 0..2 {
+        assert!(other.session.sample(i).has_map(), "sample {i} has its map back");
+        let pooled = other.session.tree(i).find(&[embed::MAP_POPULATION]).unwrap();
+        assert_eq!(other.session.count(i, pooled), 400);
+        let left = other.session.tree(i).find(&[embed::MAP_POPULATION, "Left half"]).unwrap();
+        assert_eq!(other.session.count(i, left), counts[i], "sample {i}: the map gate holds the same events as before saving");
+    }
+    assert_eq!(other.session.map_info, app.session.map_info);
+    assert!(other.methods_text().contains("Map (channels Map-1 / Map-2"));
+
+    // a saved map that does not fit the file is refused with a reason, not applied blindly
+    let bad = text.replacen("\"rows\":[", "\"rows\":[999999,", 1);
+    let mut third = marker_app();
+    let w3 = third.session.apply_workspace_json(&sf_core::json::Json::parse(&bad).unwrap()).unwrap();
+    assert!(w3.iter().any(|w| w.contains("saved map does not fit")), "{w3:?}");
+}
