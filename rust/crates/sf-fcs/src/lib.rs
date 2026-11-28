@@ -115,6 +115,11 @@ impl Fcs {
         let n_events = kw_usize(&text, "$TOT").ok_or_else(|| FcsError::Format("missing $TOT".into()))?;
         let dtype = text.get("$DATATYPE").map(|s| s.trim().to_uppercase()).unwrap_or_default();
 
+        // $PAR and $TOT come from the file: check them against what the file can actually hold before
+        // sizing anything by them. Every parameter has at least one TEXT keyword of its own.
+        if n_params > text.len() {
+            return bad(format!("$PAR is {n_params} but TEXT holds only {} keywords", text.len()));
+        }
         let mut params = Vec::with_capacity(n_params);
         for i in 1..=n_params {
             let key = |s: &str| format!("$P{i}{s}");
@@ -137,7 +142,11 @@ impl Fcs {
             return bad(format!("bad DATA offsets {d0}..{d1} for a {}-byte file", b.len()));
         }
         let data = &b[d0..=d1];
-        let total = n_events * n_params;
+        // every value occupies at least one byte, so a count the segment cannot hold is a lie
+        let total = match n_events.checked_mul(n_params) {
+            Some(t) if t <= data.len() => t,
+            _ => return bad(format!("DATA segment holds {} bytes, too few for $TOT {n_events} x $PAR {n_params}", data.len())),
+        };
         let mut events = Vec::with_capacity(total);
 
         match dtype.as_str() {
@@ -251,6 +260,12 @@ mod tests {
 
     /// A minimal valid FCS 3.1 file in memory.
     fn make(dtype: &str, byteord: &str, bits: u32, range: u64, data: Vec<u8>, par: usize, tot: usize) -> Vec<u8> {
+        make_declaring(dtype, byteord, bits, range, data, par, par, tot)
+    }
+
+    /// Like `make`, but `$PAR` says `par_declared` while only `par` parameters are described.
+    #[allow(clippy::too_many_arguments)]
+    fn make_declaring(dtype: &str, byteord: &str, bits: u32, range: u64, data: Vec<u8>, par: usize, par_declared: usize, tot: usize) -> Vec<u8> {
         let d = b'/';
         let mut t: Vec<u8> = vec![d];
         let mut kv = |k: &str, v: &str| {
@@ -262,7 +277,7 @@ mod tests {
         kv("$BYTEORD", byteord);
         kv("$DATATYPE", dtype);
         kv("$MODE", "L");
-        kv("$PAR", &par.to_string());
+        kv("$PAR", &par_declared.to_string());
         kv("$TOT", &tot.to_string());
         for p in 1..=par {
             kv(&format!("$P{p}N"), &format!("CH{p}"));
@@ -326,6 +341,16 @@ mod tests {
         assert!(Fcs::parse(&f).is_err());
         let lying = make("F", "1,2,3,4", 32, 1024, vec![0u8; 4], 1, 5); // $TOT lies
         assert!(Fcs::parse(&lying).unwrap_err().to_string().contains("DATA"));
+    }
+
+    #[test]
+    fn absurd_counts_are_an_error_not_a_crash() {
+        let huge_tot = make("F", "1,2,3,4", 32, 1024, vec![0u8; 8], 1, usize::MAX / 2);
+        assert!(Fcs::parse(&huge_tot).unwrap_err().to_string().contains("DATA"));
+        let overflow = make("F", "1,2,3,4", 32, 1024, vec![0u8; 8], 2, usize::MAX);
+        assert!(Fcs::parse(&overflow).unwrap_err().to_string().contains("DATA"));
+        let huge_par = make_declaring("I", "1,2", 16, 1024, vec![0u8; 8], 1, usize::MAX / 4, 0);
+        assert!(Fcs::parse(&huge_par).unwrap_err().to_string().contains("$PAR"));
     }
 
     #[test]
